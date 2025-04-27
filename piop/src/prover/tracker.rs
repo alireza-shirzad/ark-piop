@@ -1,12 +1,12 @@
 use crate::{
     add_trace,
     arithmetic::{
-        LDE,
         ark_ff::PrimeField,
         f_vec_short_str,
-        mle::{
-            mat::MLE,
-            virt::{VPAuxInfo, VirtualPolynomial, build_eq_x_r},
+        mat_poly::{lde::LDE, mle::MLE},
+        virt_poly::{
+            VirtualPoly,
+            hp_interface::{HPVirtualPolynomial, VPAuxInfo, build_eq_x_r},
         },
     },
     errors::{DbSnError, DbSnResult},
@@ -36,7 +36,7 @@ use std::{
 };
 
 use super::structs::{
-    ProcessedProvingKey, ProverState, TrackedPoly, VirtualPoly,
+    ProcessedProvingKey, ProverState, TrackedPoly,
     proof::{PCSSubproof, Proof},
 };
 /// The Tracker is a data structure for creating and managing virtual
@@ -670,10 +670,10 @@ where
     }
 
     // TODO: Is this only used to be compatible with the hyperplonk code?
-    pub fn to_arithmatic_virtual_poly(&self, id: TrackerID) -> VirtualPolynomial<F> {
+    pub fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<F> {
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
-            return VirtualPolynomial::new_from_mle(poly, F::one());
+            return HPVirtualPolynomial::new_from_mle(poly, F::one());
         }
 
         let poly = self.state.virtual_polys.get(&id);
@@ -684,7 +684,7 @@ where
         let first_id = poly[0].1[0];
         let nv: usize = self.get_mat_mv_poly(first_id).unwrap().num_vars();
 
-        let mut arith_virt_poly: VirtualPolynomial<F> = VirtualPolynomial::new(nv);
+        let mut arith_virt_poly: HPVirtualPolynomial<F> = HPVirtualPolynomial::new(nv);
         for (prod_coef, prod) in poly.iter() {
             let prod_mle_list = prod
                 .iter()
@@ -867,7 +867,7 @@ where
             .get_id();
         self.get_virt_poly(sumcheck_aggr_id).unwrap();
         // Generate a sumcheck proof
-        let sc_avp = self.to_arithmatic_virtual_poly(sumcheck_aggr_id);
+        let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id);
         let sc_aux_info = sc_avp.aux_info.clone();
         let sc_proof = SumCheck::prove(&sc_avp, &mut self.state.transcript)?;
         let _ = self.add_mv_eval_claim(sumcheck_aggr_id, &sc_proof.point);

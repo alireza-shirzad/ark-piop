@@ -1,8 +1,9 @@
 use crate::{
     add_trace,
     arithmetic::{
-        LDE, ark_ff,
-        mle::{mat::MLE, virt::eq_eval},
+        ark_ff,
+        mat_poly::{lde::LDE, mle::MLE},
+        virt_poly::hp_interface::eq_eval,
     },
     errors::{DbSnError, DbSnResult},
     pcs::{PCS, PolynomialCommitment},
@@ -106,13 +107,13 @@ where
             match comm_opt {
                 Some(value) => {
                     comm = value.clone();
-                },
+                }
                 None => {
                     panic!(
                         "VerifierTracker Error: attempted to transfer prover comm, but id not found: {}",
                         id
                     );
-                },
+                }
             }
         }
         new_id = self.track_mat_mv_com(comm).unwrap();
@@ -139,13 +140,13 @@ where
             match comm_opt {
                 Some(value) => {
                     comm = value.clone();
-                },
+                }
                 None => {
                     panic!(
                         "VerifierTracker Error: attempted to transfer prover comm, but id not found: {}",
                         id
                     );
-                },
+                }
             }
         }
         new_id = self.track_mat_uv_com(comm).unwrap();
@@ -179,7 +180,7 @@ where
                         Ok(query_res)
                     })),
                 );
-            },
+            }
             None => {
                 self.state.virtual_oracles.insert(
                     id,
@@ -187,7 +188,7 @@ where
                         panic!("Should not be called");
                     })),
                 );
-            },
+            }
         }
 
         self.state
@@ -217,7 +218,7 @@ where
                         Ok(*query_res)
                     })),
                 );
-            },
+            }
             None => {
                 self.state.virtual_oracles.insert(
                     id,
@@ -225,7 +226,7 @@ where
                         panic!("Should not be called");
                     })),
                 );
-            },
+            }
         }
 
         self.state
@@ -261,14 +262,14 @@ where
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
                 }))
-            },
+            }
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
                 Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
                     Ok(o1_cloned(point)? + o2_cloned(point)?)
                 })))
-            },
+            }
             _ => panic!("Mismatched oracle types"),
         };
         // Insert the new virtual oracle into the state
@@ -291,14 +292,14 @@ where
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
                 }))
-            },
+            }
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
                 Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
                     Ok(o1_cloned(point)? - o2_cloned(point)?)
                 })))
-            },
+            }
             _ => panic!("Mismatched oracle types"),
         };
         // Insert the new virtual oracle into the state
@@ -321,14 +322,14 @@ where
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? * o2_cloned(point.clone())?)
                 }))
-            },
+            }
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
                 Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
                     Ok(o1_cloned(point)? * o2_cloned(point)?)
                 })))
-            },
+            }
             _ => panic!("Mismatched oracle types"),
         };
         // Insert the new virtual oracle into the state
@@ -351,13 +352,13 @@ where
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? + scalar)
                 }))
-            },
+            }
             Oracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
                 Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
                     Ok(o1_cloned(point)? + scalar)
                 })))
-            },
+            }
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
@@ -377,13 +378,13 @@ where
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? * scalar)
                 }))
-            },
+            }
             Oracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
                 Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
                     Ok(o1_cloned(point)? * scalar)
                 })))
-            },
+            }
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();

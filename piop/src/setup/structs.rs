@@ -1,4 +1,4 @@
-use crate::{arithmetic::mle::mat::MLE, pcs::PCS};
+use crate::{arithmetic::mat_poly::mle::MLE, pcs::PCS};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 use std::collections::BTreeMap;

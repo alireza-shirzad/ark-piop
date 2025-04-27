@@ -4,7 +4,7 @@ use derivative::Derivative;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 use crate::{
-    arithmetic::{LDE, mle::mat::MLE},
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::DbSnResult,
     pcs::PCS,
     structs::TrackerID,
@@ -66,7 +66,9 @@ where
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrackedOracle").field("id", &self.id).finish()
+        f.debug_struct("TrackedOracle")
+            .field("id", &self.id)
+            .finish()
     }
 }
 
@@ -103,41 +105,30 @@ where
     }
 
     pub fn add_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(&other);
-        let res_id = self
-            .tracker
-            .borrow_mut()
-            .add_oracles(self.id.clone(), other.id.clone());
+        self.assert_same_tracker(other);
+        let res_id = self.tracker.borrow_mut().add_oracles(self.id, other.id);
         TrackedOracle::new(res_id, self.tracker.clone())
     }
 
     pub fn sub_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(&other);
-        let res_id = self
-            .tracker
-            .borrow_mut()
-            .sub_oracles(self.id.clone(), other.id.clone());
+        self.assert_same_tracker(other);
+        let res_id = self.tracker.borrow_mut().sub_oracles(self.id, other.id);
         TrackedOracle::new(res_id, self.tracker.clone())
     }
 
     pub fn mul_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(&other);
-        let res_id = self
-            .tracker
-            .borrow_mut()
-            .mul_oracles(self.id.clone(), other.id.clone());
+        self.assert_same_tracker(other);
+        let res_id = self.tracker.borrow_mut().mul_oracles(self.id, other.id);
         TrackedOracle::new(res_id, self.tracker.clone())
     }
 
     pub fn add_scalar(&self, c: F) -> TrackedOracle<F, MvPCS, UvPCS> {
-        let res_id = self.tracker.borrow_mut().add_scalar(self.id.clone(), c);
+        let res_id = self.tracker.borrow_mut().add_scalar(self.id, c);
         TrackedOracle::new(res_id, self.tracker.clone())
     }
 
     pub fn mul_scalar(&self, c: F) -> TrackedOracle<F, MvPCS, UvPCS> {
-        let res_id = self.tracker.borrow_mut().mul_scalar(self.id.clone(), c);
+        let res_id = self.tracker.borrow_mut().mul_scalar(self.id, c);
         TrackedOracle::new(res_id, self.tracker.clone())
     }
-
-
 }

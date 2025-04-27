@@ -6,12 +6,9 @@
 use crate::{
     arithmetic::{
         ark_poly::Polynomial,
-        f_mat_short_str, f_short_str, f_vec_short_str,
-        mle::{
-            get_batched_nv,
-            mat::MLE,
-            virt::{VPAuxInfo, VirtualPolynomial, build_eq_x_r_vec},
-        },
+        f_mat_short_str, f_vec_short_str,
+        mat_poly::mle::MLE,
+        virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo, build_eq_x_r_vec},
     },
     pcs::{PCSError, pst13::util::eq_eval, structs::Commitment},
     piop::{structs::SumcheckProof, sum_check::SumCheck},
@@ -128,7 +125,7 @@ where
 
     // built the virtual polynomial for SumCheck
 
-    let mut sum_check_vp = VirtualPolynomial::new(num_var);
+    let mut sum_check_vp = HPVirtualPolynomial::new(num_var);
     for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
         sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
     }
@@ -140,7 +137,7 @@ where
             return Err(PCSError::InvalidProver(
                 "Sumcheck in batch proving Failed".to_string(),
             ));
-        },
+        }
     };
 
     // a2 := sumcheck's point
@@ -227,7 +224,7 @@ where
             return Err(PCSError::InvalidProver(
                 "Sumcheck in batch verification failed".to_string(),
             ));
-        },
+        }
     };
     let tilde_g_eval = subclaim.expected_evaluation;
 

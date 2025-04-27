@@ -1,5 +1,4 @@
 /////// Imports /////////
-use std::string::String;
 
 use thiserror::Error;
 
@@ -63,4 +62,3 @@ pub enum InputShapeError {
     #[error("Expected an input number of variables of {expected} but got {actual}")]
     InputNumberOfVariablesMismatch { expected: usize, actual: usize },
 }
-

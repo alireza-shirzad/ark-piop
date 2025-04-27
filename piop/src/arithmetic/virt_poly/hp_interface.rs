@@ -1,32 +1,20 @@
-// Copyright (c) 2023 Espresso Systems (espressosys.com)
-// This file is part of the HyperPlonk library.
-
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
-//! This module defines our main mathematical object `VirtualPolynomial`; and
-//! various functions associated with it.
+//! This module is copied from the [hyperplonk](https://github.com/EspressoSystems/hyperplonk/tree/main) library.
 
 use ark_ff::PrimeField;
-use ark_poly::{MultilinearExtension, Polynomial};
+use ark_poly::Polynomial;
 use ark_serialize::CanonicalSerialize;
-use ark_std::{
-    end_timer,
-    rand::{Rng, RngCore},
-    start_timer,
-};
 
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::Add, sync::Arc};
 
-use crate::arithmetic::{errors::ArithErrors, mle::mat::random_mle_list};
-
-use super::mat::{random_zero_mle_list, MLE};
+use crate::arithmetic::{errors::ArithErrors, mat_poly::mle::MLE};
 
 #[rustfmt::skip]
 /// A virtual polynomial is a sum of products of multilinear polynomials;
 /// where the multilinear polynomials are stored via their multilinear
 /// extensions:  `(coefficient, MLE)`
+/// 
+/// TODO: The only reason we have the hyperplonk virtual polynomial is to be compatible with the sumcheck. we need to merge this virtual polynomial to our virtual polynomial.
 ///
 /// * Number of products n = `polynomial.products.len()`,
 /// * Number of multiplicands of ith product m_i =
@@ -44,14 +32,14 @@ use super::mat::{random_zero_mle_list, MLE};
 /// - flattened_ml_extensions stores the multilinear extension representation of
 ///   f0, f1, f2, f3 and f4
 /// - products is 
-///     \[ 
-///         (c0, \[0, 1, 2\]), 
-///         (c1, \[3, 4\]) 
-///     \]
+///   \[ 
+///   (c0, \[0, 1, 2\]), 
+///   (c1, \[3, 4\]) 
+///   \]
 /// - raw_pointers_lookup_table maps fi to i
 ///
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct VirtualPolynomial<F: PrimeField> {
+pub struct HPVirtualPolynomial<F: PrimeField> {
     /// Aux information about the multilinear polynomial
     pub aux_info: VPAuxInfo<F>,
     /// list of reference to products (as usize) of multilinear extension
@@ -75,9 +63,9 @@ pub struct VPAuxInfo<F: PrimeField> {
     pub phantom: PhantomData<F>,
 }
 
-impl<F: PrimeField> Add for &VirtualPolynomial<F> {
-    type Output = VirtualPolynomial<F>;
-    fn add(self, other: &VirtualPolynomial<F>) -> Self::Output {
+impl<F: PrimeField> Add for &HPVirtualPolynomial<F> {
+    type Output = HPVirtualPolynomial<F>;
+    fn add(self, other: &HPVirtualPolynomial<F>) -> Self::Output {
         let mut res = self.clone();
         for products in other.products.iter() {
             let cur: Vec<Arc<MLE<F>>> = products
@@ -94,14 +82,14 @@ impl<F: PrimeField> Add for &VirtualPolynomial<F> {
 }
 
 // TODO: convert this into a trait
-impl<F: PrimeField> VirtualPolynomial<F> {
+impl<F: PrimeField> HPVirtualPolynomial<F> {
     /// Creates an empty virtual polynomial with `num_variables`.
     pub fn new(num_variables: usize) -> Self {
-        VirtualPolynomial {
+        HPVirtualPolynomial {
             aux_info: VPAuxInfo {
                 max_degree: 0,
                 num_variables,
-                phantom: PhantomData::default(),
+                phantom: PhantomData,
             },
             products: Vec::new(),
             flattened_ml_extensions: Vec::new(),
@@ -115,12 +103,12 @@ impl<F: PrimeField> VirtualPolynomial<F> {
         let mut hm = HashMap::new();
         hm.insert(mle_ptr, 0);
 
-        VirtualPolynomial {
+        HPVirtualPolynomial {
             aux_info: VPAuxInfo {
                 // The max degree is the max degree of any individual variable
                 max_degree: 1,
                 num_variables: mle.num_vars(),
-                phantom: PhantomData::default(),
+                phantom: PhantomData,
             },
             // here `0` points to the first polynomial of `flattened_ml_extensions`
             products: vec![(coefficient, vec![0])],
@@ -135,7 +123,7 @@ impl<F: PrimeField> VirtualPolynomial<F> {
     ///
     /// The MLEs will be multiplied together, and then multiplied by the scalar
     /// `coefficient`.
-    pub fn add_mle_list(
+    pub(crate) fn add_mle_list(
         &mut self,
         mle_list: impl IntoIterator<Item = Arc<MLE<F>>>,
         coefficient: F,
@@ -155,7 +143,8 @@ impl<F: PrimeField> VirtualPolynomial<F> {
             if mle.num_vars() != self.aux_info.num_variables {
                 return Err(ArithErrors::InvalidParameters(format!(
                     "product has a multiplicand with wrong number of variables {} vs {}",
-                    mle.num_vars(), self.aux_info.num_variables
+                    mle.num_vars(),
+                    self.aux_info.num_variables
                 )));
             }
 
@@ -173,46 +162,9 @@ impl<F: PrimeField> VirtualPolynomial<F> {
         Ok(())
     }
 
-    /// Multiple the current VirtualPolynomial by an MLE:
-    /// - add the MLE to the MLE list;
-    /// - multiple each product by MLE and its coefficient.
-    /// Returns an error if the MLE has a different `num_vars` from self.
-    pub fn mul_by_mle(&mut self, mle: Arc<MLE<F>>, coefficient: F) -> Result<(), ArithErrors> {
-        if mle.num_vars() != self.aux_info.num_variables {
-            return Err(ArithErrors::InvalidParameters(format!(
-                "product has a multiplicand with wrong number of variables {} vs {}",
-                mle.num_vars(), self.aux_info.num_variables
-            )));
-        }
-
-        let mle_ptr: *const MLE<F> = Arc::as_ptr(&mle);
-
-        // check if this mle already exists in the virtual polynomial
-        let mle_index = match self.raw_pointers_lookup_table.get(&mle_ptr) {
-            Some(&p) => p,
-            None => {
-                self.raw_pointers_lookup_table
-                    .insert(mle_ptr, self.flattened_ml_extensions.len());
-                self.flattened_ml_extensions.push(mle);
-                self.flattened_ml_extensions.len() - 1
-            },
-        };
-
-        for (prod_coef, indices) in self.products.iter_mut() {
-            // - add the MLE to the MLE list;
-            // - multiple each product by MLE and its coefficient.
-            indices.push(mle_index);
-            *prod_coef *= coefficient;
-        }
-
-        // increase the max degree by one as the MLE has degree 1.
-        self.aux_info.max_degree += 1;
-        Ok(())
-    }
-
     /// Evaluate the virtual polynomial at point `point`.
     /// Returns an error is point.len() does not match `num_variables`.
-    pub fn evaluate(&self, point: &[F]) -> Result<F, ArithErrors> {
+    pub(crate) fn evaluate(&self, point: &[F]) -> Result<F, ArithErrors> {
         if self.aux_info.num_variables != point.len() {
             return Err(ArithErrors::InvalidParameters(format!(
                 "wrong number of variables {} vs {}",
@@ -237,69 +189,6 @@ impl<F: PrimeField> VirtualPolynomial<F> {
             .iter()
             .map(|(c, p)| *c * p.iter().map(|&i| evals[i]).product::<F>())
             .sum();
-
-        Ok(res)
-    }
-
-    /// Sample a random virtual polynomial, return the polynomial and its sum.
-    pub fn rand<R: RngCore>(
-        nv: usize,
-        num_multiplicands_range: (usize, usize),
-        num_products: usize,
-        rng: &mut R,
-    ) -> Result<(Self, F), ArithErrors> {
-        let mut sum = F::zero();
-        let mut poly = VirtualPolynomial::new(nv);
-        for _ in 0..num_products {
-            let num_multiplicands =
-                rng.gen_range(num_multiplicands_range.0..num_multiplicands_range.1);
-            let (product, product_sum) = random_mle_list(nv, num_multiplicands, rng);
-            let coefficient = F::rand(rng);
-            poly.add_mle_list(product.into_iter(), coefficient)?;
-            sum += product_sum * coefficient;
-        }
-
-        Ok((poly, sum))
-    }
-
-    /// Sample a random virtual polynomial that evaluates to zero everywhere
-    /// over the boolean hypercube.
-    pub fn rand_zero<R: RngCore>(
-        nv: usize,
-        num_multiplicands_range: (usize, usize),
-        num_products: usize,
-        rng: &mut R,
-    ) -> Result<Self, ArithErrors> {
-        let mut poly = VirtualPolynomial::new(nv);
-        for _ in 0..num_products {
-            let num_multiplicands =
-                rng.gen_range(num_multiplicands_range.0..num_multiplicands_range.1);
-            let product = random_zero_mle_list(nv, num_multiplicands, rng);
-            let coefficient = F::rand(rng);
-            poly.add_mle_list(product.into_iter(), coefficient)?;
-        }
-
-        Ok(poly)
-    }
-
-    // Input poly f(x) and a random vector r, output
-    //      \hat f(x) = \sum_{x_i \in eval_x} f(x_i) eq(x, r)
-    // where
-    //      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-    //
-    // This function is used in ZeroCheck.
-    pub fn build_f_hat(&self, r: &[F]) -> Result<Self, ArithErrors> {
-        if self.aux_info.num_variables != r.len() {
-            return Err(ArithErrors::InvalidParameters(format!(
-                "r.len() is different from number of variables: {} vs {}",
-                r.len(),
-                self.aux_info.num_variables
-            )));
-        }
-
-        let eq_x_r = build_eq_x_r(r)?;
-        let mut res = self.clone();
-        res.mul_by_mle(eq_x_r, F::one())?;
 
         Ok(res)
     }
@@ -335,12 +224,12 @@ impl<F: PrimeField> VirtualPolynomial<F> {
 
             eval_vec.push(pt_eval);
         }
-        return MLE::from_evaluations_vec(nv, eval_vec);
+        MLE::from_evaluations_vec(nv, eval_vec)
     }
 }
 
 /// Evaluate eq polynomial.
-pub fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors> {
+pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors> {
     if x.len() != y.len() {
         return Err(ArithErrors::InvalidParameters(
             "x and y have different length".to_string(),
@@ -360,7 +249,7 @@ pub fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> {
+pub(crate) fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 
@@ -373,7 +262,7 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> 
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
+pub(crate) fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then
@@ -441,114 +330,4 @@ pub fn bit_decompose(input: u64, num_var: usize) -> Vec<bool> {
         i >>= 1;
     }
     res
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use ark_ff::UniformRand;
-    use ark_std::test_rng;
-    use ark_test_curves::bls12_381::Fr;
-    #[test]
-    fn test_virtual_polynomial_additions() -> Result<(), ArithErrors> {
-        let mut rng = test_rng();
-        for nv in 2..5 {
-            for num_products in 2..5 {
-                let base: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
-
-                let (a, _a_sum) =
-                    VirtualPolynomial::<Fr>::rand(nv, (2, 3), num_products, &mut rng)?;
-                let (b, _b_sum) =
-                    VirtualPolynomial::<Fr>::rand(nv, (2, 3), num_products, &mut rng)?;
-                let c = &a + &b;
-
-                assert_eq!(
-                    a.evaluate(base.as_ref())? + b.evaluate(base.as_ref())?,
-                    c.evaluate(base.as_ref())?
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_virtual_polynomial_mul_by_mle() -> Result<(), ArithErrors> {
-        let mut rng = test_rng();
-        for nv in 2..5 {
-            for num_products in 2..5 {
-                let base: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
-
-                let (a, _a_sum) =
-                    VirtualPolynomial::<Fr>::rand(nv, (2, 3), num_products, &mut rng)?;
-                let (b, _b_sum) = random_mle_list(nv, 1, &mut rng);
-                let b_mle = b[0].clone();
-                let coeff = Fr::rand(&mut rng);
-                let b_vp = VirtualPolynomial::new_from_mle(&b_mle, coeff);
-
-                let mut c = a.clone();
-
-                c.mul_by_mle(b_mle, coeff)?;
-
-                assert_eq!(
-                    a.evaluate(base.as_ref())? * b_vp.evaluate(base.as_ref())?,
-                    c.evaluate(base.as_ref())?
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_eq_xr() {
-        let mut rng = test_rng();
-        for nv in 4..10 {
-            let r: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
-            let eq_x_r = build_eq_x_r(r.as_ref()).unwrap();
-            let eq_x_r2 = build_eq_x_r_for_test(r.as_ref());
-            assert_eq!(eq_x_r, eq_x_r2);
-        }
-    }
-
-    /// Naive method to build eq(x, r).
-    /// Only used for testing purpose.
-    // Evaluate
-    //      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-    // over r, which is
-    //      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-    fn build_eq_x_r_for_test<F: PrimeField>(r: &[F]) -> Arc<MLE<F>> {
-        // we build eq(x,r) from its evaluations
-        // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
-        // for example, with num_vars = 4, x is a binary vector of 4, then
-        //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
-        //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
-        //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
-        //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
-        //  ....
-        //  1 1 1 1 -> r0       * r1        * r2        * r3
-        // we will need 2^num_var evaluations
-
-        // First, we build array for {1 - r_i}
-        let one_minus_r: Vec<F> = r.iter().map(|ri| F::one() - ri).collect();
-
-        let num_var = r.len();
-        let mut eval = vec![];
-
-        for i in 0..1 << num_var {
-            let mut current_eval = F::one();
-            let bit_sequence = bit_decompose(i, num_var);
-
-            for (&bit, (ri, one_minus_ri)) in
-                bit_sequence.iter().zip(r.iter().zip(one_minus_r.iter()))
-            {
-                current_eval *= if bit { *ri } else { *one_minus_ri };
-            }
-            eval.push(current_eval);
-        }
-
-        let mle = MLE::from_evaluations_vec(num_var, eval);
-
-        Arc::new(mle)
-    }
 }

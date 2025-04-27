@@ -8,12 +8,11 @@
 use crate::{
     arithmetic::{
         ark_ff::{Field, PrimeField, Zero},
-        mle::mat::MLE,
+        mat_poly::mle::MLE,
     },
     pcs::{
         PCSError, StructuredReferenceString,
         pst13::util::{eq_eval, eq_extension},
-        structs::Commitment,
     },
 };
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};

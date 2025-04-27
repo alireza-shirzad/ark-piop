@@ -5,7 +5,7 @@ use crate::{
         ark_ff::PrimeField,
         ark_poly::{MultilinearExtension, Polynomial},
         f_short_str, f_vec_short_str,
-        mle::mat::MLE,
+        mat_poly::{mle::MLE, utils::evaluate_opt},
     },
     pcs::{PCS, PCSError, StructuredReferenceString, batching::batch_verify_internal},
     transcript::Tr,
@@ -21,10 +21,7 @@ use macros::timed;
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 // use batching::{batch_verify_internal, multi_open_internal};
 use super::batching::MlBatchProof;
-use crate::{
-    arithmetic::mle::mat::evaluate_opt,
-    pcs::{batching::multi_open_internal, structs::Commitment},
-};
+use crate::pcs::{batching::multi_open_internal, structs::Commitment};
 use srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam};
 /// KZG Polynomial Commitment Scheme on multilinear polynomials.
 
@@ -86,7 +83,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 return Err(PCSError::InvalidParameters(
                     "multilinear should receive a num_var param".to_string(),
                 ));
-            },
+            }
         };
         let (ml_ck, ml_vk) = srs.borrow().trim(supported_num_vars)?;
 

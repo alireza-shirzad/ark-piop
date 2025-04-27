@@ -6,7 +6,12 @@ pub mod structs;
 mod tracker;
 ///////// Imports /////////
 use crate::{
-    arithmetic::{LDE, ark_ff, ark_poly::Polynomial, mle::mat::MLE},
+    arithmetic::{
+        ark_ff,
+        ark_poly::Polynomial,
+        mat_poly::{lde::LDE, mle::MLE},
+        virt_poly::VirtualPoly,
+    },
     errors::DbSnResult,
     pcs::PCS,
     setup::structs::ProvingKey,
@@ -171,7 +176,7 @@ where
     }
 
     /// Get a virtual polynomial given its TrackerID
-    pub fn get_virt_poly(&self, id: TrackerID) -> Vec<(F, Vec<TrackerID>)> {
+    pub fn get_virt_poly(&self, id: TrackerID) -> VirtualPoly<F> {
         RefCell::borrow(&self.tracker_rc)
             .get_virt_poly(id)
             .unwrap()

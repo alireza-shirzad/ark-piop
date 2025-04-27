@@ -24,11 +24,7 @@ pub fn short_vec_str<T: ShortDisplay>(v: &[T]) -> String {
     match len {
         0 => "[]".to_string(),
         1 => format!("[{}]", v[0].to_short_string()),
-        2 => format!(
-            "[{}, {}]",
-            v[0].to_short_string(),
-            v[1].to_short_string()
-        ),
+        2 => format!("[{}, {}]", v[0].to_short_string(), v[1].to_short_string()),
         _ => format!(
             "[{}, ..., {}]",
             v[0].to_short_string(),

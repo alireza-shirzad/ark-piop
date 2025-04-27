@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
+use quote::quote;
 use syn::{Expr, ExprLit, ItemFn, Lit, Token, parse_macro_input, punctuated::Punctuated};
 
 #[proc_macro_attribute]
@@ -14,12 +14,15 @@ pub fn timed(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = &input.attrs;
 
     // Build formatting expressions
-    let formatted_parts: Vec<_> = extra_args.iter().map(|expr| {
-        match expr {
-            Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => quote! { #s },
+    let formatted_parts: Vec<_> = extra_args
+        .iter()
+        .map(|expr| match expr {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(s), ..
+            }) => quote! { #s },
             _ => quote! { &format!("{:?}", #expr) },
-        }
-    }).collect();
+        })
+        .collect();
 
     let timer_code = if formatted_parts.is_empty() {
         quote! {

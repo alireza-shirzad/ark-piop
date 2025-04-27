@@ -2,7 +2,7 @@ pub mod oracle;
 pub mod state;
 ////////////////// Imports ////////////////
 use crate::{
-    arithmetic::{LDE, mle::mat::MLE},
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
     pcs::PCS,
     setup::structs::VerifyingKey,
 };

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use ark_serialize::CanonicalSerialize;
 
-use crate::arithmetic::{ark_ff::PrimeField, mle::virt::VirtualPolynomial};
+use crate::arithmetic::{ark_ff::PrimeField, virt_poly::hp_interface::HPVirtualPolynomial};
 /// An IOP proof is a collections of
 /// - messages from prover to verifier at each round through the interactive
 ///   protocol.
@@ -35,7 +35,7 @@ pub struct SumcheckProverState<F: PrimeField> {
     /// the current round number
     pub(crate) round: usize,
     /// pointer to the virtual polynomial
-    pub(crate) poly: VirtualPolynomial<F>,
+    pub(crate) poly: HPVirtualPolynomial<F>,
     /// points with precomputed barycentric weights for extrapolating smaller
     /// degree uni-polys to `max_degree + 1` evaluations.
     pub(crate) extrapolation_aux: Vec<(Vec<F>, Vec<F>)>,
@@ -53,5 +53,3 @@ pub struct SumcheckVerifierState<F: PrimeField> {
     /// a list storing the randomness sampled by the verifier at each round
     pub(crate) challenges: Vec<F>,
 }
-
-

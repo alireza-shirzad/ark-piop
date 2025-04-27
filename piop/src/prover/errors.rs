@@ -17,7 +17,6 @@ pub enum HonestProverError {
     #[error("Input shape error")]
     ProverInputShapeError(#[from] InputShapeError),
 
-
     // Input does not satisfy the relation
     #[error("Input does not satisfy the relation")]
     ProverNonSatError,

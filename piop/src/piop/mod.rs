@@ -1,7 +1,10 @@
 use errors::PolyIOPErrors;
 
 use crate::{
-    arithmetic::{LDE, ark_ff::PrimeField, mle::mat::MLE},
+    arithmetic::{
+        ark_ff::PrimeField,
+        mat_poly::{lde::LDE, mle::MLE},
+    },
     errors::DbSnResult,
     pcs::PCS,
     prover::Prover,

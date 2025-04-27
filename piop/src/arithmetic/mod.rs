@@ -1,29 +1,13 @@
 use ark_ec::AffineRepr;
 use ark_ff::{Field, PrimeField};
-use ark_poly::{
-    DenseMultilinearExtension,
-    multivariate::{SparsePolynomial, SparseTerm, Term},
-    univariate::DensePolynomial,
-};
-use std::collections::HashSet;
 
 pub use ark_ff;
 pub use ark_poly;
 pub(crate) mod errors;
 pub mod ff;
-pub mod mle;
+pub mod mat_poly;
+pub mod virt_poly;
 
-pub type LDE<F> = DensePolynomial<F>;
-
-pub fn has_duplicates<T: std::hash::Hash + Eq>(vec: &[T]) -> bool {
-    let mut seen = HashSet::new();
-    for item in vec {
-        if !seen.insert(item) {
-            return true;
-        }
-    }
-    false
-}
 // Input index
 // - `i := (i_0, ...i_{n-1})`,
 // - `num_vars := n`
@@ -105,7 +89,7 @@ where
             let x_str = f_short_str(x);
             let y_str = f_short_str(y);
             format!("({}, {})", x_str, y_str)
-        },
+        }
         None => "∞".to_string(), // Point at infinity
     }
 }

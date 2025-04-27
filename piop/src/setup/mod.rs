@@ -4,7 +4,7 @@ pub mod structs;
 
 //////// Imports /////////
 use crate::{
-    arithmetic::{LDE, mle::mat::MLE},
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::DbSnResult,
     pcs::{PCS, utils::load_or_generate_srs},
 };

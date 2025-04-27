@@ -1,4 +1,7 @@
-use crate::prover::structs::proof::PCSSubproof;
+use crate::{
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
+    prover::structs::proof::PCSSubproof,
+};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 use std::{
@@ -8,7 +11,6 @@ use std::{
 
 use super::oracle::Oracle;
 use crate::{
-    arithmetic::{LDE, mle::mat::MLE},
     pcs::PCS,
     prover::structs::proof::Proof,
     structs::{

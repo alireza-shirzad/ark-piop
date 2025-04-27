@@ -7,7 +7,7 @@
 //! Verifier subroutines for a SumCheck protocol.
 
 use crate::{
-    arithmetic::{ark_ff::PrimeField, mle::virt::VPAuxInfo},
+    arithmetic::{ark_ff::PrimeField, virt_poly::hp_interface::VPAuxInfo},
     errors::{DbSnError, DbSnResult},
     piop::{
         errors::PolyIOPErrors,
@@ -304,7 +304,7 @@ fn u64_factorial(a: usize) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::{arithmetic::LDE, piop::errors::PolyIOPErrors};
+    use crate::{arithmetic::mat_poly::lde::LDE, piop::errors::PolyIOPErrors};
 
     use super::interpolate_uni_poly;
     use crate::arithmetic::ark_poly::{DenseUVPolynomial, Polynomial};

@@ -12,8 +12,11 @@ use std::{
 
 use super::{Prover, tracker::ProverTracker};
 use crate::{
-    arithmetic::mle::virt::VirtualPolynomial,
-    prover::{LDE, MLE, PCS},
+    arithmetic::{
+        mat_poly::{lde::LDE, mle::MLE},
+        virt_poly::{VirtualPoly, hp_interface::HPVirtualPolynomial},
+    },
+    pcs::PCS,
     setup::structs::ProvingKey,
     structs::{
         EvalClaimMap, TrackerID,
@@ -24,8 +27,6 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
-/////////////////// Types ///////////////////
-pub(crate) type VirtualPoly<F> = Vec<(F, Vec<TrackerID>)>;
 
 //////////////////// Structs & Enums //////////////////
 
@@ -207,7 +208,6 @@ where
         TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
     }
 
-
     pub fn evaluate(&self, pt: &[F]) -> Option<F> {
         self.tracker.borrow().evaluate_mv(self.id, pt)
     }
@@ -223,7 +223,7 @@ where
         output
     }
 
-    pub fn to_arithmatic_virtual_poly(&self) -> VirtualPolynomial<F> {
-        self.tracker.borrow().to_arithmatic_virtual_poly(self.id)
+    pub fn to_hp_virtual_poly(&self) -> HPVirtualPolynomial<F> {
+        self.tracker.borrow().to_hp_virtual_poly(self.id)
     }
 }

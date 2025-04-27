@@ -4,9 +4,7 @@ use ark_ff::PrimeField;
 use derivative::Derivative;
 
 use crate::{
-    arithmetic::mle::virt::VPAuxInfo,
     pcs::PCS,
-    piop::structs::SumcheckProof,
     structs::{QueryMap, SumcheckSubproof, TrackerID},
 };
 

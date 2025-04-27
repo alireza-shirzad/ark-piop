@@ -1,10 +1,8 @@
 use crate::{
     arithmetic::{
         ark_ff::{PrimeField, batch_inversion},
-        mle::{
-            mat::{MLE, fix_variables},
-            virt::VirtualPolynomial,
-        },
+        mat_poly::{mle::MLE, utils::fix_variables},
+        virt_poly::hp_interface::HPVirtualPolynomial,
     },
     piop::errors::PolyIOPErrors,
 };
@@ -22,12 +20,12 @@ pub struct SumCheckProver<F: PrimeField> {
 }
 
 impl<F: PrimeField> SumcheckProverState<F> {
-    // type VirtualPolynomial = VirtualPolynomial<F>;
+    // type HPVirtualPolynomial = HPVirtualPolynomial<F>;
     // type ProverMessage = IOPProverMessage<F>;
 
     /// Initialize the prover state to argue for the sum of the input polynomial
     /// over {0,1}^`num_vars`.
-    pub fn prover_init(polynomial: &VirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
+    pub fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
         if polynomial.aux_info.num_variables == 0 {
             return Err(PolyIOPErrors::InvalidParameters(
                 "Attempt to prove a constant.".to_string(),

@@ -1,7 +1,9 @@
 /////////// modules ///////////
 pub mod claim;
 /////////// Imports ///////////
-use crate::{arithmetic::mle::virt::VPAuxInfo, pcs::PCS, piop::structs::SumcheckProof};
+use crate::{
+    arithmetic::virt_poly::hp_interface::VPAuxInfo, pcs::PCS, piop::structs::SumcheckProof,
+};
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use std::{

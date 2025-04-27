@@ -1,16 +1,14 @@
 pub mod errors;
 pub mod structs;
 mod tracker;
-use std::{
-    borrow::Borrow,
-    cell::{RefCell, RefMut},
-    collections::BTreeMap,
-    rc::Rc,
-};
+use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 use structs::oracle::{Oracle, TrackedOracle};
 
 use crate::{
-    arithmetic::{LDE, ark_ff, mle::mat::MLE},
+    arithmetic::{
+        ark_ff,
+        mat_poly::{lde::LDE, mle::MLE},
+    },
     errors::DbSnResult,
     prover::structs::proof::Proof,
     setup::structs::VerifyingKey,

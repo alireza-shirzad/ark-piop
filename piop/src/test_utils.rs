@@ -1,19 +1,12 @@
 use crate::{
-    arithmetic::{mle::mat::MLE, LDE},
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::DbSnError,
-    pcs::{kzg10::KZG10, pst13::PST13, PCS},
+    pcs::PCS,
     prover::Prover,
     setup::KeyGenerator,
     verifier::Verifier,
 };
 use ark_ff::{Field, PrimeField};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::test_rng;
-use std::{
-    fs::File,
-    io::{BufReader, BufWriter, Read, Write},
-    path::Path,
-};
 
 /// A helper function that outputs given the number of variables (i.e. log of
 /// maximum table size), outputs a ready-to-use instance of the prover and

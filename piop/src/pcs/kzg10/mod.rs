@@ -1,7 +1,7 @@
 use super::PCS;
+use crate::arithmetic::mat_poly::lde::LDE;
 use crate::{
     arithmetic::{
-        LDE,
         ark_ff::PrimeField,
         ark_poly::{DenseUVPolynomial, Polynomial},
     },
@@ -18,7 +18,6 @@ use srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierPa
 use std::{borrow::Borrow, ops::Mul, sync::Arc};
 pub(crate) mod srs;
 use crate::{
-    arithmetic::ark_ff::UniformRand,
     pcs::{Rng, StructuredReferenceString, structs::Commitment},
     transcript::Tr,
 };
