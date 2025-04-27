@@ -12,7 +12,7 @@ pub mod verifier;
 // not visible in the tests of col-toolbox
 // #[cfg(test)]
 pub mod test_utils;
-
+pub use macros::timed;
 #[macro_export]
 macro_rules! add_trace {
     ($fn_name:literal $(, $msg:expr)* $(,)?) => {{
