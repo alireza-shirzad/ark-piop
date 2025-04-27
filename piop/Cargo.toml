@@ -1,0 +1,40 @@
+[package]
+name = "piop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+# Internal dependencies
+macros = { path = "../macros" }
+
+# arkwork dependencies
+ark-std = { workspace = true }
+ark-ff = { workspace = true }
+ark-ec = { workspace = true }
+ark-poly = { workspace = true }
+ark-serialize = { workspace = true }
+
+# other dependencies
+rayon = { workspace = true, optional = true }
+merlin = { workspace = true }
+derivative = { workspace = true }
+thiserror = { workspace = true }
+itertools = { workspace = true }
+[dev-dependencies]
+ark-test-curves = { workspace = true }
+
+
+
+[features]
+default = ["std", "parallel"]
+std = ["ark-ff/std", "ark-poly/std", "ark-std/std", "ark-serialize/std"]
+print-trace = ["ark-std/print-trace"]
+parallel = [
+    "std",
+    "ark-ff/parallel",
+    "ark-poly/parallel",
+    "ark-std/parallel",
+    "rayon",
+]
+honest-prover = []

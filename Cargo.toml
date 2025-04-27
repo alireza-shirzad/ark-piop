@@ -1,0 +1,62 @@
+[workspace]
+members = ["piop", "macros"]
+resolver = "2"
+
+[workspace.package]
+version = "0.5.0"
+authors = ["arkworks contributors"]
+description = "A library of useful tools for realizing and composing piops"
+homepage = "https://arkworks.rs"
+repository = "https://github.com/alireza-shirza/ark-piop"
+keywords = ["piop", "pst13", "kzg10", "snark", "argument"]
+categories = ["cryptography"]
+include = ["Cargo.toml", "src", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+license = "MIT/Apache-2.0"
+edition = "2021"
+
+[workspace.dependencies]
+# arkwork dependencies
+ark-std = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-poly = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
+
+# other dependencies
+rayon = { version = "1.5.2", default-features = false }
+merlin = { version = "3.0.0", default-features = false }
+derivative = { version = "2", features = ["use_core"] }
+thiserror = "2.0.11"
+itertools = "0.14"
+
+ark-test-curves = { version = "0.5.0", default-features = false, features = [
+    "bls12_381_curve",
+] }
+[patch.crates-io]
+ark-std = { git = "https://github.com/alireza-shirzad/std" }
+
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+incremental = true
+panic = 'abort'
+
+[profile.bench]
+opt-level = 3
+debug = false
+rpath = false
+lto = "thin"
+incremental = true
+debug-assertions = false
+
+[profile.dev]
+opt-level = 0
+panic = 'abort'
+
+[profile.test]
+opt-level = 3
+lto = "thin"
+incremental = true
+debug-assertions = true
+debug = true
