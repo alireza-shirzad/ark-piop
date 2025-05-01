@@ -1,9 +1,9 @@
-use ark_ff::{Field, Zero};
+use ark_ff::{Field, PrimeField, Zero};
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_iter, rand::Rng};
 use itertools::Either;
-use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 #[cfg(feature = "parallel")]
 use rayon::prelude::ParallelIterator;
 use std::{
@@ -21,11 +21,19 @@ use std::{
 
 #[derive(Clone, PartialEq, Eq, Hash, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MLE<F: Field> {
-    pub(crate) mat_mle: DenseMultilinearExtension<F>,
-    pub(crate) nv: Option<usize>,
+    mat_mle: DenseMultilinearExtension<F>,
+    nv: Option<usize>,
 }
 
 impl<F: Field> MLE<F> {
+    pub fn new(mat_mle: DenseMultilinearExtension<F>, nv: Option<usize>) -> Self {
+        Self { mat_mle, nv }
+    }
+
+    pub fn get_mat_mle(&self) -> &DenseMultilinearExtension<F> {
+        &self.mat_mle
+    }
+
     pub fn num_vars(&self) -> usize {
         match self.nv {
             Some(nv) => nv,
@@ -103,44 +111,24 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
         todo!()
     }
     fn fix_variables(&self, partial_point: &[F]) -> Self {
-        // TODO: Should not clone here
-        match self.nv {
-            Some(max_nv) => {
-                let num_free_fixable_vars = max_nv - self.mat_mle.num_vars;
-                let num_vars_to_be_fixed = partial_point.len();
-                if num_vars_to_be_fixed < num_free_fixable_vars {
-                    Self {
-                        mat_mle: self.mat_mle.clone(),
-                        nv: Some(max_nv - num_vars_to_be_fixed),
-                    }
-                } else if num_vars_to_be_fixed == num_free_fixable_vars {
-                    Self {
-                        mat_mle: self.mat_mle.clone(),
-                        nv: None,
-                    }
-                } else {
-                    let diff = num_vars_to_be_fixed - num_free_fixable_vars;
-                    let (_, partial_truncated_point) =
-                        partial_point.split_at(partial_point.len() - diff);
-                    Self {
-                        mat_mle: self.mat_mle.fix_variables(partial_truncated_point),
-                        nv: None,
-                    }
-                }
-            }
-            None => Self {
-                mat_mle: self.mat_mle.fix_variables(partial_point),
-                nv: None,
-            },
+        assert!(
+            partial_point.len() <= self.num_vars(),
+            "invalid size of partial point"
+        );
+        let nv = self.num_vars();
+        let mut poly = self.evaluations().to_vec();
+        let dim = partial_point.len();
+        // evaluate single variable of partial point from left to right
+        for (i, point) in partial_point.iter().enumerate().take(dim) {
+            poly = fix_one_variable_helper(&poly, nv - i, point);
         }
+
+        MLE::<F>::from_evaluations_slice(nv - dim, &poly[..(1 << (nv - dim))])
     }
 
     fn to_evaluations(&self) -> Vec<F> {
         match self.nv {
-            Some(nv) => self
-                .mat_mle
-                .to_evaluations()
-                .repeat(nv - self.mat_mle.num_vars),
+            Some(nv) => self.iter().cloned().collect::<Vec<F>>(),
             None => self.mat_mle.to_evaluations(),
         }
     }
@@ -169,6 +157,12 @@ impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
     type Output = MLE<F>;
 
     fn add(self, rhs: &'a MLE<F>) -> Self::Output {
+        if rhs.is_zero() {
+            return self.clone();
+        }
+        if self.is_zero() {
+            return rhs.clone();
+        }
         match (self.nv, rhs.nv) {
             // TODO: Some cases are not handled
             (Some(nv1), Some(nv2)) if nv1 == nv2 => MLE {
@@ -179,7 +173,17 @@ impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
                 mat_mle: &self.mat_mle + &rhs.mat_mle,
                 nv: None,
             },
-            _ => panic!("Cannot add MLEs with different number of variables"),
+            (Some(nv1), None) if nv1 == rhs.mat_mle.num_vars => MLE {
+                mat_mle: &dmle_increase_nv_back(&self.mat_mle, nv1) + &rhs.mat_mle,
+                nv: None,
+            },
+            (None, Some(nv2)) if nv2 == self.mat_mle.num_vars => MLE {
+                mat_mle: &self.mat_mle + &dmle_increase_nv_back(&rhs.mat_mle, nv2),
+                nv: None,
+            },
+            _ => {
+                panic!("Cannot add MLEs with different number of variables");
+            }
         }
     }
 }
@@ -310,16 +314,57 @@ impl<F: Field> Polynomial<F> for MLE<F> {
 
     fn evaluate(&self, point: &Self::Point) -> F {
         assert!(point.len() == self.num_vars());
-        self.fix_variables(&point)[0]
+        self.fix_variables(point)[0]
     }
+}
+
+/// Increase the number of variables of a multilinear polynomial by adding
+/// variables at the back Ex for input (P(X, Y), 3) result in P'(X, Y, Z), where
+/// P'(X, Y, Z) = P(X, Y)
+/// TODO: Parallelize this function
+pub fn dmle_increase_nv_back<F: Field>(
+    mle: &DenseMultilinearExtension<F>,
+    new_nv: usize,
+) -> DenseMultilinearExtension<F> {
+    if mle.num_vars() == new_nv {
+        return mle.clone();
+    }
+    if mle.num_vars() > new_nv {
+        panic!("dmle_increase_nv Error: old_len > new_len");
+    }
+
+    let old_len = 2_usize.pow(mle.num_vars() as u32);
+    let new_len = 2_usize.pow(new_nv as u32);
+    let mut evals = mle.evaluations.clone();
+    evals.resize(new_len, F::default());
+    for i in old_len..new_len {
+        evals[i] = evals[i % old_len];
+    }
+    DenseMultilinearExtension::from_evaluations_vec(new_nv, evals)
+}
+fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F> {
+    let mut res = vec![F::zero(); 1 << (nv - 1)];
+
+    // evaluate single variable of partial point from left to right
+    #[cfg(not(feature = "parallel"))]
+    for i in 0..(1 << (nv - 1)) {
+        res[i] = data[i] + (data[(i << 1) + 1] - data[i << 1]) * point;
+    }
+
+    #[cfg(feature = "parallel")]
+    res.par_iter_mut().enumerate().for_each(|(i, x)| {
+        *x = data[i << 1] + (data[(i << 1) + 1] - data[i << 1]) * point;
+    });
+
+    res
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::arithmetic::mat_poly::utils::evaluate_opt;
+
     use super::*;
     use ark_ff::UniformRand;
     use ark_std::test_rng;
     use ark_test_curves::bls12_381::Fr;
-
-    // TODO: Add tests for MLE
 }

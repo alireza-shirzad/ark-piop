@@ -1,11 +1,8 @@
-use errors::PolyIOPErrors;
+use ark_ff::PrimeField;
 
 use crate::{
-    arithmetic::{
-        ark_ff::PrimeField,
-        mat_poly::{lde::LDE, mle::MLE},
-    },
-    errors::DbSnResult,
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
+    errors::SnarkResult,
     pcs::PCS,
     prover::Prover,
     verifier::Verifier,
@@ -22,7 +19,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     fn prove(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
-    ) -> DbSnResult<Self::ProverOutput> {
+    ) -> SnarkResult<Self::ProverOutput> {
         #[cfg(feature = "honest-prover")]
         {
             Self::honest_prover_check(&input)?;
@@ -33,15 +30,16 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     fn verify(
         verifier: &mut Verifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
-    ) -> DbSnResult<Self::VerifierOutput>;
+    ) -> SnarkResult<Self::VerifierOutput>;
 
     fn prove_inner(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
-    ) -> DbSnResult<Self::ProverOutput>;
+    ) -> SnarkResult<Self::ProverOutput>;
 
     #[cfg(feature = "honest-prover")]
-    fn honest_prover_check(input: &Self::ProverInput) -> DbSnResult<()> {
+    #[allow(unused_variables)]
+    fn honest_prover_check(input: &Self::ProverInput) -> SnarkResult<()> {
         unimplemented!()
     }
 }

@@ -4,17 +4,15 @@
 // You should have received a copy of the MIT License
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
-use std::{collections::BTreeMap, fmt};
+use std::fmt;
 
 use ark_ec::pairing::Pairing;
-use ark_ff::PrimeField;
-use ark_poly::Polynomial;
 use ark_serialize::{self, CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
 
-use crate::{arithmetic::g1_affine_short_str, structs::TrackerID, util::display::ShortDisplay};
+use crate::{arithmetic::g1_affine_short_str, util::display::ShortDisplay};
 
-use super::{PCS, PolynomialCommitment};
+use super::PolynomialCommitment;
 
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
@@ -26,7 +24,6 @@ use super::{PCS, PolynomialCommitment};
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-
 /// A commitment is an Affine point.
 pub struct Commitment<E: Pairing> {
     /// the actual commitment is an affine point.

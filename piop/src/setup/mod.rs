@@ -5,7 +5,7 @@ pub mod structs;
 //////// Imports /////////
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::DbSnResult,
+    errors::SnarkResult,
     pcs::{PCS, utils::load_or_generate_srs},
 };
 use ark_ff::PrimeField;
@@ -67,7 +67,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     #[timed]
     pub fn gen_keys(
         self,
-    ) -> DbSnResult<(ProvingKey<F, MvPCS, UvPCS>, VerifyingKey<F, MvPCS, UvPCS>)> {
+    ) -> SnarkResult<(ProvingKey<F, MvPCS, UvPCS>, VerifyingKey<F, MvPCS, UvPCS>)> {
         // Load or generate the multivariate SRS
         let mv_srs = load_or_generate_srs::<F, MvPCS>(
             &self.srs_path.join(format!("mv_{}.srs", self.log_db_size)),

@@ -1,6 +1,7 @@
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     prover::structs::proof::PCSSubproof,
+    structs::PCSOpeningProof,
 };
 use ark_ff::PrimeField;
 use derivative::Derivative;
@@ -9,12 +10,12 @@ use std::{
     sync::Arc,
 };
 
-use super::oracle::Oracle;
+use super::{VerifierEvalClaimMap, oracle::Oracle};
 use crate::{
     pcs::PCS,
     prover::structs::proof::Proof,
     structs::{
-        EvalClaimMap, QueryMap, SumcheckSubproof, TrackerID,
+        QueryMap, SumcheckSubproof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     transcript::Tr,
@@ -47,7 +48,7 @@ where
     PC: PCS<F>,
 {
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
-    pub eval_claims: EvalClaimMap<F, PC>,
+    pub eval_claims: VerifierEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
 }
@@ -98,7 +99,7 @@ where
     F: PrimeField,
     PC: PCS<F>,
 {
-    pub batch_proof: <PC as PCS<F>>::BatchProof,
+    pub opening_proof: PCSOpeningProof<F, PC>,
     pub commitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub query_map: Arc<QueryMap<F, PC>>,
 }
@@ -110,7 +111,7 @@ where
 {
     pub fn new_from_pcs_subproof(pcs_subproof: &PCSSubproof<F, PC>) -> Self {
         Self {
-            batch_proof: pcs_subproof.batch_proof.clone(),
+            opening_proof: pcs_subproof.opening_proof.clone(),
             commitments: pcs_subproof.commitments.clone(),
             query_map: Arc::new(pcs_subproof.query_map.clone()),
         }

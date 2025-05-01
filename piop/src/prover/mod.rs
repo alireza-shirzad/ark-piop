@@ -7,23 +7,21 @@ mod tracker;
 ///////// Imports /////////
 use crate::{
     arithmetic::{
-        ark_ff,
-        ark_poly::Polynomial,
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
     },
-    errors::DbSnResult,
+    errors::SnarkResult,
     pcs::PCS,
     setup::structs::ProvingKey,
     structs::TrackerID,
 };
-use macros::timed;
-use structs::{TrackedPoly, proof::Proof};
-
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
+use ark_poly::{MultilinearExtension, Polynomial};
 use derivative::Derivative;
+use macros::timed;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
+use structs::{TrackedPoly, proof::Proof};
 use tracker::ProverTracker;
 ///////////// Body /////////////
 
@@ -93,7 +91,7 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn get_range_tr_poly(&self, label: String) -> DbSnResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    pub fn get_range_tr_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         RefCell::borrow(&self.tracker_rc).get_indexed_tracked_polys(label.clone())
     }
 
@@ -116,7 +114,7 @@ where
     pub fn track_and_commit_mat_mv_poly(
         &mut self,
         polynomial: &MLE<F>,
-    ) -> DbSnResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         let num_vars = polynomial.num_vars();
         Ok(TrackedPoly::new(
             self.tracker_rc
@@ -146,7 +144,7 @@ where
     pub fn track_and_commit_mat_uv_poly(
         &mut self,
         polynomial: LDE<F>,
-    ) -> DbSnResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         let degree = polynomial.degree();
         Ok(TrackedPoly::new(
             self.tracker_rc
@@ -184,33 +182,33 @@ where
     }
 
     /// Sample a fiat-shamir challenge and append it to the transcript
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> DbSnResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().get_and_append_challenge(label)
     }
 
     /// Add a claim about the evaluation of a univariate polynomial at a point
-    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> DbSnResult<()> {
+    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_uv_eval_claim(poly_id, point)
     }
 
     /// Add a claim about the evaluation of a multivariate polynomial at a point
-    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> DbSnResult<()> {
+    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_mv_eval_claim(poly_id, point)
     }
 
     /// Add a multivariate sumcheck claim to the proof
-    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> DbSnResult<()> {
+    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum)
     }
 
     /// Add a multivariate zerocheck claim to the proof
-    pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> DbSnResult<()> {
+    pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id)
     }
 
@@ -220,7 +218,7 @@ where
     }
 
     /// Build the zkSQL proof from the claims and commitments
-    pub fn build_proof(&mut self) -> DbSnResult<Proof<F, MvPCS, UvPCS>> {
+    pub fn build_proof(&mut self) -> SnarkResult<Proof<F, MvPCS, UvPCS>> {
         self.tracker_rc.borrow_mut().compile_proof()
     }
 

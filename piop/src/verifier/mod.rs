@@ -5,11 +5,8 @@ use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 use structs::oracle::{Oracle, TrackedOracle};
 
 use crate::{
-    arithmetic::{
-        ark_ff,
-        mat_poly::{lde::LDE, mle::MLE},
-    },
-    errors::DbSnResult,
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
+    errors::SnarkResult,
     prover::structs::proof::Proof,
     setup::structs::VerifyingKey,
     structs::TrackerID,
@@ -51,7 +48,7 @@ where
 {
     // TODO: See if you can shorten this function
     pub fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
-        let mut verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
+        let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
         let range_tr_polys: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>> = vk
             .indexed_coms
             .iter()
@@ -80,14 +77,14 @@ where
     pub fn get_indexed_oracle(
         &self,
         data_type: String,
-    ) -> DbSnResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         RefCell::borrow(&self.tracker_rc).get_indexed_oracle(data_type)
     }
 
     pub fn track_mat_mv_com(
         &self,
         comm: MvPCS::Commitment,
-    ) -> DbSnResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
             self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?,
             self.tracker_rc.clone(),
@@ -113,7 +110,7 @@ where
         self.tracker_rc.borrow_mut().set_proof(proof);
     }
 
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> DbSnResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().get_and_append_challenge(label)
     }
 
@@ -126,19 +123,21 @@ where
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id);
     }
 
-    pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<F>) -> DbSnResult<F> {
+    pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().query_mv(poly_id, point)
     }
 
-    pub fn query_uv(&mut self, poly_id: TrackerID, point: F) -> DbSnResult<F> {
+    pub fn query_uv(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().query_uv(poly_id, point)
     }
 
-    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> DbSnResult<F> {
-        self.tracker_rc.borrow_mut().get_prover_claimed_sum(id)
+    //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
+    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
+        let tracker_ref_cell: &RefCell<VerifierTracker<F, MvPCS, UvPCS>> = self.tracker_rc.borrow();
+        tracker_ref_cell.borrow().get_prover_claimed_sum(id)
     }
 
-    pub fn get_commitment_num_vars(&self, id: TrackerID) -> DbSnResult<usize> {
+    pub fn get_commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
         self.tracker_rc.borrow_mut().get_commitment_num_vars(id)
     }
 
@@ -146,7 +145,7 @@ where
     pub fn track_mv_com_by_id(
         &mut self,
         id: TrackerID,
-    ) -> DbSnResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
             self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?,
             self.tracker_rc.clone(),
@@ -155,14 +154,14 @@ where
     pub fn track_uv_com_by_id(
         &mut self,
         id: TrackerID,
-    ) -> DbSnResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
             self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?,
             self.tracker_rc.clone(),
         ))
     }
 
-    pub fn verify(&self) -> DbSnResult<()> {
+    pub fn verify(&self) -> SnarkResult<()> {
         self.tracker_rc.borrow_mut().verify()
     }
 

@@ -7,15 +7,15 @@
 //! Verifier subroutines for a SumCheck protocol.
 
 use crate::{
-    arithmetic::{ark_ff::PrimeField, virt_poly::hp_interface::VPAuxInfo},
-    errors::{DbSnError, DbSnResult},
+    arithmetic::virt_poly::hp_interface::VPAuxInfo,
+    errors::{SnarkError, SnarkResult},
     piop::{
         errors::PolyIOPErrors,
         structs::{SumcheckProverMessage, SumcheckVerifierState},
     },
     transcript::Tr,
 };
-use ark_std::{end_timer, start_timer};
+use ark_ff::PrimeField;
 
 #[cfg(feature = "parallel")]
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
@@ -88,15 +88,18 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
     /// evaluated at `subclaim.point` will be `subclaim.expected_evaluation`.
     /// Otherwise, it is highly unlikely that those two will be equal.
     /// Larger field size guarantees smaller soundness error.
-    pub fn check_and_generate_subclaim(&self, asserted_sum: &F) -> DbSnResult<SumCheckSubClaim<F>> {
+    pub fn check_and_generate_subclaim(
+        &self,
+        asserted_sum: &F,
+    ) -> SnarkResult<SumCheckSubClaim<F>> {
         if !self.finished {
-            return Err(DbSnError::from(PolyIOPErrors::InvalidVerifier(
+            return Err(SnarkError::from(PolyIOPErrors::InvalidVerifier(
                 "Incorrect verifier state: Verifier has not finished.".to_string(),
             )));
         }
 
         if self.polynomials_received.len() != self.num_vars {
-            return Err(DbSnError::from(PolyIOPErrors::InvalidVerifier(
+            return Err(SnarkError::from(PolyIOPErrors::InvalidVerifier(
                 "insufficient rounds".to_string(),
             )));
         }
@@ -151,7 +154,7 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
             // the deferred check during the interactive phase:
             // 1. check if the received 'P(0) + P(1) = expected`.
             if evaluations[0] + evaluations[1] != expected {
-                return Err(DbSnError::from(PolyIOPErrors::InvalidProof(
+                return Err(SnarkError::from(PolyIOPErrors::InvalidProof(
                     "Sumcheck's deferred checks failed. Prover message is not consistent with the claim.".to_string(),
                 )));
             }
@@ -304,13 +307,11 @@ fn u64_factorial(a: usize) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use crate::{arithmetic::mat_poly::lde::LDE, piop::errors::PolyIOPErrors};
-
     use super::interpolate_uni_poly;
-    use crate::arithmetic::ark_poly::{DenseUVPolynomial, Polynomial};
+    use crate::{arithmetic::mat_poly::lde::LDE, piop::errors::PolyIOPErrors};
+    use ark_poly::{DenseUVPolynomial, Polynomial};
     use ark_std::{self, UniformRand, vec::Vec};
     use ark_test_curves::bls12_381::Fr;
-
     #[test]
     fn test_interpolation() -> Result<(), PolyIOPErrors> {
         let mut prng = ark_std::test_rng();

@@ -2,8 +2,6 @@ pub(crate) mod srs;
 pub(crate) mod util;
 use crate::{
     arithmetic::{
-        ark_ff::PrimeField,
-        ark_poly::{MultilinearExtension, Polynomial},
         f_short_str, f_vec_short_str,
         mat_poly::{mle::MLE, utils::evaluate_opt},
     },
@@ -14,7 +12,10 @@ use crate::{
 use ark_ec::{
     AffineRepr, CurveGroup, ScalarMul, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM,
 };
+use ark_ff::PrimeField;
 use ark_ff::{One, Zero};
+use ark_poly::MultilinearExtension;
+use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, rand::Rng, start_timer};
 use macros::timed;
@@ -153,7 +154,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 .iter()
                 .zip(points.iter())
                 .zip(evals.iter())
-                .all(|((poly, point), eval)| { poly.evaluate(point) == *eval }),
+                .all(|((poly, point), eval)| { evaluate_opt(poly, point) == *eval }),
         );
 
         multi_open_internal(
@@ -282,8 +283,6 @@ fn verify_internal<E: Pairing>(
             num_var, verifier_param.num_vars
         )));
     }
-
-    let scalar_size = E::ScalarField::MODULUS_BIT_SIZE as usize;
 
     let h_mul: Vec<E::G2Affine> = verifier_param.h.into_group().batch_mul(point);
 

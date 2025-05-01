@@ -1,15 +1,13 @@
 use crate::{
-    arithmetic::{
-        ark_ff::PrimeField,
-        virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo},
-    },
-    errors::DbSnResult,
+    arithmetic::virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo},
+    errors::SnarkResult,
     piop::structs::{SumcheckProverState, SumcheckVerifierState},
     transcript::Tr,
 };
+use ark_ff::PrimeField;
 use ark_std::{end_timer, start_timer};
 use macros::timed;
-use std::{fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{fmt::Debug, marker::PhantomData};
 
 use super::structs::SumcheckProof;
 
@@ -62,7 +60,7 @@ impl<F: PrimeField> SumCheck<F> {
     pub fn prove(
         poly: &HPVirtualPolynomial<F>,
         transcript: &mut Tr<F>,
-    ) -> DbSnResult<SumcheckProof<F>> {
+    ) -> SnarkResult<SumcheckProof<F>> {
         transcript.append_serializable_element(b"aux info", &poly.aux_info)?;
 
         let mut prover_state = SumcheckProverState::prover_init(poly)?;
@@ -91,7 +89,7 @@ impl<F: PrimeField> SumCheck<F> {
         proof: &SumcheckProof<F>,
         aux_info: &VPAuxInfo<F>,
         transcript: &mut Tr<F>,
-    ) -> DbSnResult<SumCheckSubClaim<F>> {
+    ) -> SnarkResult<SumCheckSubClaim<F>> {
         transcript.append_serializable_element(b"aux info", aux_info)?;
         let mut verifier_state = SumcheckVerifierState::verifier_init(aux_info);
         for i in 0..aux_info.num_variables {

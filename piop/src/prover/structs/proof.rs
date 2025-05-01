@@ -3,11 +3,11 @@ use std::{collections::BTreeMap, sync::Arc};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 
+use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
     structs::{QueryMap, SumcheckSubproof, TrackerID},
 };
-
 /// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative)]
 #[derivative(
@@ -39,7 +39,7 @@ where
     F: PrimeField,
     PC: PCS<F>,
 {
-    pub batch_proof: <PC as PCS<F>>::BatchProof,
+    pub opening_proof: PCSOpeningProof<F, PC>,
     pub commitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub query_map: QueryMap<F, PC>,
 }

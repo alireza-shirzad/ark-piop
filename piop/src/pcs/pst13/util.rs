@@ -1,5 +1,6 @@
-use crate::arithmetic::{ark_ff::PrimeField, mat_poly::mle::MLE};
-use ark_std::{end_timer, start_timer, vec::Vec};
+use crate::arithmetic::mat_poly::mle::MLE;
+use ark_ff::PrimeField;
+use ark_std::vec::Vec;
 
 use crate::pcs::errors::PCSError;
 

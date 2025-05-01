@@ -6,11 +6,10 @@
 
 //! This module defines structs that are shared by all sub protocols.
 
-use std::collections::BTreeMap;
-
+use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 
-use crate::arithmetic::{ark_ff::PrimeField, virt_poly::hp_interface::HPVirtualPolynomial};
+use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
 /// An IOP proof is a collections of
 /// - messages from prover to verifier at each round through the interactive
 ///   protocol.

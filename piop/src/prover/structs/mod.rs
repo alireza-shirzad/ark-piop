@@ -3,14 +3,9 @@
 pub mod proof;
 
 /////////////////// Imports //////////////////
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, HashSet},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{cell::RefCell, collections::{BTreeMap, HashSet}, rc::Rc, sync::Arc};
 
-use super::{Prover, tracker::ProverTracker};
+use super::tracker::ProverTracker;
 use crate::{
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
@@ -19,16 +14,19 @@ use crate::{
     pcs::PCS,
     setup::structs::ProvingKey,
     structs::{
-        EvalClaimMap, TrackerID,
+        TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     transcript::Tr,
 };
 use ark_ff::PrimeField;
+use ark_poly::Polynomial;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 
 //////////////////// Structs & Enums //////////////////
+pub type ProverEvalClaimMap<F, PC> =
+    HashSet<(TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point)>;
 
 pub enum Poly {
     MLE,
@@ -71,7 +69,7 @@ where
 {
     pub materialized_polys: BTreeMap<TrackerID, Arc<PC::Poly>>,
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
-    pub eval_claims: EvalClaimMap<F, PC>,
+    pub eval_claims: ProverEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
 }

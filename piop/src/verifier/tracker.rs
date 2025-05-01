@@ -1,11 +1,10 @@
 use crate::{
     add_trace,
     arithmetic::{
-        ark_ff,
-        mat_poly::{lde::LDE, mle::MLE},
-        virt_poly::hp_interface::eq_eval,
+        f_short_str, f_vec_short_str,
+        mat_poly::{lde::LDE, mle::MLE, utils::eq_eval},
     },
-    errors::{DbSnError, DbSnResult},
+    errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
     piop::{
         errors::PolyIOPErrors,
@@ -14,14 +13,16 @@ use crate::{
     prover::structs::proof::Proof,
     setup::{errors::SetupError::NoRangePoly, structs::VerifyingKey},
     structs::{
-        TrackerID,
+        PCSOpeningProof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
 use ark_ff::PrimeField;
-use ark_std::{end_timer, start_timer};
+use ark_std::{cfg_iter, end_timer, start_timer};
 use itertools::MultiUnzip;
 use macros::timed;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 use std::{
     borrow::{Borrow, BorrowMut},
     collections::BTreeMap,
@@ -96,9 +97,9 @@ where
         TrackerID(self.state.num_tracked_polys)
     }
 
-    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> DbSnResult<TrackerID> {
+    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
         add_trace!("track_mv_com_by_id", "id = {:?}", id);
-        let new_id: TrackerID;
+
         let comm: MvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -116,7 +117,7 @@ where
                 }
             }
         }
-        new_id = self.track_mat_mv_com(comm).unwrap();
+        let new_id: TrackerID = self.track_mat_mv_com(comm).unwrap();
 
         #[cfg(debug_assertions)]
         {
@@ -129,9 +130,9 @@ where
         Ok(new_id)
     }
 
-    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> DbSnResult<TrackerID> {
+    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
         add_trace!("track_uv_com_by_id", "id = {:?}", id);
-        let new_id: TrackerID;
+
         let comm: UvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -149,7 +150,7 @@ where
                 }
             }
         }
-        new_id = self.track_mat_uv_com(comm).unwrap();
+        let new_id: TrackerID = self.track_mat_uv_com(comm).unwrap();
 
         #[cfg(debug_assertions)]
         {
@@ -163,7 +164,7 @@ where
     }
 
     /// Track a materiazlied multivariate commitment
-    pub(crate) fn track_mat_mv_com(&mut self, comm: MvPCS::Commitment) -> DbSnResult<TrackerID> {
+    pub(crate) fn track_mat_mv_com(&mut self, comm: MvPCS::Commitment) -> SnarkResult<TrackerID> {
         // Create the new TrackerID
         let id = self.gen_id();
 
@@ -176,7 +177,7 @@ where
                     Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
                         let query_res = *mv_queries_clone
                             .get(&(id, point))
-                            .ok_or(DbSnError::DummyError)?;
+                            .ok_or(SnarkError::DummyError)?;
                         Ok(query_res)
                     })),
                 );
@@ -204,7 +205,7 @@ where
     }
 
     // Track a materiazlied univariate commitment
-    pub fn track_mat_uv_com(&mut self, comm: UvPCS::Commitment) -> DbSnResult<TrackerID> {
+    pub fn track_mat_uv_com(&mut self, comm: UvPCS::Commitment) -> SnarkResult<TrackerID> {
         // Create the new TrackerID
         let id = self.gen_id();
 
@@ -266,7 +267,7 @@ where
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
+                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
                     Ok(o1_cloned(point)? + o2_cloned(point)?)
                 })))
             }
@@ -290,13 +291,13 @@ where
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
                 Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
-                    Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
+                    Ok(o1_cloned(point.clone())? - o2_cloned(point.clone())?)
                 }))
             }
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
+                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
                     Ok(o1_cloned(point)? - o2_cloned(point)?)
                 })))
             }
@@ -326,7 +327,7 @@ where
             (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
+                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
                     Ok(o1_cloned(point)? * o2_cloned(point)?)
                 })))
             }
@@ -355,7 +356,7 @@ where
             }
             Oracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
+                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
                     Ok(o1_cloned(point)? + scalar)
                 })))
             }
@@ -381,7 +382,7 @@ where
             }
             Oracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> DbSnResult<F> {
+                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
                     Ok(o1_cloned(point)? * scalar)
                 })))
             }
@@ -392,26 +393,36 @@ where
         // Return the new TrackerID
         res_id
     }
-
-    pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<F>) -> DbSnResult<F> {
-        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap().borrow();
+    //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
+    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
+        self.proof
+            .as_ref()
+            .unwrap()
+            .sc_subproof
+            .get_sumcheck_claims()
+            .get(&id)
+            .cloned()
+            .ok_or(SnarkError::DummyError)
+    }
+    pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
+        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
         match oracle {
             Oracle::Multivariate(f) => f(point),
-            _ => Err(DbSnError::DummyError),
+            _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn query_uv(&self, oracle_id: TrackerID, point: F) -> DbSnResult<F> {
-        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap().borrow();
+    pub fn query_uv(&self, oracle_id: TrackerID, point: F) -> SnarkResult<F> {
+        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
         match oracle {
             Oracle::Univariate(f) => f(point),
-            _ => Err(DbSnError::DummyError),
+            _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> DbSnResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.state
             .transcript
             .get_and_append_challenge(label)
-            .map_err(DbSnError::from)
+            .map_err(SnarkError::from)
     }
 
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
@@ -428,6 +439,29 @@ where
             .zero_check_claims
             .push(TrackerZerocheckClaim::new(poly_id));
     }
+
+    #[timed(
+        "poly_id:",
+        poly_id,
+        ", point:",
+        f_vec_short_str(point),
+        ", eval:",
+        f_short_str(eval)
+    )]
+    pub fn add_mv_eval_claim(
+        &mut self,
+        poly_id: TrackerID,
+        point: &[F],
+        eval: F,
+    ) -> SnarkResult<()> {
+        add_trace!("add_mv_eval_claim", "poly_id {:?}", poly_id.0);
+        self.state
+            .mv_pcs_substate
+            .eval_claims
+            .insert(((poly_id, point.to_vec()), eval));
+        Ok(())
+    }
+
     // Set range commitments for the tracker
     pub(crate) fn set_indexed_oracles(
         &mut self,
@@ -439,10 +473,10 @@ where
     pub(crate) fn get_indexed_oracle(
         &self,
         data_type: String,
-    ) -> DbSnResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         match self.vk.range_comms.get(&data_type) {
             Some(poly) => Ok(poly.clone()),
-            _ => Err(DbSnError::SetupError(NoRangePoly(format!(
+            _ => Err(SnarkError::SetupError(NoRangePoly(format!(
                 "{:?}",
                 data_type
             )))),
@@ -459,19 +493,8 @@ where
             .cloned()
     }
 
-    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> DbSnResult<F> {
-        self.proof
-            .as_ref()
-            .unwrap()
-            .sc_subproof
-            .sumcheck_claims
-            .get(&id)
-            .cloned()
-            .ok_or(DbSnError::DummyError)
-    }
-
     // TODO: See if we can remove this
-    pub fn get_commitment_num_vars(&self, id: TrackerID) -> DbSnResult<usize> {
+    pub fn get_commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
         match self
             .proof
             .as_ref()
@@ -482,15 +505,15 @@ where
             .cloned()
         {
             Some(comm) => Ok(comm.num_vars()),
-            None => Err(DbSnError::from(PolyIOPErrors::InvalidVerifier(
+            None => Err(SnarkError::from(PolyIOPErrors::InvalidVerifier(
                 "Commitment not found".to_string(),
             ))),
         }
     }
 
     #[timed]
-    fn batch_z_check_claims(&mut self) -> DbSnResult<()> {
-        let zero_closure = |_: Vec<F>| -> DbSnResult<F> { Ok(F::zero()) };
+    fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
+        let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
         let mut agg = self.track_oracle(zero_oracle);
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
@@ -507,39 +530,46 @@ where
     }
 
     #[timed]
-    fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> DbSnResult<()> {
-        assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
+    fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
+        // Check at this point there should be only one batched zero check claim
+        debug_assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
+        // sample the random challenge r
         let r = self
             .state
             .transcript
             .get_and_append_challenge_vectors(b"0check r", max_nv)
             .unwrap();
-
+        // Get the zero check claim polynomial id
+        let z_check_aggr_id = self
+            .state
+            .mv_pcs_substate
+            .zero_check_claims
+            .last()
+            .unwrap()
+            .get_id();
         // create the succint eq(x, r) closure and virtual comm
-        let eq_x_r_closure = move |pt: Vec<F>| -> DbSnResult<F> { Ok(eq_eval(&pt, r.as_ref())?) };
+        let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { Ok(eq_eval(&pt, r.as_ref())?) };
         let eq_x_r_oracle = Oracle::Multivariate(Arc::new(eq_x_r_closure));
         let eq_x_r_comm = self.track_oracle(eq_x_r_oracle);
-        // create the relevant sumcheck claim
-        let new_sc_claim_comm = self.mul_oracles(
-            self.state
-                .mv_pcs_substate
-                .zero_check_claims
-                .last()
-                .unwrap()
-                .get_id(),
-            eq_x_r_comm,
-        ); // Note: SumCheck val should be zero
+        // create the relevant sumcheck claim, reduce the zero check claim to a sumcheck claim
+        let new_sc_claim_comm = self.mul_oracles(z_check_aggr_id, eq_x_r_comm);
+        // Add this new sumcheck claim to other sumcheck claims
         self.add_mv_sumcheck_claim(new_sc_claim_comm, F::zero());
         Ok(())
     }
 
+    // Aggregate the sumcheck claims, instead of verifying p_1 = s_1, p_2 = s_2, ...
+    // p_n = s_n, we verify c_1 * p_1 + c_2 * p_2 + ... + c_n * p_n = c_1 *
+    // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
     #[timed]
-    fn batch_s_check_claims(&mut self) -> DbSnResult<()> {
+    fn batch_s_check_claims(&mut self) -> SnarkResult<()> {
         // Aggreage te the sumcheck claims
-        let zero_closure = |_: Vec<F>| -> DbSnResult<F> { Ok(F::zero()) };
+        let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
         let mut agg = self.track_oracle(zero_oracle);
         let mut sc_sum = F::zero();
+        // Iterate over the sumcheck claims and aggregate them
+        // Order matters here, DO NOT PARALLELIZE
         agg = take(&mut self.state.mv_pcs_substate.sum_check_claims)
             .into_iter()
             .fold(agg, |acc, claim| {
@@ -550,48 +580,49 @@ where
                 sc_sum += claim.get_claim() * ch;
                 self.add_oracles(acc, cp)
             });
+        // Now the sumcheck claims are empty
+        // Add the new aggregated sumcheck claim to the list of claims
         self.add_mv_sumcheck_claim(agg, sc_sum);
         Ok(())
     }
 
     #[timed]
-    fn perform_single_sumcheck(&mut self) -> DbSnResult<(SumCheckSubClaim<F>, Vec<TrackerID>)> {
-        assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
+    fn perform_single_sumcheck(&mut self) -> SnarkResult<()> {
+        debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
+
+        let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
         let sc_subclaim = SumCheck::verify(
-            self.state
-                .mv_pcs_substate
-                .sum_check_claims
-                .last()
-                .unwrap()
-                .get_claim(),
-            &self.proof.as_ref().unwrap().sc_subproof.sc_proof,
-            &self.proof.as_ref().unwrap().sc_subproof.sc_aux_info,
+            sumcheck_aggr_claim.get_claim(),
+            self.proof.as_ref().unwrap().sc_subproof.get_sc_proof(),
+            self.proof.as_ref().unwrap().sc_subproof.get_sc_aux_info(),
             &mut self.state.transcript,
         )?;
-        let mut oppened_coms = vec![];
+        self.add_mv_eval_claim(
+            sumcheck_aggr_claim.get_id(),
+            &sc_subclaim.point,
+            sc_subclaim.expected_evaluation,
+        )?;
 
-        Ok((sc_subclaim, oppened_coms))
+        Ok(())
+    }
+
+    #[timed(
+        "num_claims:",
+        self.state.mv_pcs_substate.eval_claims.len()
+    )]
+    fn perform_eval_check(&mut self) -> SnarkResult<bool> {
+        let mut output_res = true;
+        for ((id, point), eval) in &self.state.mv_pcs_substate.eval_claims {
+            let res = self.query_mv(*id, point.clone()).unwrap() == eval.clone();
+            output_res = res && output_res;
+        }
+
+        Ok(output_res)
     }
 
     #[timed]
-    fn perform_eval_check(&mut self) -> DbSnResult<bool> {
-        // TODO
-        Ok(true)
-    }
-
-    #[timed]
-    fn verify_sc_proofs(&mut self) -> DbSnResult<bool> {
-        // Get the max_nv which is the number of variabels for the sumchekck protocol
-        // TODO: The aux info should be derivable by the verifier looking at the sql
-        // query and io tables
-        let max_nv: usize = self
-            .proof
-            .as_ref()
-            .unwrap()
-            .sc_subproof
-            .sc_aux_info
-            .num_variables;
+    fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<bool> {
         // Batch all the zero check claims into one
         self.batch_z_check_claims()?;
         // Convert the only zero check claim to a sumcheck claim
@@ -605,51 +636,129 @@ where
         Ok(res)
     }
 
-    #[timed("num_claims:", self.state.mv_pcs_substate.eval_claims.len())]
-    fn verify_mv_pcs_proof(&mut self) -> DbSnResult<bool> {
+    #[timed("num_claims:",  &self.proof.as_ref().unwrap().mv_pcs_subproof.query_map.len())]
+    fn verify_mv_pcs_proof(&mut self, max_nv: usize) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().mv_pcs_subproof.query_map;
         // Prepare the input for calling the batch verify function
         let (mat_coms, points): (Vec<_>, Vec<_>) = eval_claims
             .iter()
             .map(|((id, point), _eval)| {
-                let poly = self.state.mv_pcs_substate.materialized_comms[id].clone();
-                (poly, point.clone())
+                let com = self.state.mv_pcs_substate.materialized_comms[id].clone();
+                (com, point.clone())
             })
             .multiunzip();
         // Invoke the batch verify function
-        let pcs_res = MvPCS::batch_verify(
-            &self.vk.mv_pcs_param,
-            &mat_coms,
-            points.as_slice(),
-            &self.proof.as_ref().unwrap().mv_pcs_subproof.batch_proof,
-            &mut self.state.transcript,
-        )?;
+        let mut pcs_res: bool;
+        if mat_coms.len() == 1 {
+            let opening_proof = match self.proof.as_ref().unwrap().mv_pcs_subproof.opening_proof {
+                PCSOpeningProof::SingleProof(ref proof) => proof,
+                _ => {
+                    return Err(SnarkError::DummyError);
+                }
+            };
+            pcs_res = MvPCS::verify(
+                &self.vk.mv_pcs_param,
+                &mat_coms[0],
+                &points[0],
+                self.proof
+                    .as_ref()
+                    .unwrap()
+                    .mv_pcs_subproof
+                    .query_map
+                    .values()
+                    .next()
+                    .unwrap(),
+                opening_proof,
+            )?;
+        } else if mat_coms.len() > 1 {
+            let opening_proof = match self.proof.as_ref().unwrap().mv_pcs_subproof.opening_proof {
+                PCSOpeningProof::BatchProof(ref proof) => proof,
+                _ => {
+                    return Err(SnarkError::DummyError);
+                }
+            };
+
+            pcs_res = MvPCS::batch_verify(
+                &self.vk.mv_pcs_param,
+                &mat_coms,
+                points.as_slice(),
+                opening_proof,
+                &mut self.state.transcript,
+            )?;
+        } else {
+            pcs_res = true;
+        }
+
         Ok(pcs_res)
     }
     #[timed("num_claims:", self.state.uv_pcs_substate.eval_claims.len())]
-    fn verify_uv_pcs_proof(&mut self) -> DbSnResult<bool> {
+    fn verify_uv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().uv_pcs_subproof.query_map;
         // Prepare the input for calling the batch verify function
         let (mat_coms, points): (Vec<_>, Vec<_>) = eval_claims
             .iter()
             .map(|((id, point), _eval)| {
-                let poly = self.state.uv_pcs_substate.materialized_comms[id].clone();
-                (poly, *point)
+                let com = self.state.uv_pcs_substate.materialized_comms[id].clone();
+                (com, point.clone())
             })
             .multiunzip();
         // Invoke the batch verify function
-        // TODO: the uvpcs does not have a batch verify function yet
-        // let pcs_res = UvPCS::batch_verify(
-        //     &self.vk.uv_pcs_param,
-        //     &mat_coms,
-        //     points.as_slice(),
-        //     &self.proof.as_ref().unwrap().uv_pcs_subproof.batch_proof,
-        //     &mut self.state.transcript,
-        // )?;
-        let pcs_res = true;
+        let mut pcs_res: bool;
+        if mat_coms.len() == 1 {
+            let opening_proof = match self.proof.as_ref().unwrap().uv_pcs_subproof.opening_proof {
+                PCSOpeningProof::SingleProof(ref proof) => proof,
+                _ => {
+                    return Err(SnarkError::DummyError);
+                }
+            };
+            pcs_res = UvPCS::verify(
+                &self.vk.uv_pcs_param,
+                &mat_coms[0],
+                &points[0],
+                self.proof
+                    .as_ref()
+                    .unwrap()
+                    .uv_pcs_subproof
+                    .query_map
+                    .values()
+                    .next()
+                    .unwrap(),
+                opening_proof,
+            )?;
+        } else if mat_coms.len() > 1 {
+            let opening_proof = match self.proof.as_ref().unwrap().uv_pcs_subproof.opening_proof {
+                PCSOpeningProof::BatchProof(ref proof) => proof,
+                _ => {
+                    return Err(SnarkError::DummyError);
+                }
+            };
+
+            pcs_res = UvPCS::batch_verify(
+                &self.vk.uv_pcs_param,
+                &mat_coms,
+                points.as_slice(),
+                opening_proof,
+                &mut self.state.transcript,
+            )?;
+        } else {
+            pcs_res = true;
+        }
+
         Ok(pcs_res)
+    }
+
+    // Get the max_nv which is the number of variabels for the sumchekck protocol
+    // TODO: The aux info should be derivable by the verifier looking at the sql
+    // query and io tables
+    fn equalize_mat_com_nv(&self) -> usize {
+        self.proof
+            .as_ref()
+            .unwrap()
+            .sc_subproof
+            .get_sc_aux_info()
+            .num_variables
     }
 
     /// Verify the claims of the proof
@@ -657,13 +766,16 @@ where
     /// 2. Verify the multivariate evaluation claims using the multivariate PCS
     /// 3. Verify the univariate evaluation claims using the univariate PCS
     #[timed]
-    pub fn verify(&mut self) -> DbSnResult<()> {
+    pub fn verify(&mut self) -> SnarkResult<()> {
+        let max_nv = self.equalize_mat_com_nv();
         // Verify the sumcheck proofs
-        assert!(self.verify_sc_proofs()?);
+        assert!(self.verify_sc_proofs(max_nv)?);
         // Verify the multivariate pcs proofs
-        assert!(self.verify_mv_pcs_proof()?);
+        // assert!(self.verify_mv_pcs_proof(max_nv)?);
+        self.verify_mv_pcs_proof(max_nv)?;
         // Verify the multivariate pcs proofs
-        assert!(self.verify_uv_pcs_proof()?);
+        // assert!(self.verify_uv_pcs_proof()?);
+        self.verify_uv_pcs_proof()?;
         Ok(())
     }
 }

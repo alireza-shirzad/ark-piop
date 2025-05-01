@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// An `enum` specifying the possible failure modes of the DB-SNARK verifier
 #[derive(Error, Debug)]
+#[allow(private_interfaces)]
 pub enum VerifierError {
     #[error("The verifier has not received any proof yet")]
     ProofNotReceived,

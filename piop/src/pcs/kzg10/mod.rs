@@ -1,16 +1,11 @@
 use super::PCS;
 use crate::arithmetic::mat_poly::lde::LDE;
-use crate::{
-    arithmetic::{
-        ark_ff::PrimeField,
-        ark_poly::{DenseUVPolynomial, Polynomial},
-    },
-    pcs::PCSError,
-};
+use crate::pcs::PCSError;
 use ark_ec::{
     AffineRepr, CurveGroup, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM,
 };
-use ark_ff::One;
+use ark_ff::{One, PrimeField};
+use ark_poly::{DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::start_timer;
 use macros::timed;
@@ -102,7 +97,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         poly: &Arc<Self::Poly>,
     ) -> Result<Self::Commitment, PCSError> {
         let prover_param = prover_param.borrow();
-        let commit_time = if poly.degree() >= prover_param.powers_of_g.len() {
+        let _commit_time = if poly.degree() >= prover_param.powers_of_g.len() {
             return Err(PCSError::InvalidParameters(format!(
                 "uni poly degree {} is larger than allowed {}",
                 poly.degree(),
@@ -159,8 +154,8 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
             .iter()
             .zip(_points.iter())
             .zip(_evals.iter())
-            .for_each(|((poly, point), eval)| {
-                let (proof, eval) = Self::open(_prover_param.borrow(), poly, point).unwrap();
+            .for_each(|((poly, point), _)| {
+                let (proof, _) = Self::open(_prover_param.borrow(), poly, point).unwrap();
                 batch_proof.0.push(proof);
             });
         Ok(batch_proof)
@@ -208,10 +203,9 @@ fn skip_leading_zeros<F: PrimeField, P: DenseUVPolynomial<F>>(p: &P) -> (usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arithmetic::ark_ff::UniformRand;
+    use ark_std::UniformRand;
     use ark_std::test_rng;
     use ark_test_curves::bls12_381::Bls12_381;
-
     fn end_to_end_test_template<E>() -> Result<(), PCSError>
     where
         E: Pairing,

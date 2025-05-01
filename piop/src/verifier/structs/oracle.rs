@@ -1,25 +1,32 @@
-use ark_ff::PrimeField;
-use ark_std::fmt::Debug;
-use derivative::Derivative;
-use std::{cell::RefCell, rc::Rc, sync::Arc};
-
+use crate::impl_assign_oracle;
+use crate::impl_assign_scalar;
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::DbSnResult,
+    errors::SnarkResult,
     pcs::PCS,
     structs::TrackerID,
     verifier::tracker::VerifierTracker,
 };
+use ark_ff::PrimeField;
+use ark_std::fmt::Debug;
+use derivative::Derivative;
+use std::ops::MulAssign;
+use std::{
+    cell::RefCell,
+    ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign},
+    rc::Rc,
+    sync::Arc,
+};
 
 ////////////////////////////// Structs & Enums //////////////////////////////
 
-pub trait CloneableFn<F: 'static, In>: Fn(In) -> DbSnResult<F> + Send + Sync {
+pub trait CloneableFn<F: 'static, In>: Fn(In) -> SnarkResult<F> + Send + Sync {
     fn clone_box(&self) -> Box<dyn CloneableFn<F, In>>;
 }
 
 impl<F: 'static, In: 'static, T> CloneableFn<F, In> for T
 where
-    T: Fn(In) -> DbSnResult<F> + Clone + Send + Sync + 'static,
+    T: Fn(In) -> SnarkResult<F> + Clone + Send + Sync + 'static,
 {
     fn clone_box(&self) -> Box<dyn CloneableFn<F, In>> {
         Box::new(self.clone())
@@ -82,6 +89,22 @@ where
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 }
+
+
+impl<F, MvPCS, UvPCS> Neg for TrackedOracle<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedOracle<F, MvPCS, UvPCS>;
+    #[inline]
+    fn neg(self) -> Self::Output {
+        let id = self.tracker.borrow_mut().mul_scalar(self.id, -F::one());
+        TrackedOracle::new(id, self.tracker)
+    }
+}
+
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS> TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
@@ -103,32 +126,89 @@ where
             "TrackedOracles are not from the same tracker"
         );
     }
-
-    pub fn add_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        let res_id = self.tracker.borrow_mut().add_oracles(self.id, other.id);
-        TrackedOracle::new(res_id, self.tracker.clone())
-    }
-
-    pub fn sub_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        let res_id = self.tracker.borrow_mut().sub_oracles(self.id, other.id);
-        TrackedOracle::new(res_id, self.tracker.clone())
-    }
-
-    pub fn mul_oracles(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        let res_id = self.tracker.borrow_mut().mul_oracles(self.id, other.id);
-        TrackedOracle::new(res_id, self.tracker.clone())
-    }
-
-    pub fn add_scalar(&self, c: F) -> TrackedOracle<F, MvPCS, UvPCS> {
-        let res_id = self.tracker.borrow_mut().add_scalar(self.id, c);
-        TrackedOracle::new(res_id, self.tracker.clone())
-    }
-
-    pub fn mul_scalar(&self, c: F) -> TrackedOracle<F, MvPCS, UvPCS> {
-        let res_id = self.tracker.borrow_mut().mul_scalar(self.id, c);
-        TrackedOracle::new(res_id, self.tracker.clone())
-    }
 }
+
+#[macro_export]
+macro_rules! impl_assign_oracle {
+    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
+        impl<F, MvPCS, UvPCS> $trait_<&Self> for TrackedOracle<F, MvPCS, UvPCS>
+        where
+            F: PrimeField,
+            MvPCS: PCS<F, Poly = MLE<F>>,
+            UvPCS: PCS<F, Poly = LDE<F>>,
+        {
+            #[inline]
+            fn $fn_(&mut self, rhs: &Self) {
+                self.assert_same_tracker(rhs);
+                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs.id);
+                self.id = new_id;
+            }
+        }
+    };
+}
+#[macro_export]
+macro_rules! impl_assign_scalar {
+    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
+        impl<F, MvPCS, UvPCS> std::ops::$trait_<F> for TrackedOracle<F, MvPCS, UvPCS>
+        where
+            F: PrimeField,
+            MvPCS: PCS<F, Poly = MLE<F>>,
+            UvPCS: PCS<F, Poly = LDE<F>>,
+        {
+            #[inline]
+            fn $fn_(&mut self, rhs: F) {
+                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs);
+                self.id = new_id;
+            }
+        }
+    };
+}
+
+macro_rules! impl_binop_oracle {
+    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
+        impl<'a, F, MvPCS, UvPCS> std::ops::$trait_<&'a TrackedOracle<F, MvPCS, UvPCS>>
+            for &'a TrackedOracle<F, MvPCS, UvPCS>
+        where
+            F: ark_ff::PrimeField,
+            MvPCS: PCS<F, Poly = MLE<F>>,
+            UvPCS: PCS<F, Poly = LDE<F>>,
+        {
+            type Output = TrackedOracle<F, MvPCS, UvPCS>;
+            #[inline]
+            fn $fn_(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
+                self.assert_same_tracker(rhs);
+                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs.id);
+                TrackedOracle::new(new_id, self.tracker.clone())
+            }
+        }
+    };
+}
+
+macro_rules! impl_binop_scalar {
+    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
+        impl<'a, F, MvPCS, UvPCS> std::ops::$trait_<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
+        where
+            F: ark_ff::PrimeField,
+            MvPCS: PCS<F, Poly = MLE<F>>,
+            UvPCS: PCS<F, Poly = LDE<F>>,
+        {
+            type Output = TrackedOracle<F, MvPCS, UvPCS>;
+            #[inline]
+            fn $fn_(self, rhs: F) -> Self::Output {
+                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs);
+                TrackedOracle::new(new_id, self.tracker.clone())
+            }
+        }
+    };
+}
+
+impl_binop_oracle!(Add, add, add_oracles);
+impl_binop_oracle!(Sub, sub, sub_oracles);
+impl_binop_oracle!(Mul, mul, mul_oracles);
+impl_binop_scalar!(Add, add, add_scalar);
+impl_binop_scalar!(Mul, mul, mul_scalar);
+impl_assign_oracle!(AddAssign, add_assign, add_oracles);
+impl_assign_oracle!(SubAssign, sub_assign, sub_oracles);
+impl_assign_oracle!(MulAssign, mul_assign, mul_oracles);
+impl_assign_scalar!(AddAssign, add_assign, add_scalar);
+impl_assign_scalar!(MulAssign, mul_assign, mul_scalar);

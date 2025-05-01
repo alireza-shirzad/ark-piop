@@ -5,16 +5,16 @@
 // which creates a cyclic dependency.
 use crate::{
     arithmetic::{
-        ark_poly::Polynomial,
         f_mat_short_str, f_vec_short_str,
-        mat_poly::mle::MLE,
-        virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo, build_eq_x_r_vec},
+        mat_poly::{mle::MLE, utils::build_eq_x_r_vec},
+        virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo},
     },
     pcs::{PCSError, pst13::util::eq_eval, structs::Commitment},
     piop::{structs::SumcheckProof, sum_check::SumCheck},
     transcript::Tr,
 };
 use ark_ec::{CurveGroup, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM};
+use ark_poly::{MultilinearExtension, Polynomial};
 use ark_std::{One, Zero, end_timer, log2, start_timer};
 use macros::timed;
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
@@ -178,8 +178,6 @@ where
     E: Pairing,
     MvPCS: PCS<E::ScalarField, Poly = MLE<E::ScalarField>, Commitment = Commitment<E>>,
 {
-    // TODO: sanity checks
-
     let k = f_i_commitments.len();
     let ell = log2(k) as usize;
     let num_var = proof.sum_check_proof.point.len();

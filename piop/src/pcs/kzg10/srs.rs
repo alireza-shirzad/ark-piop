@@ -6,11 +6,9 @@
 
 //! Implementing Structured Reference Strings for univariate polynomial KZG
 
-use crate::{
-    arithmetic::ark_ff::PrimeField,
-    pcs::{PCSError, StructuredReferenceString},
-};
+use crate::pcs::{PCSError, StructuredReferenceString};
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
+use ark_ff::PrimeField;
 use ark_ff::{One, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, rand::Rng, start_timer};
@@ -123,7 +121,6 @@ impl<E: Pairing> StructuredReferenceString<E> for UnivariateUniversalParams<E> {
 
         // let window_size = FixedBase::get_mul_window_size(max_degree + 1);
 
-        let scalar_bits = E::ScalarField::MODULUS_BIT_SIZE as usize;
         // TODO: parallelization
         let powers_of_g = g.batch_mul(&powers_of_beta);
 

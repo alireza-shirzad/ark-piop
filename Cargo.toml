@@ -33,7 +33,6 @@ itertools = "0.14"
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0"
-
 [patch.crates-io]
 ark-std = { git = "https://github.com/alireza-shirzad/std" }
 

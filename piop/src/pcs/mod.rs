@@ -5,14 +5,10 @@ pub mod pst13;
 pub mod structs;
 pub mod utils;
 
-use crate::{
-    arithmetic::{
-        ark_ff::{Field, PrimeField},
-        ark_poly::{self, Polynomial},
-    },
-    transcript::Tr,
-};
+use crate::transcript::Tr;
 use ark_ec::pairing::Pairing;
+use ark_ff::{Field, PrimeField};
+use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use errors::PCSError;

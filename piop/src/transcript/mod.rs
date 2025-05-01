@@ -1,17 +1,14 @@
 pub(crate) mod errors;
 use crate::{
     add_trace,
-    arithmetic::{ark_ff::PrimeField, f_short_str, f_vec_short_str},
+    arithmetic::{f_short_str, f_vec_short_str},
     to_bytes,
 };
+use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
-use ark_std::fmt;
 use errors::TranscriptError;
 use merlin::Transcript;
-use std::{
-    fmt::{Debug, Formatter},
-    marker::PhantomData,
-};
+use std::marker::PhantomData;
 /// An IOP transcript consists of a Merlin transcript and a flag `is_empty` to
 /// indicate that if the transcript is empty.
 ///
@@ -34,7 +31,7 @@ impl<F: PrimeField> Default for Tr<F> {
         Self {
             transcript: Transcript::new(b""),
             is_empty: true,
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
         }
     }
 }
@@ -46,12 +43,12 @@ impl<F: PrimeField> Tr<F> {
         Self {
             transcript: Transcript::new(label),
             is_empty: true,
-            phantom: PhantomData::default(),
+            phantom: PhantomData,
         }
     }
 
     // Append the message to the transcript.
-    pub fn append_message(
+    pub(crate) fn append_message(
         &mut self,
         label: &'static [u8],
         msg: &[u8],
@@ -62,7 +59,8 @@ impl<F: PrimeField> Tr<F> {
     }
 
     // Append the message to the transcript.
-    pub fn append_field_element(
+    #[allow(dead_code)]
+    pub(crate) fn append_field_element(
         &mut self,
         label: &'static [u8],
         field_elem: &F,
@@ -71,7 +69,7 @@ impl<F: PrimeField> Tr<F> {
     }
 
     // Append the message to the transcript.
-    pub fn append_serializable_element<S: CanonicalSerialize>(
+    pub(crate) fn append_serializable_element<S: CanonicalSerialize>(
         &mut self,
         label: &'static [u8],
         group_elem: &S,
@@ -85,7 +83,10 @@ impl<F: PrimeField> Tr<F> {
     // The output field element is statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
+    pub(crate) fn get_and_append_challenge(
+        &mut self,
+        label: &'static [u8],
+    ) -> Result<F, TranscriptError> {
         //  we need to reject when transcript is empty
         if self.is_empty {
             return Err(TranscriptError::InvalidTranscript(
@@ -112,7 +113,7 @@ impl<F: PrimeField> Tr<F> {
     // The output field element are statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub fn get_and_append_challenge_vectors(
+    pub(crate) fn get_and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
         len: usize,

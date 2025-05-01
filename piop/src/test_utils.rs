@@ -1,6 +1,6 @@
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::DbSnError,
+    errors::SnarkError,
     pcs::PCS,
     prover::Prover,
     setup::KeyGenerator,
@@ -18,7 +18,7 @@ pub fn prelude_with_vars<
     UvPCS: PCS<F, Poly = LDE<F>>,
 >(
     num_mv_vars: usize,
-) -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), DbSnError> {
+) -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
     let key_generator = KeyGenerator::<F, MvPCS, UvPCS>::new().with_num_mv_vars(num_mv_vars);
     let (pk, vk) = key_generator.gen_keys().unwrap();
     let prover = Prover::new_from_pk(pk);
@@ -35,7 +35,7 @@ pub fn test_prelude<
     F: Field + PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
->() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), DbSnError> {
+>() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
     prelude_with_vars::<F, MvPCS, UvPCS>(16)
 }
 
@@ -48,6 +48,6 @@ pub fn bench_prelude<
     F: Field + PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
->() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), DbSnError> {
+>() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
     prelude_with_vars::<F, MvPCS, UvPCS>(23)
 }

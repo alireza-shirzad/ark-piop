@@ -5,14 +5,19 @@ use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     pcs::PCS,
     setup::structs::VerifyingKey,
+    structs::TrackerID,
 };
 use ark_ff::PrimeField;
+use ark_poly::Polynomial;
 use derivative::Derivative;
 use oracle::TrackedOracle;
-use std::collections::BTreeMap;
-
+use std::collections::{BTreeMap, HashSet};
 ///////////// Structs & Enums ///////////
 
+pub type VerifierEvalClaimMap<F, PC> = HashSet<(
+    (TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point),
+    F,
+)>;
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct ProcessedVerifyingKey<F, MvPCS, UvPCS>

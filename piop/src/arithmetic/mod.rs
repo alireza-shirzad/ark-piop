@@ -1,8 +1,6 @@
 use ark_ec::AffineRepr;
 use ark_ff::{Field, PrimeField};
 
-pub use ark_ff;
-pub use ark_poly;
 pub(crate) mod errors;
 pub mod ff;
 pub mod mat_poly;

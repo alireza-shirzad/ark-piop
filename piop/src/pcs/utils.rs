@@ -9,7 +9,7 @@ use crate::add_trace;
 use super::PCS;
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{add_to_trace, test_rng};
+use ark_std::test_rng;
 use macros::timed;
 
 #[timed]

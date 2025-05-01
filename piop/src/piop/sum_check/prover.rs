@@ -1,13 +1,12 @@
 use crate::{
     arithmetic::{
-        ark_ff::{PrimeField, batch_inversion},
         mat_poly::{mle::MLE, utils::fix_variables},
         virt_poly::hp_interface::HPVirtualPolynomial,
     },
     piop::errors::PolyIOPErrors,
 };
-use ark_std::{cfg_into_iter, end_timer, start_timer};
-use macros::timed;
+use ark_ff::{PrimeField, batch_inversion};
+use ark_std::cfg_into_iter;
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator};

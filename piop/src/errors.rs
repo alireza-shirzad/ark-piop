@@ -1,18 +1,18 @@
 /////// Imports /////////
 
-use thiserror::Error;
-
 use crate::{
     arithmetic::errors::ArithErrors, pcs::errors::PCSError, piop::errors::PolyIOPErrors,
     prover::errors::ProverError, setup::errors::SetupError, transcript::errors::TranscriptError,
     verifier::errors::VerifierError,
 };
+use thiserror::Error;
 /// The result type for the DB-SNARK system
-pub type DbSnResult<T> = Result<T, DbSnError>;
+pub type SnarkResult<T> = Result<T, SnarkError>;
 
 /// An `enum` specifying the possible failure modes of the DB-SNARK system.
 #[derive(Error, Debug)]
-pub enum DbSnError {
+#[allow(private_interfaces)]
+pub enum SnarkError {
     #[error("The proof system does not support the given data type")]
     DataTypeNotSupported,
 

@@ -6,18 +6,16 @@
 
 //! Implementing Structured Reference Strings for multilinear polynomial KZG
 use crate::{
-    arithmetic::{
-        ark_ff::{Field, PrimeField, Zero},
-        mat_poly::mle::MLE,
-    },
+    arithmetic::mat_poly::mle::MLE,
     pcs::{
         PCSError, StructuredReferenceString,
         pst13::util::{eq_eval, eq_extension},
     },
 };
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
-use ark_ff::UniformRand;
+use ark_ff::{PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_std::Zero;
 use ark_std::{end_timer, rand::Rng, start_timer};
 use core::iter::FromIterator;
 use macros::timed;
@@ -142,7 +140,6 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
         let mut powers_of_g = Vec::new();
 
         let t: Vec<_> = (0..num_vars).map(|_| E::ScalarField::rand(rng)).collect();
-        let scalar_bits = E::ScalarField::MODULUS_BIT_SIZE as usize;
 
         let mut eq: LinkedList<MLE<E::ScalarField>> = LinkedList::from_iter(eq_extension(&t));
         let mut eq_arr = LinkedList::new();
@@ -162,12 +159,12 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
         }
 
         let mut pp_powers = Vec::new();
-        let mut total_scalars = 0;
+        let mut _total_scalars = 0;
         for i in 0..num_vars {
             let eq = eq_arr.pop_front().unwrap();
             let pp_k_powers = (0..(1 << (num_vars - i))).map(|x| eq[x]);
             pp_powers.extend(pp_k_powers);
-            total_scalars += 1 << (num_vars - i);
+            _total_scalars += 1 << (num_vars - i);
         }
         let pp_g = g.batch_mul(&pp_powers);
 
@@ -204,7 +201,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
 }
 
 /// fix first `pad` variables of `poly` represented in evaluation form to zero
-fn remove_dummy_variable<F: Field>(poly: &[F], pad: usize) -> Result<Vec<F>, PCSError> {
+fn remove_dummy_variable<F: PrimeField>(poly: &[F], pad: usize) -> Result<Vec<F>, PCSError> {
     if pad == 0 {
         return Ok(poly.to_vec());
     }
