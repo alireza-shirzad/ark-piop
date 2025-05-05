@@ -11,13 +11,16 @@ use ark_std::start_timer;
 use macros::timed;
 use srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam};
 use std::{borrow::Borrow, ops::Mul, sync::Arc};
+use structs::Commitment;
 pub(crate) mod srs;
 use crate::{
-    pcs::{Rng, StructuredReferenceString, structs::Commitment},
+    pcs::{Rng, StructuredReferenceString},
     transcript::Tr,
 };
+pub mod structs;
 use ark_std::{end_timer, marker::PhantomData};
 /// KZG Polynomial Commitment Scheme on univariate polynomial.
+#[derive(Clone)]
 pub struct KZG10<E: Pairing> {
     #[doc(hidden)]
     phantom: PhantomData<E>,
@@ -159,6 +162,28 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
                 batch_proof.0.push(proof);
             });
         Ok(batch_proof)
+    }
+
+    /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
+    /// `poly_i` committed inside `comm`.
+    fn batch_verify(
+        _verifier_param: &Self::VerifierParam,
+        _commitments: &[Self::Commitment],
+        _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
+        _evals: &[E::ScalarField],
+        _batch_proof: &Self::BatchProof,
+        _transcript: &mut Tr<E::ScalarField>,
+    ) -> Result<bool, PCSError> {
+        _commitments
+            .iter()
+            .zip(_points.iter())
+            .zip(_batch_proof.0.iter())
+            .zip(_evals.iter())
+            .for_each(|(((commitment, point), proof), value)| {
+                let res = Self::verify(_verifier_param, commitment, point, value, proof).unwrap();
+                assert!(res, "proof was incorrect");
+            });
+        Ok(true)
     }
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial

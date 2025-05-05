@@ -1,3 +1,10 @@
+use super::structs::{
+    ProcessedProvingKey, ProverState, TrackedPoly,
+    proof::{PCSSubproof, Proof},
+};
+use crate::prover::errors::ProverError::HonestProverError;
+use crate::prover::tracker::SnarkError::ProverError;
+use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
 use crate::{
     add_trace,
     arithmetic::{
@@ -26,19 +33,16 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_poly::{MultilinearExtension, Polynomial};
-use ark_std::{add_single_trace, end_timer, start_timer};
+use ark_std::{add_single_trace, cfg_iter, end_timer, start_timer};
 use derivative::Derivative;
 use macros::timed;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     mem::take,
     panic,
     sync::Arc,
-};
-
-use super::structs::{
-    ProcessedProvingKey, ProverState, TrackedPoly,
-    proof::{PCSSubproof, Proof},
 };
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their commitments. It is in charge of  
@@ -253,8 +257,16 @@ where
         self.state.virtual_polys.get(&id)
     }
     #[timed]
-    fn extract_openable_ids(&self, poly: &VirtualPoly<F>) -> BTreeSet<TrackerID> {
-        use std::collections::{BTreeSet, HashSet};
+    fn extract_mv_openable_ids(&self, id: TrackerID) -> BTreeSet<TrackerID> {
+        if self
+            .state
+            .mv_pcs_substate
+            .materialized_comms
+            .contains_key(&id)
+        {
+            return BTreeSet::from([id]);
+        }
+        let poly = self.get_virt_poly(id).unwrap();
         // 1)  Initialise the DFS stack with every TrackerID mentioned up-front
         let mut stack: Vec<TrackerID> = poly
             .iter()
@@ -292,6 +304,56 @@ where
 
         openable
     }
+
+    #[timed]
+    fn extract_uv_openable_ids(&self, id: TrackerID) -> BTreeSet<TrackerID> {
+        if self
+            .state
+            .uv_pcs_substate
+            .materialized_comms
+            .contains_key(&id)
+        {
+            return BTreeSet::from([id]);
+        }
+        let poly = self.get_virt_poly(id).unwrap();
+        // 1)  Initialise the DFS stack with every TrackerID mentioned up-front
+        let mut stack: Vec<TrackerID> = poly
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().copied())
+            .collect();
+
+        let mut openable = BTreeSet::new();
+        let mut visited = HashSet::new();
+
+        // 2)  Standard iterative DFS
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
+                continue; // already explored
+            }
+
+            // a) leaf with concrete commitment?
+            if self
+                .state
+                .uv_pcs_substate
+                .materialized_comms
+                .contains_key(&id)
+            {
+                openable.insert(id);
+                continue; // do *not* push children
+            }
+
+            // b) otherwise follow the virtual-poly reference if it exists
+            if let Some(vpoly) = self.state.virtual_polys.get(&id) {
+                for (_, child_ids) in vpoly {
+                    stack.extend(child_ids.iter().copied());
+                }
+            }
+            // c) dangling reference ⇒ silently ignore
+        }
+
+        openable
+    }
+
     /// Get the number of variables of a polynomial, by its TrackerID
     pub fn get_poly_nv(&self, id: TrackerID) -> usize {
         // If it's materialized, simply return the number of variables
@@ -604,6 +666,13 @@ where
     // TODO: Remove the claimed_sum
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> SnarkResult<()> {
         add_trace!("add_mv_sumcheck_claim", "poly_id {:?}", poly_id.0);
+        #[cfg(feature = "honest-prover")]
+        {
+            let evals = self.evaluations(poly_id);
+            if cfg_iter!(evals).sum::<F>() != claimed_sum {
+                return Err(ProverError(HonestProverError(FalseClaim)));
+            }
+        }
         self.state
             .mv_pcs_substate
             .sum_check_claims
@@ -619,10 +688,9 @@ where
         add_trace!("add_mv_zerocheck_claim", "poly_id {:?}", poly_id.0);
         #[cfg(feature = "honest-prover")]
         {
-            for eval in self.evaluations(poly_id).iter() {
-                if *eval != F::zero() {
-                    return Err(SnarkError::DummyError);
-                }
+            let evals = self.evaluations(poly_id);
+            if cfg_iter!(evals).any(|eval| *eval != F::zero()) {
+                return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
         self.state
@@ -641,7 +709,7 @@ where
         self.state
             .uv_pcs_substate
             .eval_claims
-            .insert((poly_id, point));
+            .push(TrackerEvalClaim::new(poly_id, point));
         Ok(())
     }
 
@@ -651,7 +719,7 @@ where
         self.state
             .mv_pcs_substate
             .eval_claims
-            .insert((poly_id, point.to_vec()));
+            .push(TrackerEvalClaim::new(poly_id, point.to_vec()));
         Ok(())
     }
 
@@ -725,6 +793,12 @@ where
             claim.set_claim(true_sum);
         }
 
+        for claim in self.state.mv_pcs_substate.eval_claims.iter_mut() {
+            let mut point = claim.get_point().clone();
+            point.resize(max_nv, F::zero());
+            claim.set_point(point);
+        }
+        add_trace!("equalize_mat_poly_nv", "max_nv found: {:?}", max_nv,);
         max_nv
     }
 
@@ -736,7 +810,6 @@ where
     fn batch_z_check_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
         // build the running aggregate polynomial
         let mut agg = self.track_virt_poly(Vec::new());
-
         // Perform the random linear combination and aggregate them
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
@@ -875,9 +948,10 @@ where
         let mut mat_polys = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
-        for (eval_id, eval_point) in &self.state.mv_pcs_substate.eval_claims {
-            let claim_virt_poly = self.get_virt_poly(*eval_id).unwrap();
-            let mat_ids = self.extract_openable_ids(claim_virt_poly);
+        for claim in &self.state.mv_pcs_substate.eval_claims {
+            let eval_id = claim.get_id();
+            let eval_point = claim.get_point();
+            let mat_ids = self.extract_mv_openable_ids(eval_id);
             add_trace!(
                 "compile_mv_pcs_subproof",
                 "polys add to opening queue: {:?}",
@@ -925,28 +999,34 @@ where
     /// commitments (c) a batch opening proof corresponding to the query map
     #[timed("num_claims:", self.state.uv_pcs_substate.eval_claims.len())]
     pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, UvPCS>> {
-        // Based on the evaluation claims that need to be proved, prepare the inputs for
-        // PCS batch-opening
-        let num_eval_claims = self.state.uv_pcs_substate.eval_claims.len();
-        let mut query_map = BTreeMap::new();
-        let mut mat_polys = Vec::with_capacity(num_eval_claims);
-        let mut points = Vec::with_capacity(num_eval_claims);
-        let mut evals = Vec::with_capacity(num_eval_claims);
-
-        for (id, point) in &self.state.uv_pcs_substate.eval_claims {
-            let poly = self.state.uv_pcs_substate.materialized_polys[id].clone();
-            let eval = self.evaluate_uv(*id, point).unwrap();
-            mat_polys.push(poly);
-            points.push(*point);
-            evals.push(eval);
-            query_map.insert((*id, *point), eval);
+        let mut query_map: BTreeMap<(TrackerID, F), F> = BTreeMap::new();
+        let mut mat_polys = Vec::new();
+        let mut points = Vec::new();
+        let mut evals = Vec::new();
+        for claim in &self.state.uv_pcs_substate.eval_claims {
+            let eval_id = claim.get_id();
+            let eval_point = claim.get_point();
+            let mat_ids = self.extract_uv_openable_ids(eval_id);
+            add_trace!(
+                "compile_mv_pcs_subproof",
+                "polys add to opening queue: {:?}",
+                mat_ids.iter().map(|id| id.0).collect::<Vec<_>>()
+            );
+            for mat_id in mat_ids {
+                let eval = self.evaluate_uv(mat_id, eval_point).unwrap();
+                query_map.insert((mat_id, eval_point.clone()), eval);
+                mat_polys.push(self.get_mat_uv_poly(mat_id).unwrap().clone());
+                points.push(eval_point.clone());
+                evals.push(eval);
+            }
         }
 
-        let opening_proof: PCSOpeningProof<F, UvPCS>;
+        let mut opening_proof: PCSOpeningProof<F, UvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = UvPCS::open(&self.pk.uv_pcs_param, &mat_polys[0], &points[0])?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
-        } else if mat_polys.is_empty() {
+            assert!(single_proof.1 == evals[0]);
+        } else if mat_polys.len() > 1 {
             let batch_proof = UvPCS::multi_open(
                 &self.pk.uv_pcs_param,
                 &mat_polys,
@@ -958,6 +1038,9 @@ where
         } else {
             opening_proof = PCSOpeningProof::Empty;
         }
+
+        // Perform the batch-opening
+
         Ok(PCSSubproof {
             query_map,
             opening_proof,

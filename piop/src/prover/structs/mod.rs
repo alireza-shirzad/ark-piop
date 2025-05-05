@@ -3,15 +3,21 @@
 pub mod proof;
 
 /////////////////// Imports //////////////////
-use std::{cell::RefCell, collections::{BTreeMap, HashSet}, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    rc::Rc,
+    sync::Arc,
+};
 
-use super::tracker::ProverTracker;
+use super::{Prover, tracker::ProverTracker};
 use crate::{
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
-        virt_poly::{VirtualPoly, hp_interface::HPVirtualPolynomial},
+        virt_poly::VirtualPoly,
     },
     pcs::PCS,
+    piop::DeepClone,
     setup::structs::ProvingKey,
     structs::{
         TrackerID,
@@ -24,12 +30,29 @@ use ark_poly::Polynomial;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 
-//////////////////// Structs & Enums //////////////////
-pub type ProverEvalClaimMap<F, PC> =
-    HashSet<(TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point)>;
+/// A claim that the sum of the evaluations of a polynomial on the boolean
+/// hypercube is equal to a certain value.
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
+#[derive(Debug, PartialEq, Eq, PartialOrd)]
+pub struct TrackerEvalClaim<F: PrimeField, PC: PCS<F>> {
+    id: TrackerID,
+    point: <PC::Poly as Polynomial<F>>::Point,
+}
 
-pub enum Poly {
-    MLE,
+impl<F: PrimeField, PC: PCS<F>> TrackerEvalClaim<F, PC> {
+    pub fn new(id: TrackerID, point: <PC::Poly as Polynomial<F>>::Point) -> Self {
+        Self { id, point }
+    }
+    pub fn get_id(&self) -> TrackerID {
+        self.id
+    }
+    pub fn get_point(&self) -> &<PC::Poly as Polynomial<F>>::Point {
+        &self.point
+    }
+    pub fn set_point(&mut self, point: <PC::Poly as Polynomial<F>>::Point) {
+        self.point = point;
+    }
 }
 
 // Clone is only implemented if PCS satisfies the PCS<F>
@@ -69,7 +92,7 @@ where
 {
     pub materialized_polys: BTreeMap<TrackerID, Arc<PC::Poly>>,
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
-    pub eval_claims: ProverEvalClaimMap<F, PC>,
+    pub eval_claims: Vec<TrackerEvalClaim<F, PC>>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
 }
@@ -106,18 +129,19 @@ where
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = "MvPCS: PCS<F>"))]
+/// A tracked polynomial that is tracked by the prover tracker
 pub struct TrackedPoly<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub id: TrackerID,
-    // TODO: For unvariate polynomials, this is the log_2(deg)
-    pub num_vars: usize,
-    pub tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
+    id: TrackerID,
+    log_size: usize,
+    tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
 }
 
+/// Debug implementation for TrackedPoly
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedPoly<F, MvPCS, UvPCS>
 where
     F: PrimeField,
@@ -127,11 +151,12 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackedPoly")
             .field("id", &self.id)
-            .field("num_vars", &self.num_vars)
+            .field("num_vars", &self.log_size)
             .finish()
     }
 }
 
+/// PartialEq implementation for TrackedPoly
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for TrackedPoly<F, MvPCS, UvPCS>
 where
     F: PrimeField,
@@ -142,32 +167,49 @@ where
         self.id == other.id && Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 }
+
+/// Other functionalities for TrackedPoly
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> TrackedPoly<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
+    /// Create a new tracked polynomial
     pub fn new(
         id: TrackerID,
-        num_vars: usize,
+        log_size: usize,
         tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
     ) -> Self {
         Self {
             id,
-            num_vars,
+            log_size,
             tracker,
         }
     }
 
-    pub fn num_vars(&self) -> usize {
-        self.num_vars
+    /// Get the id of the tracked polynomial
+    pub fn get_id(&self) -> TrackerID {
+        self.id
     }
 
+    /// Get a reference to the underlying tracker
+    pub fn get_tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
+        self.tracker.clone()
+    }
+
+    /// Return the log size of the polynomial
+    /// This is the number of variables in multivariate polynomials
+    pub fn get_log_size(&self) -> usize {
+        self.log_size
+    }
+
+    /// Checks if two tracked polynomials are from the same tracker
     pub fn same_tracker(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 
+    //TODO: See if you can remove this function
     pub fn assert_same_tracker(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) {
         assert!(
             self.same_tracker(other),
@@ -177,33 +219,33 @@ where
 
     pub fn add_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
         self.assert_same_tracker(other);
-        assert_eq!(self.num_vars, other.num_vars);
+        assert_eq!(self.log_size, other.log_size);
         let res_id = self.tracker.borrow_mut().add_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
+        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
     }
 
     pub fn sub_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
         self.assert_same_tracker(other);
-        assert_eq!(self.num_vars, other.num_vars);
+        assert_eq!(self.log_size, other.log_size);
         let res_id = self.tracker.borrow_mut().sub_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
+        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
     }
 
     pub fn mul_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
         self.assert_same_tracker(other);
-        assert_eq!(self.num_vars, other.num_vars);
+        assert_eq!(self.log_size, other.log_size);
         let res_id = self.tracker.borrow_mut().mul_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
+        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
     }
 
     pub fn add_scalar(&self, c: F) -> Self {
         let res_id = self.tracker.borrow_mut().add_scalar(self.id, c);
-        TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
+        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
     }
 
     pub fn mul_scalar(&self, c: F) -> Self {
         let res_id = self.tracker.borrow_mut().mul_scalar(self.id, c);
-        TrackedPoly::new(res_id, self.num_vars, self.tracker.clone())
+        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
     }
 
     pub fn evaluate(&self, pt: &[F]) -> Option<F> {
@@ -217,11 +259,18 @@ where
     pub fn evaluations(&self) -> Vec<F> {
         // TODO: Noe that this has to actually clone the evaluations, which can be
         // expensive
-        let output = self.tracker.borrow_mut().evaluations(self.id).clone();
-        output
+        self.tracker.borrow_mut().evaluations(self.id).clone()
     }
+}
 
-    pub fn to_hp_virtual_poly(&self) -> HPVirtualPolynomial<F> {
-        self.tracker.borrow().to_hp_virtual_poly(self.id)
+impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
+    DeepClone<F, MvPCS, UvPCS> for TrackedPoly<F, MvPCS, UvPCS>
+{
+    fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self {
+        Self {
+            id: self.id,
+            log_size: self.log_size,
+            tracker: new_prover.tracker_rc,
+        }
     }
 }

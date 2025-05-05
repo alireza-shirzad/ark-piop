@@ -17,7 +17,7 @@ use crate::{
 };
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
-use ark_poly::{MultilinearExtension, Polynomial};
+use ark_poly::Polynomial;
 use derivative::Derivative;
 use macros::timed;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
@@ -27,7 +27,7 @@ use tracker::ProverTracker;
 
 /// A prover for the ZKSQL protocol.
 #[derive(Derivative)]
-#[cfg_attr(test, derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone")))]
+#[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
 pub struct Prover<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,

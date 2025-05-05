@@ -90,7 +90,6 @@ where
     }
 }
 
-
 impl<F, MvPCS, UvPCS> Neg for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
@@ -206,6 +205,7 @@ impl_binop_oracle!(Add, add, add_oracles);
 impl_binop_oracle!(Sub, sub, sub_oracles);
 impl_binop_oracle!(Mul, mul, mul_oracles);
 impl_binop_scalar!(Add, add, add_scalar);
+impl_binop_scalar!(Sub, sub, sub_scalar);
 impl_binop_scalar!(Mul, mul, mul_scalar);
 impl_assign_oracle!(AddAssign, add_assign, add_oracles);
 impl_assign_oracle!(SubAssign, sub_assign, sub_oracles);

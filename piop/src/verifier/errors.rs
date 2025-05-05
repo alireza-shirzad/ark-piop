@@ -1,5 +1,6 @@
 /////// Imports /////////
 use crate::{errors::InputShapeError, transcript::errors::TranscriptError};
+use ark_ff::PrimeField;
 use thiserror::Error;
 
 /// An `enum` specifying the possible failure modes of the DB-SNARK verifier
@@ -14,6 +15,9 @@ pub enum VerifierError {
 
     #[error("Error")]
     VerifierInputShapeError(#[from] InputShapeError),
+
+    #[error("Oracle with id `{0}` cannot be evaluated at point `{1}`")]
+    OracleEvalNotProvided(usize, String),
 
     /// Verifier Check failed
     #[error("Verifier check failed -> Details: `{0}`")]

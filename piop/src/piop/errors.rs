@@ -13,8 +13,7 @@ pub(crate) enum PolyIOPErrors {
     InvalidProver(String),
     #[error("Errorrr `{0}`")]
     InvalidVerifier(String),
-    #[error("Error `{0}`")]
-    InvalidProof(String),
+
     #[error("Error `{0}`")]
     InvalidParameters(String),
     #[error("Error `{0}`")]

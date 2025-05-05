@@ -1,6 +1,8 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Expr, ExprLit, ItemFn, Lit, Token, parse_macro_input, punctuated::Punctuated};
+use syn::{
+    DeriveInput, Expr, ExprLit, ItemFn, Lit, Token, parse_macro_input, punctuated::Punctuated,
+};
 
 #[proc_macro_attribute]
 pub fn timed(attr: TokenStream, item: TokenStream) -> TokenStream {

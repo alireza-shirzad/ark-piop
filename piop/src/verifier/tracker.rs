@@ -34,6 +34,7 @@ use derivative::Derivative;
 
 use super::{
     TrackedOracle,
+    errors::VerifierError,
     structs::{
         ProcessedVerifyingKey,
         oracle::Oracle,
@@ -103,8 +104,13 @@ where
         let comm: MvPCS::Commitment;
         {
             // Scope the immutable borrow
-            let proof = self.proof.as_ref().unwrap();
-            let comm_opt: Option<&MvPCS::Commitment> = proof.mv_pcs_subproof.commitments.get(&id);
+            let comm_opt: Option<&MvPCS::Commitment> = self
+                .proof
+                .as_ref()
+                .unwrap()
+                .mv_pcs_subproof
+                .commitments
+                .get(&id);
             match comm_opt {
                 Some(value) => {
                     comm = value.clone();
@@ -175,9 +181,12 @@ where
                 self.state.virtual_oracles.insert(
                     id,
                     Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
-                        let query_res = *mv_queries_clone
-                            .get(&(id, point))
-                            .ok_or(SnarkError::DummyError)?;
+                        let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
+                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                                id.0,
+                                f_vec_short_str(&point),
+                            )),
+                        )?;
                         Ok(query_res)
                     })),
                 );
@@ -368,6 +377,10 @@ where
         res_id
     }
 
+    pub fn sub_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
+        self.add_scalar(o1_id, -scalar)
+    }
+
     pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
@@ -405,9 +418,19 @@ where
             .ok_or(SnarkError::DummyError)
     }
     pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
+        let mut equalized_point = point.clone();
+        equalized_point.resize(
+            self.proof
+                .as_ref()
+                .unwrap()
+                .sc_subproof
+                .get_sc_aux_info()
+                .num_variables,
+            F::zero(),
+        );
         let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
         match oracle {
-            Oracle::Multivariate(f) => f(point),
+            Oracle::Multivariate(f) => f(equalized_point),
             _ => Err(SnarkError::DummyError),
         }
     }
@@ -611,18 +634,22 @@ where
         "num_claims:",
         self.state.mv_pcs_substate.eval_claims.len()
     )]
-    fn perform_eval_check(&mut self) -> SnarkResult<bool> {
-        let mut output_res = true;
-        for ((id, point), eval) in &self.state.mv_pcs_substate.eval_claims {
-            let res = self.query_mv(*id, point.clone()).unwrap() == eval.clone();
-            output_res = res && output_res;
+    fn perform_eval_check(&mut self) -> SnarkResult<()> {
+        for ((id, point), expected_eval) in &self.state.mv_pcs_substate.eval_claims {
+            if self.query_mv(*id, point.clone()).unwrap() != *expected_eval {
+                return Err(SnarkError::VerifierError(
+                    crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
+                        "Evaluation check failed for id: {}, point: {:?}, expected eval: {:?}",
+                        id, point, expected_eval
+                    )),
+                ));
+            }
         }
-
-        Ok(output_res)
+        Ok(())
     }
 
     #[timed]
-    fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<bool> {
+    fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Batch all the zero check claims into one
         self.batch_z_check_claims()?;
         // Convert the only zero check claim to a sumcheck claim
@@ -632,8 +659,9 @@ where
         // verify the sumcheck proof
         self.perform_single_sumcheck()?;
         // Verify the evaluation claims
-        let res = self.perform_eval_check()?;
-        Ok(res)
+        self.perform_eval_check()?;
+
+        Ok(())
     }
 
     #[timed("num_claims:",  &self.proof.as_ref().unwrap().mv_pcs_subproof.query_map.len())]
@@ -683,6 +711,15 @@ where
                 &self.vk.mv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
+                &self
+                    .proof
+                    .as_ref()
+                    .unwrap()
+                    .mv_pcs_subproof
+                    .query_map
+                    .values()
+                    .cloned()
+                    .collect::<Vec<F>>(),
                 opening_proof,
                 &mut self.state.transcript,
             )?;
@@ -692,16 +729,16 @@ where
 
         Ok(pcs_res)
     }
-    #[timed("num_claims:", self.state.uv_pcs_substate.eval_claims.len())]
+    #[timed("num_claims:", self.proof.as_ref().unwrap().uv_pcs_subproof.query_map.len())]
     fn verify_uv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().uv_pcs_subproof.query_map;
         // Prepare the input for calling the batch verify function
-        let (mat_coms, points): (Vec<_>, Vec<_>) = eval_claims
+        let (mat_coms, points, evals): (Vec<_>, Vec<_>, Vec<_>) = eval_claims
             .iter()
-            .map(|((id, point), _eval)| {
+            .map(|((id, point), eval)| {
                 let com = self.state.uv_pcs_substate.materialized_comms[id].clone();
-                (com, point.clone())
+                (com, *point, *eval)
             })
             .multiunzip();
         // Invoke the batch verify function
@@ -717,14 +754,7 @@ where
                 &self.vk.uv_pcs_param,
                 &mat_coms[0],
                 &points[0],
-                self.proof
-                    .as_ref()
-                    .unwrap()
-                    .uv_pcs_subproof
-                    .query_map
-                    .values()
-                    .next()
-                    .unwrap(),
+                &evals[0],
                 opening_proof,
             )?;
         } else if mat_coms.len() > 1 {
@@ -739,6 +769,7 @@ where
                 &self.vk.uv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
+                &evals,
                 opening_proof,
                 &mut self.state.transcript,
             )?;
@@ -769,7 +800,7 @@ where
     pub fn verify(&mut self) -> SnarkResult<()> {
         let max_nv = self.equalize_mat_com_nv();
         // Verify the sumcheck proofs
-        assert!(self.verify_sc_proofs(max_nv)?);
+        self.verify_sc_proofs(max_nv)?;
         // Verify the multivariate pcs proofs
         // assert!(self.verify_mv_pcs_proof(max_nv)?);
         self.verify_mv_pcs_proof(max_nv)?;

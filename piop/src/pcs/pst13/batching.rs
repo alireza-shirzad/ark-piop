@@ -9,7 +9,7 @@ use crate::{
         mat_poly::{mle::MLE, utils::build_eq_x_r_vec},
         virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo},
     },
-    pcs::{PCSError, pst13::util::eq_eval, structs::Commitment},
+    pcs::{PCSError, pst13::util::eq_eval},
     piop::{structs::SumcheckProof, sum_check::SumCheck},
     transcript::Tr,
 };
@@ -18,7 +18,7 @@ use ark_poly::{MultilinearExtension, Polynomial};
 use ark_std::{One, Zero, end_timer, log2, start_timer};
 use macros::timed;
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
-
+use crate::pcs::pst13::Commitment;
 use super::PCS;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -154,7 +154,7 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
             // the deferred check during the interactive phase:
             // 1. check if the received 'P(0) + P(1) = expected`.
             if evaluations[0] + evaluations[1] != expected {
-                return Err(SnarkError::from(PolyIOPErrors::InvalidProof(
+                return Err(SnarkError::VerifierError(crate::verifier::errors::VerifierError::VerifierCheckFailed(
                     "Sumcheck's deferred checks failed. Prover message is not consistent with the claim.".to_string(),
                 )));
             }

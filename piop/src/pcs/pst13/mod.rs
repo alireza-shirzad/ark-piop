@@ -1,11 +1,15 @@
+pub mod batching;
 pub(crate) mod srs;
+pub mod structs;
 pub(crate) mod util;
+use crate::pcs::pst13::batching::MlBatchProof;
+use crate::pcs::pst13::structs::Commitment;
 use crate::{
     arithmetic::{
         f_short_str, f_vec_short_str,
         mat_poly::{mle::MLE, utils::evaluate_opt},
     },
-    pcs::{PCS, PCSError, StructuredReferenceString, batching::batch_verify_internal},
+    pcs::{PCS, PCSError, StructuredReferenceString},
     transcript::Tr,
     util::display::short_vec_str,
 };
@@ -18,11 +22,11 @@ use ark_poly::MultilinearExtension;
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, rand::Rng, start_timer};
+use batching::multi_open_internal;
 use macros::timed;
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
+use crate::pcs::pst13::batching::batch_verify_internal;
 // use batching::{batch_verify_internal, multi_open_internal};
-use super::batching::MlBatchProof;
-use crate::pcs::{batching::multi_open_internal, structs::Commitment};
 use srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam};
 /// KZG Polynomial Commitment Scheme on multilinear polynomials.
 
@@ -190,6 +194,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         verifier_param: &Self::VerifierParam,
         commitments: &[Self::Commitment],
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
+        evals: &[E::ScalarField],
         batch_proof: &Self::BatchProof,
         transcript: &mut Tr<E::ScalarField>,
     ) -> Result<bool, PCSError> {

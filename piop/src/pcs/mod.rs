@@ -1,8 +1,6 @@
-pub mod batching;
 pub(crate) mod errors;
 pub mod kzg10;
 pub mod pst13;
-pub mod structs;
 pub mod utils;
 
 use crate::transcript::Tr;
@@ -15,7 +13,7 @@ use errors::PCSError;
 use std::{borrow::Borrow, fmt::Debug, hash::Hash, sync::Arc};
 /// This trait defines APIs for polynomial commitment schemes.
 /// Note that for our usage of PCS, we do not require the hiding property.
-pub trait PCS<F: PrimeField> {
+pub trait PCS<F: PrimeField>: Clone {
     /// Prover parameters
     type ProverParam: Clone + Sync + Send;
     /// Verifier parameters
@@ -119,6 +117,7 @@ pub trait PCS<F: PrimeField> {
         _verifier_param: &Self::VerifierParam,
         _commitments: &[Self::Commitment],
         _points: &[<Self::Poly as Polynomial<F>>::Point],
+        _evals: &[F],
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<F>,
     ) -> Result<bool, PCSError> {

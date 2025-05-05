@@ -10,9 +10,8 @@ use ark_ec::pairing::Pairing;
 use ark_serialize::{self, CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
 
-use crate::{arithmetic::g1_affine_short_str, util::display::ShortDisplay};
+use crate::{arithmetic::g1_affine_short_str, pcs::PolynomialCommitment, util::display::ShortDisplay};
 
-use super::PolynomialCommitment;
 
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(

@@ -5,6 +5,7 @@ use crate::{
     prover::errors::ProverError, setup::errors::SetupError, transcript::errors::TranscriptError,
     verifier::errors::VerifierError,
 };
+use ark_ff::PrimeField;
 use thiserror::Error;
 /// The result type for the DB-SNARK system
 pub type SnarkResult<T> = Result<T, SnarkError>;

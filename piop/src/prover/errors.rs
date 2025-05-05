@@ -13,11 +13,11 @@ pub enum ProverError {
 
 #[derive(Error, Debug)]
 pub enum HonestProverError {
-    /// Input shape error
+    /// Input shape is wrong
     #[error("Input shape error")]
-    ProverInputShapeError(#[from] InputShapeError),
+    WrongInputShape(#[from] InputShapeError),
 
-    // Input does not satisfy the relation
+    // The claim is not true
     #[error("Input does not satisfy the relation")]
-    ProverNonSatError,
+    FalseClaim,
 }
