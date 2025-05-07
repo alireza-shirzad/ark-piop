@@ -91,8 +91,11 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn get_range_tr_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
-        RefCell::borrow(&self.tracker_rc).get_indexed_tracked_polys(label.clone())
+    pub fn get_indexed_tracked_poly(
+        &self,
+        label: String,
+    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+        RefCell::borrow(&self.tracker_rc).get_indexed_tracked_poly(label.clone())
     }
 
     /// Track a materialized multivariate polynomial

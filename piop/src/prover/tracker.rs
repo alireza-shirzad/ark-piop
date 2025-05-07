@@ -102,7 +102,7 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn get_indexed_tracked_polys(
+    pub fn get_indexed_tracked_poly(
         &self,
         label: String,
     ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
