@@ -6,7 +6,7 @@ use crate::{
     piop::errors::PolyIOPErrors,
 };
 use ark_ff::{PrimeField, batch_inversion};
-use ark_std::cfg_into_iter;
+use ark_std::{cfg_into_iter, cfg_iter};
 #[cfg(feature = "parallel")]
 use rayon::prelude::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -71,10 +71,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
         //    g(r_1, ..., r_{m-1}, x_m ... x_n)
         //
         // eval g over r_m, and mutate g to g(r_1, ... r_m,, x_{m+1}... x_n)
-        let mut flattened_ml_extensions: Vec<MLE<F>> = self
-            .poly
-            .flattened_ml_extensions
-            .par_iter()
+        let mut flattened_ml_extensions: Vec<MLE<F>> = cfg_iter!(self.poly.flattened_ml_extensions)
             .map(|x| x.as_ref().clone())
             .collect();
 
@@ -160,8 +157,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
         });
 
         // update prover's state to the partial evaluated polynomial
-        self.poly.flattened_ml_extensions = flattened_ml_extensions
-            .par_iter()
+        self.poly.flattened_ml_extensions = cfg_iter!(flattened_ml_extensions)
             .map(|x| Arc::new(x.clone()))
             .collect();
 

@@ -1,6 +1,6 @@
 use ark_ff::{Field, PrimeField};
 use ark_poly::MultilinearExtension;
-use ark_std::rand::RngCore;
+use ark_std::{cfg_iter_mut, rand::RngCore};
 use std::sync::Arc;
 
 #[cfg(feature = "parallel")]
@@ -138,7 +138,6 @@ fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F>
     res
 }
 
-
 /// Evaluate eq polynomial.
 pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors> {
     if x.len() != y.len() {
@@ -217,7 +216,7 @@ fn build_eq_x_r_helper<F: PrimeField>(r: &[F], buf: &mut Vec<F>) -> Result<(), A
         // *buf = res;
 
         let mut res = vec![F::zero(); buf.len() << 1];
-        res.par_iter_mut().enumerate().for_each(|(i, val)| {
+        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
             let bi = buf[i >> 1];
             let tmp = r[0] * bi;
             if i & 1 == 0 {
