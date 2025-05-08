@@ -42,6 +42,14 @@ impl<F: Field> MLE<F> {
         }
     }
 
+    pub fn mat_mle_mut(&mut self) -> &mut DenseMultilinearExtension<F> {
+        assert!(
+            self.nv.is_none(),
+            "You can mutate mat_mle only if nv is None"
+        );
+        &mut self.mat_mle
+    }
+
     pub fn evaluations(&self) -> Vec<F> {
         match self.nv {
             Some(_) => self.iter().cloned().collect::<Vec<F>>(),
