@@ -6,7 +6,8 @@
 
 //! Implementing Structured Reference Strings for univariate polynomial KZG
 
-use crate::pcs::{PCSError, StructuredReferenceString};
+use crate::errors::SnarkResult;
+use crate::pcs::StructuredReferenceString;
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
 use ark_ff::PrimeField;
 use ark_ff::{One, UniformRand};
@@ -87,10 +88,7 @@ impl<E: Pairing> StructuredReferenceString<E> for UnivariateUniversalParams<E> {
     /// for univariate polynomials to the given `supported_size`, and
     /// returns committer key and verifier key. `supported_size` should
     /// be in range `1..params.len()`
-    fn trim(
-        &self,
-        supported_size: usize,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+    fn trim(&self, supported_size: usize) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         let powers_of_g = self.powers_of_g[..=supported_size].to_vec();
 
         let pk = Self::ProverParam { powers_of_g };
@@ -106,7 +104,7 @@ impl<E: Pairing> StructuredReferenceString<E> for UnivariateUniversalParams<E> {
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
     #[timed]
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, max_degree: usize) -> Result<Self, PCSError> {
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, max_degree: usize) -> SnarkResult<Self> {
         let beta = E::ScalarField::rand(rng);
         let g = E::G1::rand(rng);
         let h = E::G2::rand(rng);

@@ -1,4 +1,7 @@
-use crate::arithmetic::mat_poly::mle::MLE;
+use crate::{
+    arithmetic::mat_poly::mle::MLE,
+    errors::{SnarkError, SnarkResult},
+};
 use ark_ff::PrimeField;
 use ark_std::vec::Vec;
 
@@ -23,11 +26,11 @@ pub(crate) fn eq_extension<F: PrimeField>(t: &[F]) -> Vec<MLE<F>> {
 }
 
 /// Evaluate eq polynomial. use the public one later
-pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, PCSError> {
+pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
     if x.len() != y.len() {
-        return Err(PCSError::InvalidParameters(
+        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
             "x and y have different length".to_string(),
-        ));
+        )));
     }
     let mut res = F::one();
     for (&xi, &yi) in x.iter().zip(y.iter()) {

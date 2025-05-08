@@ -1,6 +1,9 @@
 use super::PCS;
-use crate::arithmetic::mat_poly::lde::LDE;
-use crate::pcs::PCSError;
+use crate::{
+    arithmetic::mat_poly::lde::LDE,
+    errors::{SnarkError, SnarkResult},
+    pcs::errors::PCSError,
+};
 use ark_ec::{
     AffineRepr, CurveGroup, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM,
 };
@@ -68,10 +71,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(
-        rng: &mut R,
-        supported_size: usize,
-    ) -> Result<Self::SRS, PCSError> {
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
         Self::SRS::gen_srs_for_testing(rng, supported_size)
     }
 
@@ -82,12 +82,12 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+    ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         assert!(supported_num_vars.is_none());
         if supported_num_vars.is_some() {
-            return Err(PCSError::InvalidParameters(
+            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
                 "univariate should not receive a num_var param".to_string(),
-            ));
+            )));
         }
         srs.borrow().trim(supported_degree.unwrap())
     }
@@ -98,14 +98,14 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
-    ) -> Result<Self::Commitment, PCSError> {
+    ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
         let _commit_time = if poly.degree() >= prover_param.powers_of_g.len() {
-            return Err(PCSError::InvalidParameters(format!(
+            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
                 "uni poly degree {} is larger than allowed {}",
                 poly.degree(),
                 prover_param.powers_of_g.len()
-            )));
+            ))));
         };
 
         let (num_leading_zeros, plain_coeffs) = skip_leading_zeros(&**poly);
@@ -127,7 +127,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
-    ) -> Result<(Self::Proof, E::ScalarField), PCSError> {
+    ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         let divisor = Self::Poly::from_coefficients_vec(vec![-*point, E::ScalarField::one()]);
 
         let witness_polynomial = &**polynomial / &divisor;
@@ -151,7 +151,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
         _evals: &[E::ScalarField],
         _transcript: &mut Tr<E::ScalarField>,
-    ) -> Result<Self::BatchProof, PCSError> {
+    ) -> SnarkResult<Self::BatchProof> {
         let mut batch_proof = KZG10BatchProof::default();
         _polynomials
             .iter()
@@ -173,7 +173,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         _evals: &[E::ScalarField],
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<E::ScalarField>,
-    ) -> Result<bool, PCSError> {
+    ) -> SnarkResult<bool> {
         _commitments
             .iter()
             .zip(_points.iter())
@@ -195,7 +195,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
         value: &E::ScalarField,
         proof: &Self::Proof,
-    ) -> Result<bool, PCSError> {
+    ) -> SnarkResult<bool> {
         let pairing_inputs: Vec<(E::G1Prepared, E::G2Prepared)> = vec![
             (
                 (verifier_param.g.mul(value)
@@ -231,7 +231,7 @@ mod tests {
     use ark_std::UniformRand;
     use ark_std::test_rng;
     use ark_test_curves::bls12_381::Bls12_381;
-    fn end_to_end_test_template<E>() -> Result<(), PCSError>
+    fn end_to_end_test_template<E>() -> SnarkResult<()>
     where
         E: Pairing,
     {
@@ -258,7 +258,7 @@ mod tests {
         Ok(())
     }
 
-    fn linear_polynomial_test_template<E>() -> Result<(), PCSError>
+    fn linear_polynomial_test_template<E>() -> SnarkResult<()>
     where
         E: Pairing,
     {

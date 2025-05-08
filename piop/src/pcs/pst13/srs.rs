@@ -7,8 +7,10 @@
 //! Implementing Structured Reference Strings for multilinear polynomial KZG
 use crate::{
     arithmetic::mat_poly::mle::MLE,
+    errors::{SnarkError, SnarkResult},
     pcs::{
-        PCSError, StructuredReferenceString,
+        StructuredReferenceString,
+        errors::PCSError,
         pst13::util::{eq_eval, eq_extension},
     },
 };
@@ -99,12 +101,12 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
     fn trim(
         &self,
         supported_num_vars: usize,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+    ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         if supported_num_vars > self.prover_param.num_vars {
-            return Err(PCSError::InvalidParameters(format!(
+            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
                 "SRS does not support target number of vars {}",
                 supported_num_vars
-            )));
+            ))));
         }
 
         let to_reduce = self.prover_param.num_vars - supported_num_vars;
@@ -127,11 +129,11 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
     #[timed]
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, num_vars: usize) -> Result<Self, PCSError> {
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, num_vars: usize) -> SnarkResult<Self> {
         if num_vars == 0 {
-            return Err(PCSError::InvalidParameters(
+            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
                 "constant polynomial not supported".to_string(),
-            ));
+            )));
         }
 
         let g = E::G1::rand(rng);
@@ -201,14 +203,14 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
 }
 
 /// fix first `pad` variables of `poly` represented in evaluation form to zero
-fn remove_dummy_variable<F: PrimeField>(poly: &[F], pad: usize) -> Result<Vec<F>, PCSError> {
+fn remove_dummy_variable<F: PrimeField>(poly: &[F], pad: usize) -> SnarkResult<Vec<F>> {
     if pad == 0 {
         return Ok(poly.to_vec());
     }
     if !poly.len().is_power_of_two() {
-        return Err(PCSError::InvalidParameters(
+        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
             "Size of polynomial should be power of two.".to_string(),
-        ));
+        )));
     }
     let nv = ark_std::log2(poly.len()) as usize - pad;
     Ok((0..(1 << nv)).map(|x| poly[x << pad]).collect())
@@ -221,7 +223,7 @@ mod tests {
     type E = ark_test_curves::bls12_381::Bls12_381;
 
     #[test]
-    fn test_srs_gen() -> Result<(), PCSError> {
+    fn test_srs_gen() -> SnarkResult<()> {
         let mut rng = test_rng();
         for nv in 4..10 {
             let _ = MultilinearUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;

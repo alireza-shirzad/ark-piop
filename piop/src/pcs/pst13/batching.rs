@@ -3,13 +3,18 @@
 // currently IOP depends on PCS because perm check requires commitment.
 // The sumcheck based batch opening therefore cannot stay in the PCS repo --
 // which creates a cyclic dependency.
+use super::PCS;
+use crate::errors::SnarkResult;
+use crate::pcs::errors::PCSError;
+use crate::pcs::pst13::Commitment;
+use crate::pcs::pst13::SnarkError;
 use crate::{
     arithmetic::{
         f_mat_short_str, f_vec_short_str,
         mat_poly::{mle::MLE, utils::build_eq_x_r_vec},
         virt_poly::hp_interface::{HPVirtualPolynomial, VPAuxInfo},
     },
-    pcs::{PCSError, pst13::util::eq_eval},
+    pcs::pst13::util::eq_eval,
     piop::{structs::SumcheckProof, sum_check::SumCheck},
     transcript::Tr,
 };
@@ -18,9 +23,6 @@ use ark_poly::{MultilinearExtension, Polynomial};
 use ark_std::{One, Zero, end_timer, log2, start_timer};
 use macros::timed;
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
-use crate::pcs::pst13::Commitment;
-use super::PCS;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MlBatchProof<E, MvPCS>
 where
@@ -69,7 +71,7 @@ pub(crate) fn multi_open_internal<E, MvPCS>(
     points: &[<MvPCS::Poly as Polynomial<E::ScalarField>>::Point],
     evals: &[E::ScalarField],
     transcript: &mut Tr<E::ScalarField>,
-) -> Result<MlBatchProof<E, MvPCS>, PCSError>
+) -> SnarkResult<MlBatchProof<E, MvPCS>>
 where
     E: Pairing,
     MvPCS: PCS<E::ScalarField, Poly = MLE<E::ScalarField>>,
@@ -134,9 +136,9 @@ where
         Ok(p) => p,
         Err(_e) => {
             // cannot wrap IOPError with PCSError due to cyclic dependency
-            return Err(PCSError::InvalidProver(
+            return Err(SnarkError::PCSErrors(PCSError::InvalidProver(
                 "Sumcheck in batch proving Failed".to_string(),
-            ));
+            )));
         }
     };
 
@@ -173,7 +175,7 @@ pub(crate) fn batch_verify_internal<E, MvPCS>(
     points: &[<MvPCS::Poly as Polynomial<E::ScalarField>>::Point],
     proof: &MlBatchProof<E, MvPCS>,
     transcript: &mut Tr<E::ScalarField>,
-) -> Result<bool, PCSError>
+) -> SnarkResult<bool>
 where
     E: Pairing,
     MvPCS: PCS<E::ScalarField, Poly = MLE<E::ScalarField>, Commitment = Commitment<E>>,
@@ -219,9 +221,9 @@ where
         Ok(p) => p,
         Err(_e) => {
             // cannot wrap IOPError with PCSError due to cyclic dependency
-            return Err(PCSError::InvalidProver(
-                "Sumcheck in batch verification failed".to_string(),
-            ));
+            return Err(SnarkError::PCSErrors(PCSError::InvalidProver(
+                "Sumcheck in batch verifying Failed".to_string(),
+            )));
         }
     };
     let tilde_g_eval = subclaim.expected_evaluation;
@@ -258,7 +260,7 @@ mod tests {
         params: &MultilinearUniversalParams<E>,
         poly: &Arc<MLE<Fr>>,
         rng: &mut R,
-    ) -> Result<(), PCSError> {
+    ) -> SnarkResult<()> {
         let nv = poly.num_vars();
         assert_ne!(nv, 0);
         let (ck, vk) = PST13::trim(params, None, Some(nv))?;
@@ -275,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_commit() -> Result<(), PCSError> {
+    fn test_single_commit() -> SnarkResult<()> {
         let mut rng = test_rng();
 
         let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;

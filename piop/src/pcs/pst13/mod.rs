@@ -2,14 +2,18 @@ pub mod batching;
 pub(crate) mod srs;
 pub mod structs;
 pub(crate) mod util;
+use crate::errors::SnarkError;
+use crate::errors::SnarkResult;
+use crate::pcs::errors::PCSError;
 use crate::pcs::pst13::batching::MlBatchProof;
+use crate::pcs::pst13::batching::batch_verify_internal;
 use crate::pcs::pst13::structs::Commitment;
 use crate::{
     arithmetic::{
         f_short_str, f_vec_short_str,
         mat_poly::{mle::MLE, utils::evaluate_opt},
     },
-    pcs::{PCS, PCSError, StructuredReferenceString},
+    pcs::{PCS, StructuredReferenceString},
     transcript::Tr,
     util::display::short_vec_str,
 };
@@ -25,7 +29,6 @@ use ark_std::{end_timer, rand::Rng, start_timer};
 use batching::multi_open_internal;
 use macros::timed;
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
-use crate::pcs::pst13::batching::batch_verify_internal;
 // use batching::{batch_verify_internal, multi_open_internal};
 use srs::{MultilinearProverParam, MultilinearUniversalParams, MultilinearVerifierParam};
 /// KZG Polynomial Commitment Scheme on multilinear polynomials.
@@ -68,7 +71,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, log_size: usize) -> Result<Self::SRS, PCSError> {
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, log_size: usize) -> SnarkResult<Self::SRS> {
         MultilinearUniversalParams::<E>::gen_srs_for_testing(rng, log_size)
     }
 
@@ -79,14 +82,16 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError> {
+    ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         assert!(supported_degree.is_none());
 
         let supported_num_vars = match supported_num_vars {
             Some(p) => p,
             None => {
-                return Err(PCSError::InvalidParameters(
-                    "multilinear should receive a num_var param".to_string(),
+                return Err(crate::errors::SnarkError::PCSErrors(
+                    PCSError::InvalidParameters(
+                        "multilinear should receive a num_var param".to_string(),
+                    ),
                 ));
             }
         };
@@ -103,14 +108,16 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
-    ) -> Result<Self::Commitment, PCSError> {
+    ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
         if prover_param.num_vars < poly.num_vars() {
-            return Err(PCSError::InvalidParameters(format!(
-                "MlE length ({}) exceeds param limit ({})",
-                poly.num_vars(),
-                prover_param.num_vars
-            )));
+            return Err(crate::errors::SnarkError::PCSErrors(
+                PCSError::InvalidParameters(format!(
+                    "MlE length ({}) exceeds param limit ({})",
+                    poly.num_vars(),
+                    prover_param.num_vars
+                )),
+            ));
         }
         let ignored = prover_param.num_vars - poly.num_vars();
         let scalars: Vec<_> = poly.to_evaluations();
@@ -138,7 +145,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
-    ) -> Result<(Self::Proof, E::ScalarField), PCSError> {
+    ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         open_internal(prover_param.borrow(), polynomial, point)
     }
 
@@ -151,7 +158,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
         evals: &[E::ScalarField],
         transcript: &mut Tr<E::ScalarField>,
-    ) -> Result<MlBatchProof<E, Self>, PCSError> {
+    ) -> SnarkResult<MlBatchProof<E, Self>> {
         // First check if the evaluations are actually correct
         debug_assert!(
             polynomials
@@ -183,7 +190,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
         value: &E::ScalarField,
         proof: &Self::Proof,
-    ) -> Result<bool, PCSError> {
+    ) -> SnarkResult<bool> {
         verify_internal(verifier_param, commitment, point, value, proof)
     }
 
@@ -197,7 +204,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         evals: &[E::ScalarField],
         batch_proof: &Self::BatchProof,
         transcript: &mut Tr<E::ScalarField>,
-    ) -> Result<bool, PCSError> {
+    ) -> SnarkResult<bool> {
         batch_verify_internal(verifier_param, commitments, points, batch_proof, transcript)
     }
 }
@@ -215,21 +222,21 @@ fn open_internal<E: Pairing>(
     prover_param: &MultilinearProverParam<E>,
     polynomial: &MLE<E::ScalarField>,
     point: &[E::ScalarField],
-) -> Result<(PST13Proof<E>, E::ScalarField), PCSError> {
+) -> SnarkResult<(PST13Proof<E>, E::ScalarField)> {
     if polynomial.num_vars() > prover_param.num_vars {
-        return Err(PCSError::InvalidParameters(format!(
-            "Polynomial num_vars {} exceed the limit {}",
+        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
+            "MlE length ({}) exceeds param limit ({})",
             polynomial.num_vars(),
             prover_param.num_vars
-        )));
+        ))));
     }
 
     if polynomial.num_vars() != point.len() {
-        return Err(PCSError::InvalidParameters(format!(
-            "Polynomial num_vars {} does not match point len {}",
-            polynomial.num_vars(),
-            point.len()
-        )));
+        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
+            "point length ({}) does not match polynomial length ({})",
+            point.len(),
+            polynomial.num_vars()
+        ))));
     }
 
     let nv = polynomial.num_vars();
@@ -279,14 +286,14 @@ fn verify_internal<E: Pairing>(
     point: &[E::ScalarField],
     value: &E::ScalarField,
     proof: &PST13Proof<E>,
-) -> Result<bool, PCSError> {
+) -> SnarkResult<bool> {
     let num_var = point.len();
 
     if num_var > verifier_param.num_vars {
-        return Err(PCSError::InvalidParameters(format!(
+        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
             "point length ({}) exceeds param limit ({})",
             num_var, verifier_param.num_vars
-        )));
+        ))));
     }
 
     let h_mul: Vec<E::G2Affine> = verifier_param.h.into_group().batch_mul(point);
@@ -334,7 +341,7 @@ mod tests {
         params: &MultilinearUniversalParams<E>,
         poly: &Arc<MLE<Fr>>,
         rng: &mut R,
-    ) -> Result<(), PCSError> {
+    ) -> SnarkResult<()> {
         let nv = poly.num_vars();
         assert_ne!(nv, 0);
         let (ck, vk) = PST13::trim(params, None, Some(nv))?;
@@ -351,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_commit() -> Result<(), PCSError> {
+    fn test_single_commit() -> SnarkResult<()> {
         let mut rng = test_rng();
 
         let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;

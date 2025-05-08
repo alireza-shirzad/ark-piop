@@ -3,13 +3,12 @@ pub mod kzg10;
 pub mod pst13;
 pub mod utils;
 
-use crate::transcript::Tr;
+use crate::{errors::SnarkResult, transcript::Tr};
 use ark_ec::pairing::Pairing;
 use ark_ff::{Field, PrimeField};
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
-use errors::PCSError;
 use std::{borrow::Borrow, fmt::Debug, hash::Hash, sync::Arc};
 /// This trait defines APIs for polynomial commitment schemes.
 /// Note that for our usage of PCS, we do not require the hiding property.
@@ -44,10 +43,7 @@ pub trait PCS<F: PrimeField>: Clone {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(
-        rng: &mut R,
-        supported_size: usize,
-    ) -> Result<Self::SRS, PCSError>;
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS>;
 
     /// Trim the universal parameters to specialize the public parameters.
     /// Input both `supported_degree` for univariate and
@@ -63,7 +59,7 @@ pub trait PCS<F: PrimeField>: Clone {
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError>;
+    ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
     /// Generate a commitment for a polynomial
     /// ## Note on function signature
@@ -77,7 +73,7 @@ pub trait PCS<F: PrimeField>: Clone {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
-    ) -> Result<Self::Commitment, PCSError>;
+    ) -> SnarkResult<Self::Commitment>;
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
     /// same.
@@ -85,7 +81,7 @@ pub trait PCS<F: PrimeField>: Clone {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<F>>::Point,
-    ) -> Result<(Self::Proof, F), PCSError>;
+    ) -> SnarkResult<(Self::Proof, F)>;
 
     /// Input a list of multilinear extensions, and a same number of points, and
     /// a transcript, compute a multi-opening for all the polynomials.
@@ -95,7 +91,7 @@ pub trait PCS<F: PrimeField>: Clone {
         _points: &[<Self::Poly as Polynomial<F>>::Point],
         _evals: &[F],
         _transcript: &mut Tr<F>,
-    ) -> Result<Self::BatchProof, PCSError> {
+    ) -> SnarkResult<Self::BatchProof> {
         // the reason we use unimplemented!() is to enable developers to implement the
         // trait without always implementing the batching APIs.
         unimplemented!()
@@ -109,7 +105,7 @@ pub trait PCS<F: PrimeField>: Clone {
         point: &<Self::Poly as Polynomial<F>>::Point,
         value: &F,
         proof: &Self::Proof,
-    ) -> Result<bool, PCSError>;
+    ) -> SnarkResult<bool>;
 
     /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
     /// `poly_i` committed inside `comm`.
@@ -120,7 +116,7 @@ pub trait PCS<F: PrimeField>: Clone {
         _evals: &[F],
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<F>,
-    ) -> Result<bool, PCSError> {
+    ) -> SnarkResult<bool> {
         // the reason we use unimplemented!() is to enable developers to implement the
         // trait without always implementing the batching APIs.
         unimplemented!()
@@ -148,10 +144,7 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
     ///   variables.
     ///
     /// `supported_log_size` should be in range `1..=params.log_size`
-    fn trim(
-        &self,
-        supported_size: usize,
-    ) -> Result<(Self::ProverParam, Self::VerifierParam), PCSError>;
+    fn trim(&self, supported_size: usize) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
     /// Build SRS for testing.
     ///
@@ -161,7 +154,7 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> Result<Self, PCSError>;
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self>;
 }
 
 pub trait PolynomialCommitment<F: Field>: Sized {
