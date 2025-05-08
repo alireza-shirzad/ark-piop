@@ -21,8 +21,6 @@ use ark_ff::PrimeField;
 use ark_std::{cfg_iter, end_timer, start_timer};
 use itertools::MultiUnzip;
 use macros::timed;
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
 use std::{
     borrow::{Borrow, BorrowMut},
     collections::BTreeMap,
@@ -636,6 +634,13 @@ where
     )]
     fn perform_eval_check(&mut self) -> SnarkResult<()> {
         for ((id, point), expected_eval) in &self.state.mv_pcs_substate.eval_claims {
+            add_trace!(
+                "perform_eval_check",
+                "id: {}, point: {:?}, expected_eval: {:?}",
+                id,
+                f_vec_short_str(point),
+                f_short_str(*expected_eval)
+            );
             if self.query_mv(*id, point.clone()).unwrap() != *expected_eval {
                 return Err(SnarkError::VerifierError(
                     crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(

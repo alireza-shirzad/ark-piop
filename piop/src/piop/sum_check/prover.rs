@@ -8,8 +8,9 @@ use crate::{
 use ark_ff::{PrimeField, batch_inversion};
 use ark_std::cfg_into_iter;
 #[cfg(feature = "parallel")]
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
-use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator};
+use rayon::prelude::{
+    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use std::sync::Arc;
 
 use crate::piop::structs::{SumcheckProverMessage, SumcheckProverState};

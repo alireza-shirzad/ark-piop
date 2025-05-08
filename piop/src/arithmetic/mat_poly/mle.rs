@@ -3,9 +3,10 @@ use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_iter, rand::Rng};
 use itertools::Either;
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
 #[cfg(feature = "parallel")]
-use rayon::prelude::ParallelIterator;
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use std::{
     fmt::{self, Formatter},
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},

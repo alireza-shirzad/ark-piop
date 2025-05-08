@@ -36,8 +36,8 @@ use ark_poly::{MultilinearExtension, Polynomial};
 use ark_std::{add_single_trace, cfg_iter, end_timer, start_timer};
 use derivative::Derivative;
 use macros::timed;
-use rayon::iter::IntoParallelRefIterator;
-use rayon::iter::ParallelIterator;
+#[cfg(feature = "parallel")]
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     mem::take,
@@ -553,7 +553,6 @@ where
         self.track_virt_poly(new_virt_rep)
     }
 
-    #[timed("poly_id:", id)]
     fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<F>> {
         // look up the virtual polynomial
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);

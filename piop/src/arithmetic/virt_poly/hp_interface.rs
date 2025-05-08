@@ -4,7 +4,6 @@ use ark_ff::PrimeField;
 use ark_poly::{MultilinearExtension, Polynomial};
 use ark_serialize::CanonicalSerialize;
 
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::Add, sync::Arc};
 
 use crate::arithmetic::{errors::ArithErrors, mat_poly::mle::MLE};
@@ -227,7 +226,6 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
         MLE::from_evaluations_vec(nv, eval_vec)
     }
 }
-
 
 /// Decompose an integer into a binary vector in little endian.
 pub(crate) fn bit_decompose(input: u64, num_var: usize) -> Vec<bool> {

@@ -11,9 +11,10 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_std::cfg_iter;
 use macros::timed;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf};
 use structs::{ProvingKey, VerifyingKey};
+#[cfg(feature = "parallel")]
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 //////// Body /////////
 
 /// A key generator struct
