@@ -4,6 +4,8 @@ use crate::{
     structs::PCSOpeningProof,
 };
 use ark_ff::PrimeField;
+use ark_poly::Polynomial;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -75,6 +77,8 @@ where
 impl<F, MvPCS, UvPCS> ProcessedProof<F, MvPCS, UvPCS>
 where
     F: PrimeField,
+    <MvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
+    <UvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
     MvPCS: PCS<F>,
     UvPCS: PCS<F>,
 {
@@ -108,6 +112,7 @@ impl<F, PC> ProcessedPCSSubproof<F, PC>
 where
     F: PrimeField,
     PC: PCS<F>,
+    <PC::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
     pub fn new_from_pcs_subproof(pcs_subproof: &PCSSubproof<F, PC>) -> Self {
         Self {

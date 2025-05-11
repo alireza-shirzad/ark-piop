@@ -20,7 +20,14 @@ pub trait PCS<F: PrimeField>: Clone {
     /// Structured reference string
     type SRS: Clone + Debug + CanonicalSerialize + CanonicalDeserialize;
     /// Polynomial and its associated types
-    type Poly: Polynomial<F> + Clone + Debug + Hash + PartialEq + Eq;
+    type Poly: Polynomial<F>
+        + Clone
+        + Debug
+        + Hash
+        + PartialEq
+        + Eq
+        + CanonicalSerialize
+        + CanonicalDeserialize;
     /// Commitments
     type Commitment: PolynomialCommitment<F>
         + Clone
@@ -33,7 +40,13 @@ pub trait PCS<F: PrimeField>: Clone {
     /// Proofs
     type Proof: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq + Default;
     /// Batch proofs
-    type BatchProof: Clone + PartialEq + Eq + Debug + Default;
+    type BatchProof: Clone
+        + PartialEq
+        + Eq
+        + Debug
+        + Default
+        + CanonicalSerialize
+        + CanonicalDeserialize;
 
     /// Build SRS for testing.
     ///

@@ -2,7 +2,7 @@
 
 use ark_ff::PrimeField;
 use ark_poly::{MultilinearExtension, Polynomial};
-use ark_serialize::CanonicalSerialize;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::Add, sync::Arc};
 
@@ -50,7 +50,7 @@ pub(crate) struct HPVirtualPolynomial<F: PrimeField> {
     raw_pointers_lookup_table: HashMap<*const MLE<F>, usize>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 /// Auxiliary information about the multilinear polynomial
 pub(crate) struct VPAuxInfo<F: PrimeField> {
     /// max number of multiplicands in each product

@@ -5,6 +5,7 @@
 // which creates a cyclic dependency.
 use super::PCS;
 use crate::errors::SnarkResult;
+use crate::pcs::CanonicalDeserialize;
 use crate::pcs::errors::PCSError;
 use crate::pcs::pst13::Commitment;
 use crate::pcs::pst13::SnarkError;
@@ -20,10 +21,11 @@ use crate::{
 };
 use ark_ec::{CurveGroup, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM};
 use ark_poly::{MultilinearExtension, Polynomial};
+use ark_serialize::CanonicalSerialize;
 use ark_std::{One, Zero, end_timer, log2, start_timer};
 use macros::timed;
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MlBatchProof<E, MvPCS>
 where
     E: Pairing,

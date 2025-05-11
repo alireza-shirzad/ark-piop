@@ -1,15 +1,16 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use ark_ff::PrimeField;
-use derivative::Derivative;
-
 use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
     structs::{QueryMap, SumcheckSubproof, TrackerID},
 };
+use ark_ff::PrimeField;
+use ark_poly::Polynomial;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use derivative::Derivative;
 /// The proof of a SNARK for the ZKSQL protocol.
-#[derive(Derivative)]
+#[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
     Clone(bound = "MvPCS: PCS<F>"),
     Default(bound = "MvPCS: PCS<F>"),
@@ -21,6 +22,8 @@ use crate::{
 pub struct Proof<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
+    <MvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
+    <UvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
     pub sc_subproof: SumcheckSubproof<F>,
     pub mv_pcs_subproof: PCSSubproof<F, MvPCS>,
@@ -28,7 +31,7 @@ where
 }
 
 /// The PCS subproof of a SNARK for the ZKSQL protocol.
-#[derive(Derivative)]
+#[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
     Clone(bound = "PC: PCS<F>"),
     Default(bound = "PC: PCS<F>"),
@@ -38,6 +41,7 @@ pub struct PCSSubproof<F, PC>
 where
     F: PrimeField,
     PC: PCS<F>,
+    <PC::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub commitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
