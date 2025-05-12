@@ -2,7 +2,8 @@ use crate::{arithmetic::mat_poly::mle::MLE, pcs::PCS};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 use std::collections::BTreeMap;
-
+use ark_serialize::CanonicalDeserialize;
+use ark_serialize::CanonicalSerialize;
 // Clone is only implemented if PCS satisfies the PCS<F>
 // bound, which guarantees that PCS::ProverParam
 
@@ -20,7 +21,7 @@ where
     pub vk: VerifyingKey<F, MvPCS, UvPCS>,
 }
 
-#[derive(Derivative)]
+#[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(Clone(bound = ""))]
 pub struct VerifyingKey<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where

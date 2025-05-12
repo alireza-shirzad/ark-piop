@@ -73,12 +73,22 @@ where
 {
     // Create new verifier tracker with clean state given a verifying key
     pub(crate) fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
-        Self {
+        let mut tracker = Self {
             vk: ProcessedVerifyingKey::new_from_vk(&vk),
             state: VerifierState::default(),
             proof: None,
-        }
+        };
+        tracker.add_vk_to_transcript(vk);
+        tracker
     }
+
+    fn add_vk_to_transcript(&mut self, vk: VerifyingKey<F, MvPCS, UvPCS>) {
+        self.state
+            .transcript
+            .append_serializable_element(b"vk", &vk)
+            .unwrap();
+    }
+
     // Set the proof for the tracker
     pub fn set_proof(&mut self, proof: Proof<F, MvPCS, UvPCS>) {
         self.proof = Some(ProcessedProof::new_from_proof(&proof));

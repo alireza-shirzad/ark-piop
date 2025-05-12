@@ -86,6 +86,10 @@ where
     }
 
     fn add_vk_to_transcript(&mut self, vk: VerifyingKey<F, MvPCS, UvPCS>) {
+        self.state
+            .transcript
+            .append_serializable_element(b"vk", &vk)
+            .unwrap();
         vk.indexed_coms.iter().for_each(|(_, comm)| {
             self.state
                 .transcript
