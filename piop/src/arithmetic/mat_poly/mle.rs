@@ -8,6 +8,7 @@ use rayon::prelude::{
     IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 use std::{
+    cmp::Ordering,
     fmt::{self, Formatter},
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
     slice::IterMut,
@@ -174,10 +175,24 @@ impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
         }
         match (self.nv, rhs.nv) {
             // TODO: Some cases are not handled
-            (Some(nv1), Some(nv2)) if nv1 == nv2 => MLE {
-                mat_mle: &self.mat_mle + &rhs.mat_mle,
-                nv: Some(nv1),
-            },
+            (Some(nv1), Some(nv2)) if nv1 == nv2 => {
+                match self.mat_mle.num_vars.cmp(&rhs.mat_mle.num_vars) {
+                    Ordering::Less => MLE {
+                        mat_mle: &dmle_increase_nv_back(&self.mat_mle, rhs.mat_mle.num_vars)
+                            + &rhs.mat_mle,
+                        nv: Some(nv1),
+                    },
+                    Ordering::Greater => MLE {
+                        mat_mle: &self.mat_mle
+                            + &dmle_increase_nv_back(&rhs.mat_mle, self.mat_mle.num_vars),
+                        nv: Some(nv1),
+                    },
+                    Ordering::Equal => MLE {
+                        mat_mle: &self.mat_mle + &rhs.mat_mle,
+                        nv: Some(nv1),
+                    },
+                }
+            }
             (None, None) => MLE {
                 mat_mle: &self.mat_mle + &rhs.mat_mle,
                 nv: None,
