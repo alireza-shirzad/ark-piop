@@ -2,6 +2,7 @@ pub mod errors;
 pub mod structs;
 mod tracker;
 use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
+use macros::timed;
 use structs::oracle::{Oracle, TrackedOracle};
 
 use crate::{
@@ -47,6 +48,7 @@ where
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
     // TODO: See if you can shorten this function
+    #[timed]
     pub fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
         let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
         let range_tr_polys: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>> = vk

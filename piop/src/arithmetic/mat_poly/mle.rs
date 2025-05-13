@@ -229,7 +229,10 @@ impl<F: Field> Neg for MLE<F> {
     type Output = MLE<F>;
 
     fn neg(self) -> Self::Output {
-        todo!()
+        Self {
+            mat_mle: -self.mat_mle,
+            nv: self.nv,
+        }
     }
 }
 
@@ -245,7 +248,7 @@ impl<'a, 'b, F: Field> Sub<&'a MLE<F>> for &'b MLE<F> {
     type Output = MLE<F>;
 
     fn sub(self, rhs: &'a MLE<F>) -> Self::Output {
-        todo!()
+        self + &rhs.clone().neg()
     }
 }
 
@@ -257,7 +260,7 @@ impl<F: Field> SubAssign for MLE<F> {
 
 impl<'a, F: Field> SubAssign<&'a MLE<F>> for MLE<F> {
     fn sub_assign(&mut self, other: &'a MLE<F>) {
-        todo!()
+        *self = &*self - &other;
     }
 }
 
@@ -265,7 +268,7 @@ impl<F: Field> Mul<F> for MLE<F> {
     type Output = MLE<F>;
 
     fn mul(self, scalar: F) -> Self::Output {
-        todo!()
+        &self * &scalar
     }
 }
 
@@ -273,19 +276,27 @@ impl<'a, 'b, F: Field> Mul<&'a F> for &'b MLE<F> {
     type Output = MLE<F>;
 
     fn mul(self, scalar: &'a F) -> Self::Output {
-        todo!()
+        if scalar.is_zero() {
+            return MLE::zero();
+        } else if scalar.is_one() {
+            return self.clone();
+        }
+        Self::Output {
+            mat_mle: &self.mat_mle * scalar,
+            nv: self.nv,
+        }
     }
 }
 
 impl<F: Field> MulAssign<F> for MLE<F> {
     fn mul_assign(&mut self, scalar: F) {
-        todo!()
+        *self = &*self * &scalar
     }
 }
 
 impl<'a, F: Field> MulAssign<&'a F> for MLE<F> {
     fn mul_assign(&mut self, scalar: &'a F) {
-        todo!()
+        *self = &*self * scalar
     }
 }
 
