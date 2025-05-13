@@ -94,6 +94,7 @@ pub trait PCS<F: PrimeField>: Clone {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<F>>::Point,
+        commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, F)>;
 
     /// Input a list of multilinear extensions, and a same number of points, and

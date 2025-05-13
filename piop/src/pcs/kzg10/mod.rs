@@ -127,6 +127,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
+        commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         let divisor = Self::Poly::from_coefficients_vec(vec![-*point, E::ScalarField::one()]);
 
@@ -158,7 +159,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
             .zip(_points.iter())
             .zip(_evals.iter())
             .for_each(|((poly, point), _)| {
-                let (proof, _) = Self::open(_prover_param.borrow(), poly, point).unwrap();
+                let (proof, _) = Self::open(_prover_param.borrow(), poly, point, None).unwrap();
                 batch_proof.0.push(proof);
             });
         Ok(batch_proof)
@@ -247,7 +248,7 @@ mod tests {
             let p_arc = Arc::new(p);
             let comm = KZG10::<E>::commit(&ck, &p_arc)?;
             let point = E::ScalarField::rand(rng);
-            let (proof, value) = KZG10::<E>::open(&ck, &p_arc, &point)?;
+            let (proof, value) = KZG10::<E>::open(&ck, &p_arc, &point, None)?;
             assert!(
                 KZG10::<E>::verify(&vk, &comm, &point, &value, &proof)?,
                 "proof was incorrect for max_degree = {}, polynomial_degree = {}",
@@ -272,7 +273,7 @@ mod tests {
             let p_arc = Arc::new(p);
             let comm = KZG10::<E>::commit(&ck, &p_arc)?;
             let point = E::ScalarField::rand(rng);
-            let (proof, value) = KZG10::<E>::open(&ck, &p_arc, &point)?;
+            let (proof, value) = KZG10::<E>::open(&ck, &p_arc, &point, None)?;
             assert!(
                 KZG10::<E>::verify(&vk, &comm, &point, &value, &proof)?,
                 "proof was incorrect for max_degree = {}, polynomial_degree = {}",

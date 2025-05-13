@@ -145,6 +145,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
+        commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         open_internal(prover_param.borrow(), polynomial, point)
     }
@@ -347,7 +348,7 @@ mod tests {
         let (ck, vk) = PST13::trim(params, None, Some(nv))?;
         let point: Vec<_> = (0..nv).map(|_| Fr::rand(rng)).collect();
         let com = PST13::commit(&ck, poly)?;
-        let (proof, value) = PST13::open(&ck, poly, &point)?;
+        let (proof, value) = PST13::open(&ck, poly, &point, None)?;
 
         assert!(PST13::verify(&vk, &com, &point, &value, &proof)?);
 

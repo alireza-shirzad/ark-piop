@@ -155,7 +155,7 @@ where
         *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
     }
 
-    let (g_prime_proof, _g_prime_eval) = MvPCS::open(prover_param, &g_prime, a2.to_vec().as_ref())?;
+    let (g_prime_proof, _g_prime_eval) = MvPCS::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?;
     // assert_eq!(g_prime_eval, tilde_g_eval);
 
     Ok(MlBatchProof {
@@ -268,7 +268,7 @@ mod tests {
         let (ck, vk) = PST13::trim(params, None, Some(nv))?;
         let point: Vec<_> = (0..nv).map(|_| Fr::rand(rng)).collect();
         let com = PST13::commit(&ck, poly)?;
-        let (proof, value) = PST13::open(&ck, poly, &point)?;
+        let (proof, value) = PST13::open(&ck, poly, &point, None)?;
 
         assert!(PST13::verify(&vk, &com, &point, &value, &proof)?);
 

@@ -971,7 +971,7 @@ where
 
         let mut opening_proof: PCSOpeningProof<F, MvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = MvPCS::open(&self.pk.mv_pcs_param, &mat_polys[0], &points[0])?;
+            let single_proof = MvPCS::open(&self.pk.mv_pcs_param, &mat_polys[0], &points[0], None)?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
@@ -1026,7 +1026,7 @@ where
 
         let mut opening_proof: PCSOpeningProof<F, UvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = UvPCS::open(&self.pk.uv_pcs_param, &mat_polys[0], &points[0])?;
+            let single_proof = UvPCS::open(&self.pk.uv_pcs_param, &mat_polys[0], &points[0], None)?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
