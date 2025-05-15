@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(feature = "parallel")]
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 
-use crate::arithmetic::errors::ArithErrors;
+use crate::{arithmetic::errors::ArithErrors, errors::SnarkResult};
 
 use super::mle::MLE;
 
@@ -139,11 +139,11 @@ fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F>
 }
 
 /// Evaluate eq polynomial.
-pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors> {
+pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
     if x.len() != y.len() {
-        return Err(ArithErrors::InvalidParameters(
-            "x and y have different length".to_string(),
-        ));
+        return Err(
+            ArithErrors::InvalidParameters("x and y have different length".to_string()).into(),
+        );
     }
     let mut res = F::one();
     for (&xi, &yi) in x.iter().zip(y.iter()) {
@@ -159,7 +159,7 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors>
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> {
+pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 
@@ -172,7 +172,7 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> 
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
+pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> SnarkResult<Vec<F>> {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then
@@ -193,9 +193,9 @@ pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
 /// A helper function to build eq(x, r) recursively.
 /// This function takes `r.len()` steps, and for each step it requires a maximum
 /// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<F: PrimeField>(r: &[F], buf: &mut Vec<F>) -> Result<(), ArithErrors> {
+fn build_eq_x_r_helper<F: PrimeField>(r: &[F], buf: &mut Vec<F>) -> SnarkResult<()> {
     if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".to_string()));
+        return Err(ArithErrors::InvalidParameters("r length is 0".to_string()).into());
     } else if r.len() == 1 {
         // initializing the buffer with [1-r_0, r_0]
         buf.push(F::one() - r[0]);
