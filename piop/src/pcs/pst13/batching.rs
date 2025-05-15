@@ -88,8 +88,6 @@ where
 
     // eq(t, i) for i in [0..k]
     let eq_t_i_list = build_eq_x_r_vec(t.as_ref())?;
-
-    // \tilde g_i(b) = eq(t, i) * f_i(b)
     // combine the polynomials that have same opening point first to reduce the
     // cost of sum check later.
     let point_indices = points
@@ -155,7 +153,8 @@ where
         *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
     }
 
-    let (g_prime_proof, _g_prime_eval) = MvPCS::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?;
+    let (g_prime_proof, _g_prime_eval) =
+        MvPCS::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?;
     // assert_eq!(g_prime_eval, tilde_g_eval);
 
     Ok(MlBatchProof {
