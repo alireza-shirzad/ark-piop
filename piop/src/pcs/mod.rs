@@ -1,6 +1,6 @@
 pub(crate) mod errors;
 pub mod kzg10;
-pub mod kzh;
+// pub mod kzh;
 pub mod pst13;
 pub mod utils;
 

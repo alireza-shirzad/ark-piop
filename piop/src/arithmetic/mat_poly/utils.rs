@@ -159,7 +159,7 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> Result<F, ArithErrors>
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> {
+pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithErrors> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 
@@ -172,7 +172,7 @@ pub(crate) fn build_eq_x_r<F: PrimeField>(r: &[F]) -> Result<Arc<MLE<F>>, ArithE
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
+pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> Result<Vec<F>, ArithErrors> {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then
