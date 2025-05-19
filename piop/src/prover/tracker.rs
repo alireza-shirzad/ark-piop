@@ -76,6 +76,7 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
+    #[timed]
     pub fn new_from_pk(pk: ProvingKey<F, MvPCS, UvPCS>) -> Self {
         let mut tracker = Self {
             pk: ProcessedProvingKey::new_from_pk(&pk),
