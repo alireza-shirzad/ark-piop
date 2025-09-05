@@ -1,7 +1,7 @@
 /////////////////// Modules //////////////////
 
 pub mod proof;
-
+pub mod polynomial;
 /////////////////// Imports //////////////////
 use std::{
     cell::RefCell,
@@ -15,15 +15,9 @@ use crate::{
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
-    },
-    pcs::PCS,
-    piop::DeepClone,
-    setup::structs::ProvingKey,
-    structs::{
-        TrackerID,
-        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
-    },
-    transcript::Tr,
+    }, pcs::PCS, piop::DeepClone, prover::structs::polynomial::TrackedPoly, setup::structs::ProvingKey, structs::{
+        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim}, TrackerID
+    }, transcript::Tr
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
@@ -123,154 +117,6 @@ where
             mv_pcs_param: pk.mv_pcs_param.clone(),
             uv_pcs_param: pk.uv_pcs_param.clone(),
             indexed_mles: BTreeMap::new(),
-        }
-    }
-}
-
-#[derive(Derivative)]
-#[derivative(Clone(bound = "MvPCS: PCS<F>"))]
-/// A tracked polynomial that is tracked by the prover tracker
-pub struct TrackedPoly<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
-{
-    id: TrackerID,
-    log_size: usize,
-    tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
-}
-
-/// Debug implementation for TrackedPoly
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedPoly<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TrackedPoly")
-            .field("id", &self.id)
-            .field("num_vars", &self.log_size)
-            .finish()
-    }
-}
-
-/// PartialEq implementation for TrackedPoly
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for TrackedPoly<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
-{
-    fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && Rc::ptr_eq(&self.tracker, &other.tracker)
-    }
-}
-
-/// Other functionalities for TrackedPoly
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> TrackedPoly<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
-{
-    /// Create a new tracked polynomial
-    pub fn new(
-        id: TrackerID,
-        log_size: usize,
-        tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
-    ) -> Self {
-        Self {
-            id,
-            log_size,
-            tracker,
-        }
-    }
-
-    /// Get the id of the tracked polynomial
-    pub fn get_id(&self) -> TrackerID {
-        self.id
-    }
-
-    /// Get a reference to the underlying tracker
-    pub fn get_tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
-        self.tracker.clone()
-    }
-
-    /// Return the log size of the polynomial
-    /// This is the number of variables in multivariate polynomials
-    pub fn get_log_size(&self) -> usize {
-        self.log_size
-    }
-
-    /// Checks if two tracked polynomials are from the same tracker
-    pub fn same_tracker(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> bool {
-        Rc::ptr_eq(&self.tracker, &other.tracker)
-    }
-
-    //TODO: See if you can remove this function
-    pub fn assert_same_tracker(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) {
-        assert!(
-            self.same_tracker(other),
-            "TrackedPolys are not from the same tracker"
-        );
-    }
-
-    pub fn add_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        assert_eq!(self.log_size, other.log_size);
-        let res_id = self.tracker.borrow_mut().add_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
-    }
-
-    pub fn sub_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        assert_eq!(self.log_size, other.log_size);
-        let res_id = self.tracker.borrow_mut().sub_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
-    }
-
-    pub fn mul_poly(&self, other: &TrackedPoly<F, MvPCS, UvPCS>) -> Self {
-        self.assert_same_tracker(other);
-        assert_eq!(self.log_size, other.log_size);
-        let res_id = self.tracker.borrow_mut().mul_polys(self.id, other.id);
-        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
-    }
-
-    pub fn add_scalar(&self, c: F) -> Self {
-        let res_id = self.tracker.borrow_mut().add_scalar(self.id, c);
-        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
-    }
-
-    pub fn mul_scalar(&self, c: F) -> Self {
-        let res_id = self.tracker.borrow_mut().mul_scalar(self.id, c);
-        TrackedPoly::new(res_id, self.log_size, self.tracker.clone())
-    }
-
-    pub fn evaluate(&self, pt: &[F]) -> Option<F> {
-        self.tracker.borrow().evaluate_mv(self.id, pt)
-    }
-
-    pub fn evaluate_uv(&self, pt: &F) -> Option<F> {
-        self.tracker.borrow().evaluate_uv(self.id, pt)
-    }
-
-    pub fn evaluations(&self) -> Vec<F> {
-        // TODO: Noe that this has to actually clone the evaluations, which can be
-        // expensive
-        self.tracker.borrow_mut().evaluations(self.id).clone()
-    }
-}
-
-impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
-    DeepClone<F, MvPCS, UvPCS> for TrackedPoly<F, MvPCS, UvPCS>
-{
-    fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self {
-        Self {
-            id: self.id,
-            log_size: self.log_size,
-            tracker: new_prover.tracker_rc,
         }
     }
 }

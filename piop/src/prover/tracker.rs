@@ -1,8 +1,8 @@
 use super::structs::{
-    ProcessedProvingKey, ProverState, TrackedPoly,
+    ProcessedProvingKey, ProverState,
     proof::{PCSSubproof, Proof},
 };
-use crate::prover::errors::ProverError::HonestProverError;
+use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
 use crate::prover::tracker::SnarkError::ProverError;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
 use crate::{

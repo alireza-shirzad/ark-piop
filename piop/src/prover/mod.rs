@@ -9,11 +9,7 @@ use crate::{
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
-    },
-    errors::SnarkResult,
-    pcs::PCS,
-    setup::structs::ProvingKey,
-    structs::TrackerID,
+    }, errors::SnarkResult, pcs::PCS, prover::structs::polynomial::TrackedPoly, setup::structs::ProvingKey, structs::TrackerID
 };
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
@@ -21,7 +17,7 @@ use ark_poly::Polynomial;
 use derivative::Derivative;
 use macros::timed;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
-use structs::{TrackedPoly, proof::Proof};
+use structs::proof::Proof;
 use tracker::ProverTracker;
 ///////////// Body /////////////
 
