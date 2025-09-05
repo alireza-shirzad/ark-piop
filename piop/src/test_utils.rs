@@ -51,3 +51,4 @@ pub fn bench_prelude<
 >() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
     prelude_with_vars::<F, MvPCS, UvPCS>(23)
 }
+

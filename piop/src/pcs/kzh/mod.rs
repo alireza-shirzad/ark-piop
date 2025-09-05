@@ -115,7 +115,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZH2<E> {
     }
 
     #[timed]
-    fn verify(
+    fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,

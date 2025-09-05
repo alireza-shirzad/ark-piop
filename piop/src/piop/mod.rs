@@ -1,6 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use ark_ff::PrimeField;
+use tracing::instrument;
 
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
@@ -12,12 +13,24 @@ use crate::{
 pub mod errors;
 pub mod structs;
 pub mod sum_check;
-
 pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
     type ProverInput: DeepClone<F, MvPCS, UvPCS>;
     type ProverOutput;
     type VerifierOutput;
     type VerifierInput;
+
+    /// Instrumented default wrapper; all impls get this span for free.
+    #[instrument(
+        level = "debug",
+        name = "piop.prove",
+        skip(prover, input),
+        fields(
+            piop = %std::any::type_name::<Self>(),
+            mv_pcs = %std::any::type_name::<MvPCS>(),
+            uv_pcs = %std::any::type_name::<UvPCS>()
+        ),
+        err
+    )]
     fn prove(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
@@ -30,15 +43,35 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         Self::prove_inner(prover, input)
     }
 
+    /// Make `verify` a default wrapper as well, so we can instrument it once.
+    #[instrument(
+        level = "debug",
+        name = "piop.verify",
+        skip(verifier, input),
+        fields(
+            piop = %std::any::type_name::<Self>(),
+            mv_pcs = %std::any::type_name::<MvPCS>(),
+            uv_pcs = %std::any::type_name::<UvPCS>()
+        ),
+        err
+    )]
     fn verify(
         verifier: &mut Verifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
-    ) -> SnarkResult<Self::VerifierOutput>;
+    ) -> SnarkResult<Self::VerifierOutput> {
+        Self::verify_inner(verifier, input)
+    }
 
+    // required cores; implement these in each PIOP
     fn prove_inner(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
+
+    fn verify_inner(
+        verifier: &mut Verifier<F, MvPCS, UvPCS>,
+        input: Self::VerifierInput,
+    ) -> SnarkResult<Self::VerifierOutput>;
 
     #[cfg(feature = "honest-prover")]
     #[allow(unused_variables)]
@@ -47,7 +80,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     }
 }
 
-/// A trait for deep cloning objects. This is only implemented for ProverInputs so that the honest-prover checks do not interefer with the prover state.
+/// unchanged
 pub trait DeepClone<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
     fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self;
 }
