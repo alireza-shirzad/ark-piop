@@ -44,26 +44,26 @@ impl<E: Pairing> KZH2UniversalParams<E> {
         }
     }
 
-    pub fn get_nu(&self) -> usize {
+    pub fn nu(&self) -> usize {
         self.nu
     }
-    pub fn get_mu(&self) -> usize {
+    pub fn mu(&self) -> usize {
         self.mu
     }
 
-    pub fn get_h_mat(&self) -> &Vec<E::G1Affine> {
+    pub fn h_mat(&self) -> &Vec<E::G1Affine> {
         &self.h_mat
     }
-    pub fn get_h_vec(&self) -> &Vec<E::G1Affine> {
+    pub fn h_vec(&self) -> &Vec<E::G1Affine> {
         &self.h_vec
     }
-    pub fn get_v_vec(&self) -> &Vec<E::G2Affine> {
+    pub fn v_vec(&self) -> &Vec<E::G2Affine> {
         &self.v_vec
     }
-    pub fn get_minus_v_prime(&self) -> E::G2Affine {
+    pub fn minus_v_prime(&self) -> E::G2Affine {
         self.minus_v_prime
     }
-    pub fn get_gi(&self) -> &Vec<E::G1Affine> {
+    pub fn gi(&self) -> &Vec<E::G1Affine> {
         &self.gi
     }
 }
@@ -87,16 +87,16 @@ impl<E: Pairing> KZH2ProverParam<E> {
         }
     }
 
-    pub fn get_nu(&self) -> usize {
+    pub fn nu(&self) -> usize {
         self.nu
     }
-    pub fn get_mu(&self) -> usize {
+    pub fn mu(&self) -> usize {
         self.mu
     }
-    pub fn get_h_mat(&self) -> &Vec<E::G1Affine> {
+    pub fn h_mat(&self) -> &Vec<E::G1Affine> {
         &self.h_mat
     }
-    pub fn get_h_vec(&self) -> &Vec<E::G1Affine> {
+    pub fn h_vec(&self) -> &Vec<E::G1Affine> {
         &self.h_vec
     }
 }
@@ -129,19 +129,19 @@ impl<E: Pairing> KZH2VerifierParam<E> {
         }
     }
 
-    pub fn get_nu(&self) -> usize {
+    pub fn nu(&self) -> usize {
         self.nu
     }
-    pub fn get_mu(&self) -> usize {
+    pub fn mu(&self) -> usize {
         self.mu
     }
-    pub fn get_h_vec(&self) -> &Vec<E::G1Affine> {
+    pub fn h_vec(&self) -> &Vec<E::G1Affine> {
         &self.h_vec
     }
-    pub fn get_minus_v_prime(&self) -> E::G2Affine {
+    pub fn minus_v_prime(&self) -> E::G2Affine {
         self.minus_v_prime
     }
-    pub fn get_v_vec(&self) -> &Vec<E::G2Affine> {
+    pub fn v_vec(&self) -> &Vec<E::G2Affine> {
         &self.v_vec
     }
 }

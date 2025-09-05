@@ -71,7 +71,7 @@ impl<F: PrimeField> SumCheck<F> {
                 SumcheckProverState::prove_round_and_update_state(&mut prover_state, &challenge)?;
             transcript.append_serializable_element(b"prover msg", &prover_msg)?;
             prover_msgs.push(prover_msg);
-            challenge = Some(transcript.get_and_append_challenge(b"Internal round")?);
+            challenge = Some(transcript.and_append_challenge(b"Internal round")?);
         }
         // pushing the last challenge point to the state
         if let Some(p) = challenge {

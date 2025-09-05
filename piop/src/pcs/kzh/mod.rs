@@ -74,7 +74,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZH2<E> {
     ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         let srs = srs.borrow();
         let supp_nv = supported_num_vars.unwrap();
-        assert_eq!(srs.get_nu() + srs.get_mu(), supp_nv);
+        assert_eq!(srs.nu() + srs.mu(), supp_nv);
         Ok((
             srs.extract_prover_param(supp_nv),
             srs.extract_verifier_param(supp_nv),
@@ -87,7 +87,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZH2<E> {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param: &KZH2ProverParam<E> = prover_param.borrow();
-        let com = E::G1::msm_unchecked(prover_param.get_h_mat(), &poly.to_evaluations());
+        let com = E::G1::msm_unchecked(prover_param.h_mat(), &poly.to_evaluations());
         Ok(KZH2Commitment::new(com.into(), poly.num_vars()))
     }
 
@@ -122,37 +122,36 @@ impl<E: Pairing> PCS<E::ScalarField> for KZH2<E> {
         value: &E::ScalarField,
         proof: &Self::Proof,
     ) -> SnarkResult<bool> {
-        let (x0, y0) = point.split_at(verifier_param.get_nu());
+        let (x0, y0) = point.split_at(verifier_param.nu());
         // Check 1: Pairing check for commitment switching
         let g1_pairing_elements =
-            std::iter::once(commitment.get_commitment()).chain(proof.get_aux().get_d());
-        let g2_pairing_elements = std::iter::once(verifier_param.get_minus_v_prime())
-            .chain(verifier_param.get_v_vec().iter().copied());
+            std::iter::once(commitment.commitment()).chain(proof.aux().d());
+        let g2_pairing_elements = std::iter::once(verifier_param.minus_v_prime())
+            .chain(verifier_param.v_vec().iter().copied());
         assert!(E::multi_pairing(g1_pairing_elements, g2_pairing_elements).is_zero());
 
         // Check 2: Hyrax Check
         let eq_x0_mle = build_eq_x_r(x0).unwrap();
 
         let scalars: Vec<E::ScalarField> = proof
-            .get_f_star()
+            .f_star()
             .evaluations
             .iter()
             .copied()
             .chain(eq_x0_mle.evaluations().iter().map(|&x| -x))
             .collect();
         let bases: Vec<E::G1Affine> = verifier_param
-            .get_h_vec()
+            .h_vec()
             .iter()
             .copied()
-            .chain(proof.get_aux().get_d())
+            .chain(proof.aux().d())
             .rev()
             .collect();
 
-        dbg!(E::G1::msm_unchecked(&bases, &scalars));
         assert!(E::G1::msm_unchecked(&bases, &scalars).is_zero());
 
         // Check 3: Evaluate polynomial at point
-        assert_eq!(proof.get_f_star().evaluate(&y0.to_vec()), *value);
+        assert_eq!(proof.f_star().evaluate(&y0.to_vec()), *value);
         Ok(true)
     }
 
@@ -175,12 +174,12 @@ fn comp_aux<E: Pairing>(
     polynomial: &DenseMultilinearExtension<E::ScalarField>,
     point: &[E::ScalarField],
 ) -> SnarkResult<KZH2AuxInfo<E>> {
-    let mut d = vec![E::G1Affine::zero(); 1 << prover_param.get_nu()];
+    let mut d = vec![E::G1Affine::zero(); 1 << prover_param.nu()];
     let evaluations = polynomial.evaluations.clone();
     cfg_iter_mut!(d)
-        .zip(cfg_chunks!(evaluations, 1 << prover_param.get_mu()))
+        .zip(cfg_chunks!(evaluations, 1 << prover_param.mu()))
         .for_each(|(d, f)| {
-            *d = E::G1::msm_unchecked(prover_param.get_h_vec(), f).into_affine();
+            *d = E::G1::msm_unchecked(prover_param.h_vec(), f).into_affine();
         });
     Ok(KZH2AuxInfo::new(d))
 }
@@ -191,7 +190,7 @@ fn open_internal<E: Pairing>(
     polynomial: &DenseMultilinearExtension<E::ScalarField>,
     point: &[E::ScalarField],
 ) -> SnarkResult<(DenseMultilinearExtension<E::ScalarField>, E::ScalarField)> {
-    let (x0, y0) = point.split_at(prover_param.get_nu());
+    let (x0, y0) = point.split_at(prover_param.nu());
     let poly_fixed_at_x0 = polynomial.fix_variables(x0);
     let z0 = poly_fixed_at_x0.evaluate(&y0.to_vec());
     Ok((poly_fixed_at_x0, z0))

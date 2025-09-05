@@ -76,11 +76,11 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn get_indexed_oracle(
+    pub fn indexed_oracle(
         &self,
         data_type: String,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
-        RefCell::borrow(&self.tracker_rc).get_indexed_oracle(data_type)
+        RefCell::borrow(&self.tracker_rc).indexed_oracle(data_type)
     }
 
     pub fn track_mat_mv_com(
@@ -112,8 +112,8 @@ where
         self.tracker_rc.borrow_mut().set_proof(proof);
     }
 
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
-        self.tracker_rc.borrow_mut().get_and_append_challenge(label)
+    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+        self.tracker_rc.borrow_mut().and_append_challenge(label)
     }
 
     pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
@@ -134,13 +134,13 @@ where
     }
 
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
-    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
+    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
         let tracker_ref_cell: &RefCell<VerifierTracker<F, MvPCS, UvPCS>> = self.tracker_rc.borrow();
-        tracker_ref_cell.borrow().get_prover_claimed_sum(id)
+        tracker_ref_cell.borrow().prover_claimed_sum(id)
     }
 
-    pub fn get_commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
-        self.tracker_rc.borrow_mut().get_commitment_num_vars(id)
+    pub fn commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
+        self.tracker_rc.borrow_mut().commitment_num_vars(id)
     }
 
     // TODO: Rename to get oracle

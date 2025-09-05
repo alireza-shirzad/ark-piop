@@ -59,7 +59,5 @@ fn test() {
         2,
         vec![Fr::from(1), Fr::from(2), Fr::from(3), Fr::from(4)],
     );
-    dbg!(&poly.evaluations);
-
     let eval = poly.evaluate(&vec![Fr::from(0), Fr::from(1)]);
 }

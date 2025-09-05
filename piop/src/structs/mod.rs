@@ -71,15 +71,15 @@ impl<F: PrimeField> SumcheckSubproof<F> {
             sumcheck_claims,
         }
     }
-    pub fn get_sumcheck_claims(&self) -> &BTreeMap<TrackerID, F> {
+    pub fn sumcheck_claims(&self) -> &BTreeMap<TrackerID, F> {
         &self.sumcheck_claims
     }
 
-    pub fn get_sc_proof(&self) -> &SumcheckProof<F> {
+    pub fn sc_proof(&self) -> &SumcheckProof<F> {
         &self.sc_proof
     }
 
-    pub fn get_sc_aux_info(&self) -> &VPAuxInfo<F> {
+    pub fn sc_aux_info(&self) -> &VPAuxInfo<F> {
         &self.sc_aux_info
     }
 }

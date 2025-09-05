@@ -70,18 +70,18 @@ where
     }
 
     /// Get the id of the tracked polynomial
-    pub fn get_id(&self) -> TrackerID {
+    pub fn id(&self) -> TrackerID {
         self.id
     }
 
     /// Get a reference to the underlying tracker
-    pub fn get_tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
+    pub fn tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
         self.tracker.clone()
     }
 
     /// Return the log size of the polynomial
     /// This is the number of variables in multivariate polynomials
-    pub fn get_log_size(&self) -> usize {
+    pub fn log_size(&self) -> usize {
         self.log_size
     }
 

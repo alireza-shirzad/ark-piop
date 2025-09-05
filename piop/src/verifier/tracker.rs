@@ -415,12 +415,12 @@ where
         res_id
     }
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
-    pub fn get_prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
+    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
         self.proof
             .as_ref()
             .unwrap()
             .sc_subproof
-            .get_sumcheck_claims()
+            .sumcheck_claims()
             .get(&id)
             .cloned()
             .ok_or(SnarkError::DummyError)
@@ -432,7 +432,7 @@ where
                 .as_ref()
                 .unwrap()
                 .sc_subproof
-                .get_sc_aux_info()
+                .sc_aux_info()
                 .num_variables,
             F::zero(),
         );
@@ -449,10 +449,10 @@ where
             _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.state
             .transcript
-            .get_and_append_challenge(label)
+            .and_append_challenge(label)
             .map_err(SnarkError::from)
     }
 
@@ -501,7 +501,7 @@ where
         self.vk.range_comms = range_tr_comms;
     }
     // Get a range commitment for the given data type
-    pub(crate) fn get_indexed_oracle(
+    pub(crate) fn indexed_oracle(
         &self,
         data_type: String,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
@@ -514,7 +514,7 @@ where
         }
     }
 
-    pub fn get_prover_comm(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
+    pub fn prover_comm(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
         self.proof
             .as_ref()
             .unwrap()
@@ -525,7 +525,7 @@ where
     }
 
     // TODO: See if we can remove this
-    pub fn get_commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
+    pub fn commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
         match self
             .proof
             .as_ref()
@@ -551,9 +551,9 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .get_and_append_challenge(b"zerocheck challenge")
+                    .and_append_challenge(b"zerocheck challenge")
                     .unwrap();
-                let cp = self.mul_scalar(claim.get_id(), ch);
+                let cp = self.mul_scalar(claim.id(), ch);
                 self.add_oracles(acc, cp)
             });
         self.add_mv_zerocheck_claim(agg);
@@ -568,7 +568,7 @@ where
         let r = self
             .state
             .transcript
-            .get_and_append_challenge_vectors(b"0check r", max_nv)
+            .and_append_challenge_vectors(b"0check r", max_nv)
             .unwrap();
         // Get the zero check claim polynomial id
         let z_check_aggr_id = self
@@ -577,7 +577,7 @@ where
             .zero_check_claims
             .last()
             .unwrap()
-            .get_id();
+            .id();
         // create the succint eq(x, r) closure and virtual comm
         let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { Ok(eq_eval(&pt, r.as_ref())?) };
         let eq_x_r_oracle = Oracle::Multivariate(Arc::new(eq_x_r_closure));
@@ -605,10 +605,10 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .get_and_append_challenge(b"sumcheck challenge")
+                    .and_append_challenge(b"sumcheck challenge")
                     .unwrap();
-                let cp = self.mul_scalar(claim.get_id(), ch);
-                sc_sum += claim.get_claim() * ch;
+                let cp = self.mul_scalar(claim.id(), ch);
+                sc_sum += claim.claim() * ch;
                 self.add_oracles(acc, cp)
             });
         // Now the sumcheck claims are empty
@@ -624,13 +624,13 @@ where
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
         let sc_subclaim = SumCheck::verify(
-            sumcheck_aggr_claim.get_claim(),
-            self.proof.as_ref().unwrap().sc_subproof.get_sc_proof(),
-            self.proof.as_ref().unwrap().sc_subproof.get_sc_aux_info(),
+            sumcheck_aggr_claim.claim(),
+            self.proof.as_ref().unwrap().sc_subproof.sc_proof(),
+            self.proof.as_ref().unwrap().sc_subproof.sc_aux_info(),
             &mut self.state.transcript,
         )?;
         self.add_mv_eval_claim(
-            sumcheck_aggr_claim.get_id(),
+            sumcheck_aggr_claim.id(),
             &sc_subclaim.point,
             sc_subclaim.expected_evaluation,
         )?;
@@ -803,7 +803,7 @@ where
             .as_ref()
             .unwrap()
             .sc_subproof
-            .get_sc_aux_info()
+            .sc_aux_info()
             .num_variables
     }
 

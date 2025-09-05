@@ -32,7 +32,7 @@ impl<F: Field> MLE<F> {
         Self { mat_mle, nv }
     }
 
-    pub fn get_mat_mle(&self) -> &DenseMultilinearExtension<F> {
+    pub fn mat_mle(&self) -> &DenseMultilinearExtension<F> {
         &self.mat_mle
     }
 

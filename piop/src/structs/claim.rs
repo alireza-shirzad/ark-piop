@@ -34,10 +34,10 @@ impl<F: PrimeField> TrackerSumcheckClaim<F> {
     pub(crate) fn new(id: TrackerID, claim: F) -> Self {
         Self { id, claim }
     }
-    pub(crate) fn get_claim(&self) -> F {
+    pub(crate) fn claim(&self) -> F {
         self.claim
     }
-    pub(crate) fn get_id(&self) -> TrackerID {
+    pub(crate) fn id(&self) -> TrackerID {
         self.id
     }
     pub(crate) fn set_claim(&mut self, claim: F) {
@@ -55,7 +55,7 @@ impl TrackerZerocheckClaim {
     pub(crate) fn new(id: TrackerID) -> Self {
         Self { id }
     }
-    pub(crate) fn get_id(&self) -> TrackerID {
+    pub(crate) fn id(&self) -> TrackerID {
         self.id
     }
 }

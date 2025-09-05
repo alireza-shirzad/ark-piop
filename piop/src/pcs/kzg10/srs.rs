@@ -117,7 +117,7 @@ impl<E: Pairing> StructuredReferenceString<E> for UnivariateUniversalParams<E> {
             cur *= &beta;
         }
 
-        // let window_size = FixedBase::get_mul_window_size(max_degree + 1);
+        // let window_size = FixedBase::mul_window_size(max_degree + 1);
 
         // TODO: parallelization
         let powers_of_g = g.batch_mul(&powers_of_beta);

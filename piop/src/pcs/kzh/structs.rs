@@ -37,12 +37,12 @@ impl<E: Pairing> KZH2Commitment<E> {
     }
 
     /// Get the commitment
-    pub fn get_commitment(&self) -> E::G1Affine {
+    pub fn commitment(&self) -> E::G1Affine {
         self.com
     }
 
     /// Get the number of variables
-    pub fn get_num_vars(&self) -> usize {
+    pub fn num_vars(&self) -> usize {
         self.nv
     }
 }
@@ -77,7 +77,7 @@ impl<E: Pairing> KZH2AuxInfo<E> {
     }
 
     /// Get the auxiliary information
-    pub fn get_d(&self) -> Vec<E::G1Affine> {
+    pub fn d(&self) -> Vec<E::G1Affine> {
         self.d.clone()
     }
 }
@@ -106,12 +106,12 @@ impl<E: Pairing> KZH2OpeningProof<E> {
     }
 
     /// Get the opening proof
-    pub fn get_f_star(&self) -> DenseMultilinearExtension<E::ScalarField> {
+    pub fn f_star(&self) -> DenseMultilinearExtension<E::ScalarField> {
         self.f_star.clone()
     }
 
     /// Get the auxiliary information
-    pub fn get_aux(&self) -> KZH2AuxInfo<E> {
+    pub fn aux(&self) -> KZH2AuxInfo<E> {
         self.aux.clone()
     }
 }

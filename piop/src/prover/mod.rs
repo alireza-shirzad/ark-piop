@@ -87,11 +87,11 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn get_indexed_tracked_poly(
+    pub fn indexed_tracked_poly(
         &self,
         label: String,
     ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
-        RefCell::borrow(&self.tracker_rc).get_indexed_tracked_poly(label.clone())
+        RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label.clone())
     }
 
     /// Track a materialized multivariate polynomial
@@ -156,33 +156,33 @@ where
 
     /// Get a shared to the materialized multivariate polynomial given its
     /// TrackerID
-    pub fn get_mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<F>> {
+    pub fn mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<F>> {
         RefCell::borrow(&self.tracker_rc)
-            .get_mat_mv_poly(id)
+            .mat_mv_poly(id)
             .unwrap()
             .clone()
     }
 
     /// Get a shared to the materialized univariate polynomial given its
     /// TrackerID
-    pub fn get_mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<F>> {
+    pub fn mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<F>> {
         RefCell::borrow(&self.tracker_rc)
-            .get_mat_uv_poly(id)
+            .mat_uv_poly(id)
             .unwrap()
             .clone()
     }
 
     /// Get a virtual polynomial given its TrackerID
-    pub fn get_virt_poly(&self, id: TrackerID) -> VirtualPoly<F> {
+    pub fn virt_poly(&self, id: TrackerID) -> VirtualPoly<F> {
         RefCell::borrow(&self.tracker_rc)
-            .get_virt_poly(id)
+            .virt_poly(id)
             .unwrap()
             .clone()
     }
 
     /// Sample a fiat-shamir challenge and append it to the transcript
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
-        self.tracker_rc.borrow_mut().get_and_append_challenge(label)
+    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+        self.tracker_rc.borrow_mut().and_append_challenge(label)
     }
 
     /// Add a claim about the evaluation of a univariate polynomial at a point
@@ -212,8 +212,8 @@ where
     }
 
     /// Get the next TrackerID to be used
-    pub fn get_next_tracker_id(&mut self) -> TrackerID {
-        self.tracker_rc.borrow_mut().get_next_id()
+    pub fn next_tracker_id(&mut self) -> TrackerID {
+        self.tracker_rc.borrow_mut().next_id()
     }
 
     /// Build the zkSQL proof from the claims and commitments

@@ -83,7 +83,7 @@ impl<F: PrimeField> Tr<F> {
     // The output field element is statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub(crate) fn get_and_append_challenge(
+    pub(crate) fn and_append_challenge(
         &mut self,
         label: &'static [u8],
     ) -> Result<F, TranscriptError> {
@@ -99,7 +99,7 @@ impl<F: PrimeField> Tr<F> {
         let challenge = F::from_le_bytes_mod_order(&buf);
         self.append_serializable_element(label, &challenge)?;
         add_trace!(
-            "get_and_append_challenge",
+            "and_append_challenge",
             "label={}, challenge={:?}",
             std::str::from_utf8(label).unwrap(),
             f_short_str(challenge)
@@ -113,7 +113,7 @@ impl<F: PrimeField> Tr<F> {
     // The output field element are statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub(crate) fn get_and_append_challenge_vectors(
+    pub(crate) fn and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
         len: usize,
@@ -127,10 +127,10 @@ impl<F: PrimeField> Tr<F> {
 
         let mut res = vec![];
         for _ in 0..len {
-            res.push(self.get_and_append_challenge(label)?)
+            res.push(self.and_append_challenge(label)?)
         }
         add_trace!(
-            "get_and_append_challenge_vectors",
+            "and_append_challenge_vectors",
             "label={}, challenge={:?}",
             std::str::from_utf8(label).unwrap(),
             f_vec_short_str(&res)

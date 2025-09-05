@@ -14,7 +14,7 @@ pub mod virt_poly;
 // - `x1 := (i_1, ..., i_{n-1}, 1)`
 // - `sign := i_0`
 #[inline]
-pub fn get_index(i: usize, num_vars: usize) -> (usize, usize, bool) {
+pub fn index(i: usize, num_vars: usize) -> (usize, usize, bool) {
     let bit_sequence = bit_decompose(i as u64, num_vars);
 
     // the last bit comes first here because of LE encoding
@@ -105,7 +105,7 @@ pub(crate) fn project(input: &[bool]) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use super::{bit_decompose, get_index, project};
+    use super::{bit_decompose, index, project};
     use ark_std::{rand::RngCore, test_rng};
 
     #[test]
@@ -120,20 +120,20 @@ mod test {
     }
 
     #[test]
-    fn test_get_index() {
+    fn test_index() {
         let a = 0b1010;
-        let (x0, x1, sign) = get_index(a, 4);
+        let (x0, x1, sign) = index(a, 4);
         assert_eq!(x0, 0b0100);
         assert_eq!(x1, 0b0101);
         assert!(sign);
 
-        let (x0, x1, sign) = get_index(a, 5);
+        let (x0, x1, sign) = index(a, 5);
         assert_eq!(x0, 0b10100);
         assert_eq!(x1, 0b10101);
         assert!(!sign);
 
         let a = 0b1111;
-        let (x0, x1, sign) = get_index(a, 4);
+        let (x0, x1, sign) = index(a, 4);
         assert_eq!(x0, 0b1110);
         assert_eq!(x1, 0b1111);
         assert!(sign);

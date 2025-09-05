@@ -38,10 +38,10 @@ impl<F: PrimeField, PC: PCS<F>> TrackerEvalClaim<F, PC> {
     pub fn new(id: TrackerID, point: <PC::Poly as Polynomial<F>>::Point) -> Self {
         Self { id, point }
     }
-    pub fn get_id(&self) -> TrackerID {
+    pub fn id(&self) -> TrackerID {
         self.id
     }
-    pub fn get_point(&self) -> &<PC::Poly as Polynomial<F>>::Point {
+    pub fn point(&self) -> &<PC::Poly as Polynomial<F>>::Point {
         &self.point
     }
     pub fn set_point(&mut self, point: <PC::Poly as Polynomial<F>>::Point) {
