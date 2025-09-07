@@ -69,7 +69,7 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
+pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 

@@ -1,8 +1,6 @@
 pub(crate) mod errors;
 pub mod kzg10;
-// pub mod kzh;
 pub mod pst13;
-pub mod utils;
 
 use crate::{errors::SnarkResult, transcript::Tr};
 use ark_ec::pairing::Pairing;
@@ -11,7 +9,15 @@ use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use std::{borrow::Borrow, fmt::Debug, hash::Hash, sync::Arc};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Write},
+    path::Path,
+};
 use tracing::Level;
+
+use ark_std::test_rng;
+use tracing::instrument;
 /// This trait defines APIs for polynomial commitment schemes.
 /// Note that for our usage of PCS, we do not require the hiding property.
 pub trait PCS<F: PrimeField>: Clone {
@@ -326,4 +332,38 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
 pub trait PolynomialCommitment<F: Field>: Sized {
     fn num_vars(&self) -> usize;
     fn set_num_vars(&mut self, nv: usize);
+}
+
+#[instrument(level = "debug", skip(srs_path))]
+pub fn load_or_generate_srs<F: PrimeField, PCSImpl: PCS<F>>(
+    srs_path: &Path,
+    size: usize,
+) -> PCSImpl::SRS {
+    if srs_path.exists() {
+        tracing::info!(
+            srs_loading_path = ?srs_path
+        );
+        let mut buffer = Vec::new();
+        BufReader::new(File::open(srs_path).unwrap())
+            .read_to_end(&mut buffer)
+            .unwrap();
+        PCSImpl::SRS::deserialize_uncompressed_unchecked(&buffer[..]).unwrap_or_else(|_| {
+            panic!("Failed to deserialize SRS from {:?}", srs_path);
+        })
+    } else {
+        tracing::warn!(
+            srs_saving_path = ?srs_path
+        );
+        let mut rng = test_rng();
+        let srs = PCSImpl::gen_srs_for_testing(&mut rng, size).unwrap();
+        let mut serialized = Vec::new();
+        srs.serialize_uncompressed(&mut serialized).unwrap();
+        BufWriter::new(
+            File::create(srs_path)
+                .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", srs_path)),
+        )
+        .write_all(&serialized)
+        .unwrap();
+        srs
+    }
 }

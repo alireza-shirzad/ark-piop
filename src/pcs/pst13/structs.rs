@@ -1,17 +1,13 @@
-// Copyright (c) 2023 Espresso Systems (espressosys.com)
-// This file is part of the HyperPlonk library.
-
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
 use std::fmt;
 
+use crate::pcs::PCS;
+use crate::piop::structs::SumcheckProof;
+use crate::{
+    arithmetic::g1_affine_short_str, pcs::PolynomialCommitment, util::display::ShortDisplay,
+};
 use ark_ec::pairing::Pairing;
 use ark_serialize::{self, CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
-
-use crate::{arithmetic::g1_affine_short_str, pcs::PolynomialCommitment, util::display::ShortDisplay};
-
 
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
@@ -24,12 +20,12 @@ use crate::{arithmetic::g1_affine_short_str, pcs::PolynomialCommitment, util::di
     Eq(bound = "")
 )]
 /// A commitment is an Affine point.
-pub struct Commitment<E: Pairing> {
+pub struct PST13Commitment<E: Pairing> {
     /// the actual commitment is an affine point.
     pub com: E::G1Affine,
     pub nv: usize,
 }
-impl<E: Pairing> PolynomialCommitment<E::ScalarField> for Commitment<E> {
+impl<E: Pairing> PolynomialCommitment<E::ScalarField> for PST13Commitment<E> {
     fn num_vars(&self) -> usize {
         self.nv
     }
@@ -37,10 +33,49 @@ impl<E: Pairing> PolynomialCommitment<E::ScalarField> for Commitment<E> {
         self.nv = nv;
     }
 }
-
-impl<E: Pairing> ShortDisplay for Commitment<E> {
+impl<E: Pairing> ShortDisplay for PST13Commitment<E> {
     fn fmt_short(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let coords = g1_affine_short_str(&self.com);
         write!(f, "nv{}: {}", self.nv, coords)
+    }
+}
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
+/// proof of opening
+pub struct PST13Proof<E: Pairing> {
+    /// Evaluation of quotients
+    pub proofs: Vec<E::G1Affine>,
+}
+
+impl<E: Pairing> Default for PST13Proof<E> {
+    fn default() -> Self {
+        Self { proofs: vec![] }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
+pub struct PST13BatchProof<E, MvPCS>
+where
+    E: Pairing,
+    MvPCS: PCS<E::ScalarField>,
+{
+    /// A sum check proof proving tilde g's sum
+    pub(crate) sum_check_proof: SumcheckProof<E::ScalarField>,
+    /// f_i(point_i)
+    pub f_i_eval_at_point_i: Vec<E::ScalarField>,
+    /// proof for g'(a_2)
+    pub(crate) g_prime_proof: MvPCS::Proof,
+}
+
+impl<E, MvPCS> Default for PST13BatchProof<E, MvPCS>
+where
+    E: Pairing,
+    MvPCS: PCS<E::ScalarField>,
+{
+    fn default() -> Self {
+        Self {
+            sum_check_proof: SumcheckProof::default(),
+            f_i_eval_at_point_i: vec![],
+            g_prime_proof: MvPCS::Proof::default(),
+        }
     }
 }

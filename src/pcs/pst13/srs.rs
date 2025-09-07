@@ -1,27 +1,17 @@
-// Copyright (c) 2023 Espresso Systems (espressosys.com)
-// This file is part of the HyperPlonk library.
-
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
 //! Implementing Structured Reference Strings for multilinear polynomial KZG
 use crate::{
-    arithmetic::mat_poly::mle::MLE,
+    arithmetic::mat_poly::{mle::MLE, utils::{build_eq_x_r, eq_eval}},
     errors::{SnarkError, SnarkResult},
-    pcs::{
-        StructuredReferenceString,
-        errors::PCSError,
-        pst13::util::{eq_eval, eq_extension},
-    },
+    pcs::{errors::PCSError, StructuredReferenceString},
 };
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
 use ark_ff::{PrimeField, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::Zero;
-use ark_std::{end_timer, rand::Rng, start_timer};
-use core::iter::FromIterator;
+use ark_std::rand::Rng;
+use core::{iter::FromIterator, panic};
 
-use std::collections::LinkedList;
+use std::{collections::LinkedList, sync::Arc};
 /// Evaluations over {0,1}^n for G1 or G2
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct Evaluations<C: AffineRepr> {
@@ -31,16 +21,16 @@ pub struct Evaluations<C: AffineRepr> {
 
 /// Universal Parameter
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct MultilinearUniversalParams<E: Pairing> {
+pub struct PST13UniversalParams<E: Pairing> {
     /// prover parameters
-    pub prover_param: MultilinearProverParam<E>,
+    pub prover_param: PST13ProverParam<E>,
     /// h^randomness: h^t1, h^t2, ..., **h^{t_nv}**
     pub h_mask: Vec<E::G2Affine>,
 }
 
 /// Prover Parameters
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct MultilinearProverParam<E: Pairing> {
+pub struct PST13ProverParam<E: Pairing> {
     /// number of variables
     pub num_vars: usize,
     /// `pp_{0}`, `pp_{1}`, ...,pp_{nu_vars} defined
@@ -55,7 +45,7 @@ pub struct MultilinearProverParam<E: Pairing> {
 
 /// Verifier Parameters
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
-pub struct MultilinearVerifierParam<E: Pairing> {
+pub struct PST13VerifierParam<E: Pairing> {
     /// number of variables
     pub num_vars: usize,
     /// generator of G1
@@ -66,9 +56,9 @@ pub struct MultilinearVerifierParam<E: Pairing> {
     pub h_mask: Vec<E::G2Affine>,
 }
 
-impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> {
-    type ProverParam = MultilinearProverParam<E>;
-    type VerifierParam = MultilinearVerifierParam<E>;
+impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
+    type ProverParam = PST13ProverParam<E>;
+    type VerifierParam = PST13VerifierParam<E>;
 
     /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_num_vars: usize) -> Self::ProverParam {
@@ -102,10 +92,10 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
         supported_num_vars: usize,
     ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         if supported_num_vars > self.prover_param.num_vars {
-            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
-                "SRS does not support target number of vars {}",
-                supported_num_vars
-            ))));
+            return Err(SnarkError::PCSErrors(PCSError::TooLargePolynomial(
+                supported_num_vars,
+                self.prover_param.num_vars,
+            )));
         }
 
         let to_reduce = self.prover_param.num_vars - supported_num_vars;
@@ -129,9 +119,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, num_vars: usize) -> SnarkResult<Self> {
         if num_vars == 0 {
-            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
-                "constant polynomial not supported".to_string(),
-            )));
+            panic!("num_vars should be positive");
         }
 
         let g = E::G1::rand(rng);
@@ -141,7 +129,7 @@ impl<E: Pairing> StructuredReferenceString<E> for MultilinearUniversalParams<E> 
 
         let t: Vec<_> = (0..num_vars).map(|_| E::ScalarField::rand(rng)).collect();
 
-        let mut eq: LinkedList<MLE<E::ScalarField>> = LinkedList::from_iter(eq_extension(&t));
+        let mut eq: LinkedList<Arc<MLE<E::ScalarField>>> = LinkedList::from_iter(build_eq_x_r(&t));
         let mut eq_arr = LinkedList::new();
         // TODO: See if you can get rid of the clone next line
         let mut base = eq.pop_back().unwrap().evaluations().clone();
@@ -206,9 +194,7 @@ fn remove_dummy_variable<F: PrimeField>(poly: &[F], pad: usize) -> SnarkResult<V
         return Ok(poly.to_vec());
     }
     if !poly.len().is_power_of_two() {
-        return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
-            "Size of polynomial should be power of two.".to_string(),
-        )));
+        panic!("poly length is not a power of two");
     }
     let nv = ark_std::log2(poly.len()) as usize - pad;
     Ok((0..(1 << nv)).map(|x| poly[x << pad]).collect())
@@ -224,7 +210,7 @@ mod tests {
     fn test_srs_gen() -> SnarkResult<()> {
         let mut rng = test_rng();
         for nv in 4..10 {
-            let _ = MultilinearUniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
+            let _ = PST13UniversalParams::<E>::gen_srs_for_testing(&mut rng, nv)?;
         }
 
         Ok(())

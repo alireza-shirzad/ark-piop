@@ -55,7 +55,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
         challenge: &Option<F>,
     ) -> Result<SumcheckProverMessage<F>, PolyIOPErrors> {
         if self.round >= self.poly.aux_info.num_variables {
-            return Err(PolyIOPErrors::InvalidProver(
+            return Err(PolyIOPErrors::Prover(
                 "Prover is not active".to_string(),
             ));
         }
@@ -77,7 +77,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
 
         if let Some(chal) = challenge {
             if self.round == 0 {
-                return Err(PolyIOPErrors::InvalidProver(
+                return Err(PolyIOPErrors::Prover(
                     "first round should be prover first.".to_string(),
                 ));
             }
@@ -93,7 +93,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
                 .iter_mut()
                 .for_each(|mle| *mle = fix_variables(mle, &[r]));
         } else if self.round > 0 {
-            return Err(PolyIOPErrors::InvalidProver(
+            return Err(PolyIOPErrors::Prover(
                 "verifier message is empty".to_string(),
             ));
         }

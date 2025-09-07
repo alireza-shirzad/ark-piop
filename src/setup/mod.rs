@@ -6,15 +6,15 @@ pub mod structs;
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkResult,
-    pcs::{PCS, utils::load_or_generate_srs},
+    pcs::{PCS, load_or_generate_srs},
 };
 use ark_ff::PrimeField;
 use ark_std::cfg_iter;
 
-use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf};
-use structs::{ProvingKey, VerifyingKey};
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf};
+use structs::{ProvingKey, VerifyingKey};
 //////// Body /////////
 
 /// A key generator struct

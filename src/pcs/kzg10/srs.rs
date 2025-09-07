@@ -1,9 +1,3 @@
-// Copyright (c) 2023 Espresso Systems (espressosys.com)
-// This file is part of the HyperPlonk library.
-
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
 //! Implementing Structured Reference Strings for univariate polynomial KZG
 
 use crate::errors::SnarkResult;
@@ -19,7 +13,7 @@ use std::ops::Mul;
 // Adapted from
 // https://github.com/arkworks-rs/poly-commit/blob/master/src/kzg10/data_structures.rs#L20
 #[derive(Debug, Clone, Eq, PartialEq, CanonicalSerialize, CanonicalDeserialize, Default)]
-pub struct UnivariateUniversalParams<E: Pairing> {
+pub struct KZG10UniversalParams<E: Pairing> {
     /// Group elements of the form `{ \beta^i G }`, where `i` ranges from 0 to
     /// `degree`.
     pub powers_of_g: Vec<E::G1Affine>,
@@ -29,21 +23,21 @@ pub struct UnivariateUniversalParams<E: Pairing> {
     pub beta_h: E::G2Affine,
 }
 
-impl<E: Pairing> UnivariateUniversalParams<E> {
+impl<E: Pairing> KZG10UniversalParams<E> {
     /// Returns the maximum supported degree
     pub fn max_degree(&self) -> usize {
         self.powers_of_g.len()
     }
 }
 
-/// `UnivariateProverParam` is used to generate a proof
+/// `KZG10ProverParam` is used to generate a proof
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, Eq, PartialEq, Default)]
-pub struct UnivariateProverParam<C: AffineRepr> {
+pub struct KZG10ProverParam<C: AffineRepr> {
     /// Parameters
     pub powers_of_g: Vec<C>,
 }
 
-/// `UnivariateVerifierParam` is used to check evaluation proofs for a given
+/// `KZG10VerifierParam` is used to check evaluation proofs for a given
 /// commitment.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
@@ -54,7 +48,7 @@ pub struct UnivariateProverParam<C: AffineRepr> {
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-pub struct UnivariateVerifierParam<E: Pairing> {
+pub struct KZG10VerifierParam<E: Pairing> {
     /// The generator of G1.
     pub g: E::G1Affine,
     /// The generator of G2.
@@ -63,9 +57,9 @@ pub struct UnivariateVerifierParam<E: Pairing> {
     pub beta_h: E::G2Affine,
 }
 
-impl<E: Pairing> StructuredReferenceString<E> for UnivariateUniversalParams<E> {
-    type ProverParam = UnivariateProverParam<E::G1Affine>;
-    type VerifierParam = UnivariateVerifierParam<E>;
+impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
+    type ProverParam = KZG10ProverParam<E::G1Affine>;
+    type VerifierParam = KZG10VerifierParam<E>;
 
     /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_size: usize) -> Self::ProverParam {

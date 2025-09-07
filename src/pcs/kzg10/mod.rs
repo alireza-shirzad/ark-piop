@@ -2,63 +2,45 @@ use super::PCS;
 use crate::{
     arithmetic::mat_poly::lde::LDE,
     errors::{SnarkError, SnarkResult},
-    pcs::errors::PCSError,
+    pcs::{
+        errors::PCSError,
+        kzg10::structs::{KZG10BatchProof, KZG10Proof},
+    },
+};
+
+use crate::pcs::kzg10::PCSError::TooLargePolynomial;
+use crate::pcs::kzg10::SnarkError::PCSErrors;
+use crate::{
+    pcs::{Rng, StructuredReferenceString},
+    transcript::Tr,
 };
 use ark_ec::{
     AffineRepr, CurveGroup, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM,
 };
 use ark_ff::{One, PrimeField};
 use ark_poly::{DenseUVPolynomial, Polynomial};
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-
-use srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam};
-use std::{borrow::Borrow, ops::Mul, sync::Arc};
-use structs::Commitment;
-pub(crate) mod srs;
-use crate::{
-    pcs::{Rng, StructuredReferenceString},
-    transcript::Tr,
-};
-pub mod structs;
 use ark_std::marker::PhantomData;
+use srs::{KZG10ProverParam, KZG10UniversalParams, KZG10VerifierParam};
+use std::{borrow::Borrow, ops::Mul, sync::Arc};
+use structs::KZG10Commitment;
+pub(crate) mod srs;
+pub mod structs;
 /// KZG Polynomial Commitment Scheme on univariate polynomial.
 #[derive(Clone)]
 pub struct KZG10<E: Pairing> {
     #[doc(hidden)]
     phantom: PhantomData<E>,
 }
-#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-/// proof of opening
-pub struct KZG10Proof<E: Pairing> {
-    /// Evaluation of quotients
-    pub proof: E::G1Affine,
-}
-impl<E: Pairing> Default for KZG10Proof<E> {
-    fn default() -> Self {
-        Self {
-            proof: E::G1Affine::zero(),
-        }
-    }
-}
-/// batch proof
-#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-pub struct KZG10BatchProof<E: Pairing>(Vec<KZG10Proof<E>>);
-
-impl<E: Pairing> Default for KZG10BatchProof<E> {
-    fn default() -> Self {
-        Self(vec![])
-    }
-}
 
 impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     // Parameters
-    type ProverParam = UnivariateProverParam<E::G1Affine>;
-    type VerifierParam = UnivariateVerifierParam<E>;
-    type SRS = UnivariateUniversalParams<E>;
+    type ProverParam = KZG10ProverParam<E::G1Affine>;
+    type VerifierParam = KZG10VerifierParam<E>;
+    type SRS = KZG10UniversalParams<E>;
     // Polynomial and its associated types
     type Poly = LDE<E::ScalarField>;
     // Polynomial and its associated types
-    type Commitment = Commitment<E>;
+    type Commitment = KZG10Commitment<E>;
     type Proof = KZG10Proof<E>;
 
     // We do not implement batch univariate KZG at the current version.
@@ -70,7 +52,10 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing_inner<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
+    fn gen_srs_for_testing_inner<R: Rng>(
+        rng: &mut R,
+        supported_size: usize,
+    ) -> SnarkResult<Self::SRS> {
         Self::SRS::gen_srs_for_testing(rng, supported_size)
     }
 
@@ -82,13 +67,18 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
     ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
-        assert!(supported_num_vars.is_none());
         if supported_num_vars.is_some() {
-            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(
-                "univariate should not receive a num_var param".to_string(),
-            )));
+            panic!("supported_num_vars must be None for univariate polynomials");
         }
-        srs.borrow().trim(supported_degree.unwrap())
+        let supported_degree = match supported_degree {
+            Some(p) => p,
+            None => {
+                panic!("supported_degree should be provided for univariate polynomials")
+            }
+        };
+        let (ml_ck, ml_vk) = srs.borrow().trim(supported_degree)?;
+
+        Ok((ml_ck, ml_vk))
     }
 
     /// Generate a commitment for a polynomial
@@ -99,11 +89,10 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
         if poly.degree() >= prover_param.powers_of_g.len() {
-            return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
-                "uni poly degree {} is larger than allowed {}",
+            return Err(PCSErrors(TooLargePolynomial(
                 poly.degree(),
-                prover_param.powers_of_g.len()
-            ))));
+                prover_param.powers_of_g.len(),
+            )));
         };
 
         let (num_leading_zeros, plain_coeffs) = skip_leading_zeros(&**poly);
@@ -112,7 +101,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
             E::G1::msm_unchecked(&prover_param.powers_of_g[num_leading_zeros..], plain_coeffs)
                 .into_affine();
 
-        Ok(Commitment {
+        Ok(KZG10Commitment {
             com: commitment,
             nv: poly.degree(),
         })
@@ -145,16 +134,30 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
     fn multi_open_inner(
         _prover_param: impl Borrow<Self::ProverParam>,
-        _polynomials: &[Arc<Self::Poly>],
-        _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
-        _evals: &[E::ScalarField],
+        polynomials: &[Arc<Self::Poly>],
+        points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
+        evals: &[E::ScalarField],
         _transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<Self::BatchProof> {
+        #[cfg(feature = "honest-prover")]
+        {
+            for (i, ((poly, point), eval)) in polynomials
+                .iter()
+                .zip(points.iter())
+                .zip(evals.iter())
+                .enumerate()
+            {
+                let computed_eval = poly.evaluate(point);
+                if computed_eval != *eval {
+                    return Err(SnarkError::PCSErrors(PCSError::HonestProver(i)));
+                }
+            }
+        }
         let mut batch_proof = KZG10BatchProof::default();
-        _polynomials
+        polynomials
             .iter()
-            .zip(_points.iter())
-            .zip(_evals.iter())
+            .zip(points.iter())
+            .zip(evals.iter())
             .for_each(|((poly, point), _)| {
                 let (proof, _) = Self::open(_prover_param.borrow(), poly, point, None).unwrap();
                 batch_proof.0.push(proof);
@@ -172,6 +175,8 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<bool> {
+        // The output bool is the and of all the individual verifications.
+        let mut aggr_res = true;
         _commitments
             .iter()
             .zip(_points.iter())
@@ -179,9 +184,11 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
             .zip(_evals.iter())
             .for_each(|(((commitment, point), proof), value)| {
                 let res = Self::verify(_verifier_param, commitment, point, value, proof).unwrap();
-                assert!(res, "proof was incorrect");
+                if !res {
+                    aggr_res = false;
+                }
             });
-        Ok(true)
+        Ok(aggr_res)
     }
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial

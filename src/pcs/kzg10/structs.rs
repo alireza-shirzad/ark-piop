@@ -1,9 +1,3 @@
-// Copyright (c) 2023 Espresso Systems (espressosys.com)
-// This file is part of the HyperPlonk library.
-
-// You should have received a copy of the MIT License
-// along with the HyperPlonk library. If not, see <https://mit-license.org/>.
-
 use std::fmt;
 
 use ark_ec::pairing::Pairing;
@@ -13,7 +7,7 @@ use derivative::Derivative;
 use crate::{
     arithmetic::g1_affine_short_str, pcs::PolynomialCommitment, util::display::ShortDisplay,
 };
-
+use ark_ec::AffineRepr;
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
     Default(bound = ""),
@@ -25,12 +19,12 @@ use crate::{
     Eq(bound = "")
 )]
 /// A commitment is an Affine point.
-pub struct Commitment<E: Pairing> {
+pub struct KZG10Commitment<E: Pairing> {
     /// the actual commitment is an affine point.
     pub com: E::G1Affine,
     pub nv: usize,
 }
-impl<E: Pairing> PolynomialCommitment<E::ScalarField> for Commitment<E> {
+impl<E: Pairing> PolynomialCommitment<E::ScalarField> for KZG10Commitment<E> {
     fn num_vars(&self) -> usize {
         self.nv
     }
@@ -39,9 +33,32 @@ impl<E: Pairing> PolynomialCommitment<E::ScalarField> for Commitment<E> {
     }
 }
 
-impl<E: Pairing> ShortDisplay for Commitment<E> {
+impl<E: Pairing> ShortDisplay for KZG10Commitment<E> {
     fn fmt_short(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let coords = g1_affine_short_str(&self.com);
         write!(f, "nv{}: {}", self.nv, coords)
+    }
+}
+
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
+/// proof of opening
+pub struct KZG10Proof<E: Pairing> {
+    /// Evaluation of quotients
+    pub proof: E::G1Affine,
+}
+impl<E: Pairing> Default for KZG10Proof<E> {
+    fn default() -> Self {
+        Self {
+            proof: E::G1Affine::zero(),
+        }
+    }
+}
+/// batch proof
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
+pub struct KZG10BatchProof<E: Pairing>(pub Vec<KZG10Proof<E>>);
+
+impl<E: Pairing> Default for KZG10BatchProof<E> {
+    fn default() -> Self {
+        Self(vec![])
     }
 }

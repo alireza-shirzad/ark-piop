@@ -10,7 +10,7 @@ pub(crate) enum PolyIOPErrors {
     #[error("Error")]
     ArithmeticErrors(#[from] ArithErrors),
     #[error("Error `{0}`")]
-    InvalidProver(String),
+    Prover(String),
     #[error("Errorrr `{0}`")]
     InvalidVerifier(String),
 

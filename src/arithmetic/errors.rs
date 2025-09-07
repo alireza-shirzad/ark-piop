@@ -1,6 +1,5 @@
-use ark_serialize::SerializationError;
 use thiserror::Error;
-
+use ark_serialize::SerializationError;
 /// A `enum` specifying the possible failure modes of the arithmetics.
 #[derive(Error, Debug)]
 pub(crate) enum ArithErrors {
@@ -8,8 +7,7 @@ pub(crate) enum ArithErrors {
     SerializationErrors(SerializationError),
     #[error("Error")]
     InvalidParameters(String),
-    #[error("Error")]
-    ShouldNotArrive,
+
 }
 
 impl From<SerializationError> for ArithErrors {
