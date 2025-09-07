@@ -27,6 +27,7 @@ use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, rand::Rng, start_timer};
 use batching::multi_open_internal;
+use tracing::instrument;
 
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 // use batching::{batch_verify_internal, multi_open_internal};
@@ -71,14 +72,14 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, log_size: usize) -> SnarkResult<Self::SRS> {
+    fn gen_srs_for_testing_inner<R: Rng>(rng: &mut R, log_size: usize) -> SnarkResult<Self::SRS> {
         MultilinearUniversalParams::<E>::gen_srs_for_testing(rng, log_size)
     }
 
     /// Trim the universal parameters to specialize the public parameters.
     /// Input both `supported_log_degree` for univariate and
     /// `supported_num_vars` for multilinear.
-    fn trim(
+    fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
@@ -104,7 +105,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ///
     /// This function takes `2^num_vars` number of scalar multiplications over
     /// G1.
-    fn commit(
+    fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
@@ -139,7 +140,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     /// - it prodceeds with `num_var` number of rounds,
     /// - at round i, we compute an MSM for `2^{num_var - i + 1}` number of G2
     ///   elements.
-    fn open(
+    fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
@@ -150,7 +151,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
 
     /// Input a list of multilinear extensions, and a same number of points, and
     /// a transcript, compute a multi-opening for all the polynomials.
-    fn multi_open(
+    fn multi_open_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomials: &[Arc<Self::Poly>],
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
@@ -181,7 +182,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     /// This function takes
     /// - num_var number of pairing product.
     /// - num_var number of MSM
-    fn verify(
+    fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
@@ -193,7 +194,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
 
     /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
     /// `poly_i` committed inside `comm`.
-    fn batch_verify(
+    fn batch_verify_inner(
         verifier_param: &Self::VerifierParam,
         commitments: &[Self::Commitment],
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
@@ -213,6 +214,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
 /// G1:
 /// - it proceeds with `num_var` number of rounds,
 /// - at round i, we compute an MSM for `2^{num_var - i}` number of G1 elements.
+#[instrument(level = "trace", skip(prover_param, polynomial), fields(num_vars = %polynomial.num_vars()))]
 fn open_internal<E: Pairing>(
     prover_param: &MultilinearProverParam<E>,
     polynomial: &MLE<E::ScalarField>,
@@ -274,6 +276,7 @@ fn open_internal<E: Pairing>(
 /// This function takes
 /// - num_var number of pairing product.
 /// - num_var number of MSM
+#[instrument(level = "trace", skip(verifier_param, commitment, value, proof), fields(num_vars = %point.len()))]
 fn verify_internal<E: Pairing>(
     verifier_param: &MultilinearVerifierParam<E>,
     commitment: &Commitment<E>,

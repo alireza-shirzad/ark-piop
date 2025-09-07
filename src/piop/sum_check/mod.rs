@@ -5,13 +5,14 @@ use crate::{
     transcript::Tr,
 };
 use ark_ff::PrimeField;
-use ark_std::{end_timer, start_timer};
 
 use std::{fmt::Debug, marker::PhantomData};
 
 use super::structs::SumcheckProof;
 
 mod prover;
+#[cfg(test)]
+mod tests;
 mod verifier;
 #[derive(Clone, Debug, Default, Copy, PartialEq, Eq)]
 /// Struct for PolyIOP protocol.

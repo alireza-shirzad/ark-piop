@@ -4,23 +4,20 @@ use std::{
     path::Path,
 };
 
-
 use super::PCS;
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::test_rng;
+use tracing::instrument;
 
-
+#[instrument(level = "debug", skip(srs_path))]
 pub fn load_or_generate_srs<F: PrimeField, PCSImpl: PCS<F>>(
     srs_path: &Path,
     size: usize,
 ) -> PCSImpl::SRS {
     if srs_path.exists() {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "load_or_generate_srs",
-            format!("loading path = {:?}", srs_path)
+        tracing::info!(
+            srs_loading_path = ?srs_path
         );
         let mut buffer = Vec::new();
         BufReader::new(File::open(srs_path).unwrap())
@@ -30,11 +27,8 @@ pub fn load_or_generate_srs<F: PrimeField, PCSImpl: PCS<F>>(
             panic!("Failed to deserialize SRS from {:?}", srs_path);
         })
     } else {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "load_or_generate_srs",
-            format!("saving path = {:?}", srs_path)
+        tracing::warn!(
+            srs_saving_path = ?srs_path
         );
         let mut rng = test_rng();
         let srs = PCSImpl::gen_srs_for_testing(&mut rng, size).unwrap();

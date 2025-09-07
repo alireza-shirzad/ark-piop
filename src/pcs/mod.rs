@@ -11,6 +11,7 @@ use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::rand::Rng;
 use std::{borrow::Borrow, fmt::Debug, hash::Hash, sync::Arc};
+use tracing::Level;
 /// This trait defines APIs for polynomial commitment schemes.
 /// Note that for our usage of PCS, we do not require the hiding property.
 pub trait PCS<F: PrimeField>: Clone {
@@ -57,7 +58,11 @@ pub trait PCS<F: PrimeField>: Clone {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS>;
+    // Core methods that implementations must provide (uninstrumented).
+    fn gen_srs_for_testing_inner<R: Rng>(
+        rng: &mut R,
+        supported_size: usize,
+    ) -> SnarkResult<Self::SRS>;
 
     /// Trim the universal parameters to specialize the public parameters.
     /// Input both `supported_degree` for univariate and
@@ -69,7 +74,7 @@ pub trait PCS<F: PrimeField>: Clone {
     /// allows for passing in any pointer type, e.g.: `trim(srs: &Self::SRS,
     /// ..)` or `trim(srs: Box<Self::SRS>, ..)` or `trim(srs: Arc<Self::SRS>,
     /// ..)` etc.
-    fn trim(
+    fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
@@ -84,14 +89,14 @@ pub trait PCS<F: PrimeField>: Clone {
     /// &Self::ProverParam, ..)` or `commit(prover_param:
     /// Box<Self::ProverParam>, ..)` or `commit(prover_param:
     /// Arc<Self::ProverParam>, ..)` etc.
-    fn commit(
+    fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment>;
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
     /// same.
-    fn open(
+    fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<F>>::Point,
@@ -100,21 +105,19 @@ pub trait PCS<F: PrimeField>: Clone {
 
     /// Input a list of multilinear extensions, and a same number of points, and
     /// a transcript, compute a multi-opening for all the polynomials.
-    fn multi_open(
+    fn multi_open_inner(
         _prover_param: impl Borrow<Self::ProverParam>,
         _polynomials: &[Arc<Self::Poly>],
         _points: &[<Self::Poly as Polynomial<F>>::Point],
         _evals: &[F],
         _transcript: &mut Tr<F>,
     ) -> SnarkResult<Self::BatchProof> {
-        // the reason we use unimplemented!() is to enable developers to implement the
-        // trait without always implementing the batching APIs.
         unimplemented!()
     }
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial
     /// committed inside `comm`.
-    fn verify(
+    fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
         point: &<Self::Poly as Polynomial<F>>::Point,
@@ -124,6 +127,131 @@ pub trait PCS<F: PrimeField>: Clone {
 
     /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
     /// `poly_i` committed inside `comm`.
+    fn batch_verify_inner(
+        _verifier_param: &Self::VerifierParam,
+        _commitments: &[Self::Commitment],
+        _points: &[<Self::Poly as Polynomial<F>>::Point],
+        _evals: &[F],
+        _batch_proof: &Self::BatchProof,
+        _transcript: &mut Tr<F>,
+    ) -> SnarkResult<bool> {
+        unimplemented!()
+    }
+
+    #[inline(always)]
+    #[tracing::instrument(level = "debug", skip(rng), fields(supported_size))]
+    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
+        Self::gen_srs_for_testing_inner(rng, supported_size)
+    }
+
+    #[inline(always)]
+    #[tracing::instrument(
+        level = "debug",
+        skip(srs),
+        fields(supported_degree, supported_num_vars)
+    )]
+    fn trim(
+        srs: impl Borrow<Self::SRS>,
+        supported_degree: Option<usize>,
+        supported_num_vars: Option<usize>,
+    ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
+        Self::trim_impl_inner(srs, supported_degree, supported_num_vars)
+    }
+    #[inline(always)]
+    fn commit(
+        prover_param: impl Borrow<Self::ProverParam>,
+        poly: &Arc<Self::Poly>,
+    ) -> SnarkResult<Self::Commitment> {
+        use tracing::Level;
+        let span = if tracing::level_enabled!(Level::TRACE) {
+            tracing::span!(Level::TRACE, "pcs.commit", poly = ?poly)
+        } else {
+            tracing::span!(Level::DEBUG, "pcs.commit",)
+        };
+        let enter_guard = span.enter();
+        let res = Self::commit_impl_inner(prover_param, poly);
+        drop(enter_guard);
+        res
+    }
+    #[inline(always)]
+    fn open(
+        prover_param: impl Borrow<Self::ProverParam>,
+        polynomial: &Arc<Self::Poly>,
+        point: &<Self::Poly as Polynomial<F>>::Point,
+        commitment: Option<&Self::Commitment>,
+    ) -> SnarkResult<(Self::Proof, F)> {
+        use tracing::Level;
+        let span = if tracing::level_enabled!(Level::TRACE) {
+            tracing::span!(Level::TRACE, "pcs.open", poly = ?polynomial,
+                point = ?point,)
+        } else {
+            tracing::span!(Level::DEBUG, "pcs.open")
+        };
+        let enter_guard = span.enter();
+        let res = Self::open_impl_inner(prover_param, polynomial, point, commitment);
+        drop(enter_guard);
+        res
+    }
+    #[inline(always)]
+    fn multi_open(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _polynomials: &[Arc<Self::Poly>],
+        _points: &[<Self::Poly as Polynomial<F>>::Point],
+        _evals: &[F],
+        _transcript: &mut Tr<F>,
+    ) -> SnarkResult<Self::BatchProof> {
+        use tracing::Level;
+        let span = if tracing::level_enabled!(Level::TRACE) {
+            tracing::span!(
+                Level::TRACE,
+                "pcs.multi_open",
+                num_polys = _polynomials.len(),
+                polys = ?_polynomials,
+                points = ?_points,
+                evals = ?_evals
+            )
+        } else {
+            tracing::span!(
+                Level::DEBUG,
+                "pcs.multi_open",
+                num_polys = _polynomials.len()
+            )
+        };
+
+        let enter_guard = span.enter();
+        let res = Self::multi_open_inner(_prover_param, _polynomials, _points, _evals, _transcript);
+        drop(enter_guard);
+        res
+    }
+
+    #[inline(always)]
+    fn verify(
+        verifier_param: &Self::VerifierParam,
+        commitment: &Self::Commitment,
+        point: &<Self::Poly as Polynomial<F>>::Point,
+        value: &F,
+        proof: &Self::Proof,
+    ) -> SnarkResult<bool> {
+        let span = if tracing::level_enabled!(Level::TRACE) {
+            tracing::span!(
+                Level::TRACE,
+                "pcs.verify",
+                point = ?point,
+                evals = ?value
+            )
+        } else {
+            tracing::span!(Level::DEBUG, "pcs.verify")
+        };
+        let enter_guard = span.enter();
+        let res = Self::verify_inner(verifier_param, commitment, point, value, proof);
+        if let Err(ref e) = res {
+            tracing::error!(parent: &span, error = %e, "verify failed");
+        }
+        drop(enter_guard);
+        res
+    }
+
+    #[inline(always)]
     fn batch_verify(
         _verifier_param: &Self::VerifierParam,
         _commitments: &[Self::Commitment],
@@ -132,9 +260,32 @@ pub trait PCS<F: PrimeField>: Clone {
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<F>,
     ) -> SnarkResult<bool> {
-        // the reason we use unimplemented!() is to enable developers to implement the
-        // trait without always implementing the batching APIs.
-        unimplemented!()
+        let span = if tracing::level_enabled!(Level::TRACE) {
+            tracing::span!(
+                Level::TRACE,
+                "pcs.batch_verify",
+                num_commitments = _commitments.len(),
+                size = _commitments.len(),
+                points = ?_points,
+                evals = ?_evals
+            )
+        } else {
+            tracing::span!(Level::DEBUG, "pcs.batch_verify", size = _commitments.len())
+        };
+        let enter_guard = span.enter();
+        let res = Self::batch_verify_inner(
+            _verifier_param,
+            _commitments,
+            _points,
+            _evals,
+            _batch_proof,
+            _transcript,
+        );
+        if let Err(ref e) = res {
+            tracing::error!(parent: &span, error = %e, "batch verify failed");
+        }
+        drop(enter_guard);
+        res
     }
 }
 

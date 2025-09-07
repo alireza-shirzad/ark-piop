@@ -10,7 +10,6 @@ use ark_ec::{
 use ark_ff::{One, PrimeField};
 use ark_poly::{DenseUVPolynomial, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::start_timer;
 
 use srs::{UnivariateProverParam, UnivariateUniversalParams, UnivariateVerifierParam};
 use std::{borrow::Borrow, ops::Mul, sync::Arc};
@@ -21,7 +20,7 @@ use crate::{
     transcript::Tr,
 };
 pub mod structs;
-use ark_std::{end_timer, marker::PhantomData};
+use ark_std::marker::PhantomData;
 /// KZG Polynomial Commitment Scheme on univariate polynomial.
 #[derive(Clone)]
 pub struct KZG10<E: Pairing> {
@@ -71,14 +70,14 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     ///
     /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
     /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
+    fn gen_srs_for_testing_inner<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
         Self::SRS::gen_srs_for_testing(rng, supported_size)
     }
 
     /// Trim the universal parameters to specialize the public parameters.
     /// Input `max_degree` for univariate.
     /// `supported_num_vars` must be None or an error is returned.
-    fn trim(
+    fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
@@ -94,12 +93,12 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
     /// Generate a commitment for a polynomial
     /// Note that the scheme is not hiding
-    fn commit(
+    fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
-        let _commit_time = if poly.degree() >= prover_param.powers_of_g.len() {
+        if poly.degree() >= prover_param.powers_of_g.len() {
             return Err(SnarkError::PCSErrors(PCSError::InvalidParameters(format!(
                 "uni poly degree {} is larger than allowed {}",
                 poly.degree(),
@@ -121,11 +120,11 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
     /// same.
-    fn open(
+    fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,
-        commitment: Option<&Self::Commitment>,
+        _commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         let divisor = Self::Poly::from_coefficients_vec(vec![-*point, E::ScalarField::one()]);
 
@@ -144,7 +143,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok((Self::Proof { proof }, eval))
     }
 
-    fn multi_open(
+    fn multi_open_inner(
         _prover_param: impl Borrow<Self::ProverParam>,
         _polynomials: &[Arc<Self::Poly>],
         _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
@@ -165,7 +164,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
     /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
     /// `poly_i` committed inside `comm`.
-    fn batch_verify(
+    fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
         _commitments: &[Self::Commitment],
         _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
@@ -187,7 +186,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial
     /// committed inside `comm`.
-    fn verify(
+    fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
         point: &<Self::Poly as Polynomial<E::ScalarField>>::Point,

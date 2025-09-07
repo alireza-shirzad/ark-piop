@@ -9,10 +9,9 @@
 use crate::errors::SnarkResult;
 use crate::pcs::StructuredReferenceString;
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
-use ark_ff::PrimeField;
 use ark_ff::{One, UniformRand};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{end_timer, rand::Rng, start_timer};
+use ark_std::rand::Rng;
 use derivative::Derivative;
 
 use std::ops::Mul;

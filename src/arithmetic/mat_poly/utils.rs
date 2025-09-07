@@ -1,6 +1,5 @@
 use ark_ff::{Field, PrimeField};
-use ark_poly::MultilinearExtension;
-use ark_std::{cfg_iter_mut, rand::RngCore};
+use ark_std::cfg_iter_mut;
 use std::sync::Arc;
 
 #[cfg(feature = "parallel")]
@@ -10,102 +9,13 @@ use crate::{arithmetic::errors::ArithErrors, errors::SnarkResult};
 
 use super::mle::MLE;
 
-/// Sample a random list of multilinear polynomials.
-/// Returns
-/// - the list of polynomials,
-/// - its sum of polynomial evaluations over the boolean hypercube.
-pub fn random_mle_list<F: PrimeField, R: RngCore>(
-    nv: usize,
-    degree: usize,
-    rng: &mut R,
-) -> (Vec<Arc<MLE<F>>>, F) {
-    let mut multiplicands = Vec::with_capacity(degree);
-    for _ in 0..degree {
-        multiplicands.push(Vec::with_capacity(1 << nv))
-    }
-    let mut sum = F::zero();
-
-    for _ in 0..(1 << nv) {
-        let mut product = F::one();
-
-        for e in multiplicands.iter_mut() {
-            let val = F::rand(rng);
-            e.push(val);
-            product *= val;
-        }
-        sum += product;
-    }
-
-    let list = multiplicands
-        .into_iter()
-        .map(|x| Arc::new(MLE::from_evaluations_vec(nv, x)))
-        .collect();
-
-    (list, sum)
-}
-
-// Build a randomize list of mle-s whose sum is zero.
-pub fn random_zero_mle_list<F: PrimeField, R: RngCore>(
-    nv: usize,
-    degree: usize,
-    rng: &mut R,
-) -> Vec<Arc<MLE<F>>> {
-    let mut multiplicands = Vec::with_capacity(degree);
-    for _ in 0..degree {
-        multiplicands.push(Vec::with_capacity(1 << nv))
-    }
-    for _ in 0..(1 << nv) {
-        multiplicands[0].push(F::zero());
-        for e in multiplicands.iter_mut().skip(1) {
-            e.push(F::rand(rng));
-        }
-    }
-
-    multiplicands
-        .into_iter()
-        .map(|x| Arc::new(MLE::from_evaluations_vec(nv, x)))
-        .collect()
-}
-
-pub fn random_permutation<F: PrimeField, R: RngCore>(
-    num_vars: usize,
-    num_chunks: usize,
-    rng: &mut R,
-) -> Vec<F> {
-    let len = (num_chunks as u64) * (1u64 << num_vars);
-    let mut s_id_vec: Vec<F> = (0..len).map(F::from).collect();
-    let mut s_perm_vec = vec![];
-    for _ in 0..len {
-        let index = rng.next_u64() as usize % s_id_vec.len();
-        s_perm_vec.push(s_id_vec.remove(index));
-    }
-    s_perm_vec
-}
-
-/// A list of MLEs that represent a random permutation
-pub fn random_permutation_mles<F: PrimeField, R: RngCore>(
-    num_vars: usize,
-    num_chunks: usize,
-    rng: &mut R,
-) -> Vec<MLE<F>> {
-    let s_perm_vec = random_permutation(num_vars, num_chunks, rng);
-    let mut res = vec![];
-    let n = 1 << num_vars;
-    for i in 0..num_chunks {
-        res.push(MLE::from_evaluations_vec(
-            num_vars,
-            s_perm_vec[i * n..i * n + n].to_vec(),
-        ));
-    }
-    res
-}
-
-pub fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
+pub(crate) fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
     assert_eq!(poly.num_vars(), point.len());
     fix_variables(poly, point).evaluations()[0]
 }
 
-pub fn fix_variables<F: Field>(poly: &MLE<F>, partial_point: &[F]) -> MLE<F> {
+//TODO: Why do we need this when we have a fix-variables method for MLE? is it because of the way MLE fixes variables?
+pub(crate) fn fix_variables<F: Field>(poly: &MLE<F>, partial_point: &[F]) -> MLE<F> {
     assert!(
         partial_point.len() <= poly.num_vars(),
         "invalid size of partial point"
@@ -159,7 +69,7 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
+pub(crate) fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
     let evals = build_eq_x_r_vec(r)?;
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 
@@ -172,7 +82,7 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> SnarkResult<Vec<F>> {
+pub(crate) fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> SnarkResult<Vec<F>> {
     // we build eq(x,r) from its evaluations
     // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
     // for example, with num_vars = 4, x is a binary vector of 4, then

@@ -1,4 +1,4 @@
-use ark_ff::{Field, PrimeField, Zero};
+use ark_ff::{Field, Zero};
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{cfg_iter, rand::Rng};
@@ -13,13 +13,12 @@ use std::{
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
     slice::IterMut,
 };
-/// A wrapper around `DenseMultilinearExtension` that allows for a modifiede
-/// hypercube size If the nv is not set, it will have the same size as the
-/// `DenseMultilinearExtension`. If the nv is set, it will be the size of the
-/// `DenseMultilinearExtension` multiplied by 2^(nv - num_vars)
-/// Every functionality supported by `DenseMultilinearExtension` is also
-/// supported by `MLE`. This is for easier usage in the codebase and less memory
-/// usage.
+/// A wrapper around `DenseMultilinearExtension` that allows for a modified
+/// hypercube size. If the nv is not set, the size of the hypercube is 2^{mat_mle.num_vars}.
+/// If the nv is set, the size of the hypercube is 2^nv, and the evaluation vector is (virtually) the repetition
+/// of the original evaluation vector to fit the new size. This is useful when we want to increase the number of variables
+/// of a multilinear polynomial without actually changing the underlying polynomial and its memory usage.
+/// Note: Every functionality supported by `DenseMultilinearExtension` is also supported by `MLE`.
 
 #[derive(Clone, PartialEq, Eq, Hash, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MLE<F: Field> {
@@ -76,7 +75,7 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    pub fn relabel_in_place(&mut self, mut a: usize, mut b: usize, k: usize) {
+    pub fn relabel_in_place(&mut self, mut _a: usize, mut _b: usize, _k: usize) {
         todo!()
     }
 
@@ -94,7 +93,7 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    pub fn concat(polys: impl IntoIterator<Item = impl AsRef<Self>> + Clone) -> Self {
+    pub fn concat(_polys: impl IntoIterator<Item = impl AsRef<Self>> + Clone) -> Self {
         todo!("Implement concat for MLE");
     }
 }
@@ -117,7 +116,7 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
         }
     }
 
-    fn relabel(&self, a: usize, b: usize, k: usize) -> Self {
+    fn relabel(&self, _a: usize, _b: usize, _k: usize) -> Self {
         todo!()
     }
     fn fix_variables(&self, partial_point: &[F]) -> Self {
@@ -138,7 +137,7 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
 
     fn to_evaluations(&self) -> Vec<F> {
         match self.nv {
-            Some(nv) => self.iter().cloned().collect::<Vec<F>>(),
+            Some(_) => self.iter().cloned().collect::<Vec<F>>(),
             None => self.mat_mle.to_evaluations(),
         }
     }
@@ -163,7 +162,7 @@ impl<F: Field> Add for MLE<F> {
     }
 }
 
-impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
+impl<'a, F: Field> Add<&'a MLE<F>> for &MLE<F> {
     type Output = MLE<F>;
 
     fn add(self, rhs: &'a MLE<F>) -> Self::Output {
@@ -178,13 +177,11 @@ impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
             (Some(nv1), Some(nv2)) if nv1 == nv2 => {
                 match self.mat_mle.num_vars.cmp(&rhs.mat_mle.num_vars) {
                     Ordering::Less => MLE {
-                        mat_mle: &dmle_increase_nv_back(&self.mat_mle, rhs.mat_mle.num_vars)
-                            + &rhs.mat_mle,
+                        mat_mle: &increase_nv(&self.mat_mle, rhs.mat_mle.num_vars) + &rhs.mat_mle,
                         nv: Some(nv1),
                     },
                     Ordering::Greater => MLE {
-                        mat_mle: &self.mat_mle
-                            + &dmle_increase_nv_back(&rhs.mat_mle, self.mat_mle.num_vars),
+                        mat_mle: &self.mat_mle + &increase_nv(&rhs.mat_mle, self.mat_mle.num_vars),
                         nv: Some(nv1),
                     },
                     Ordering::Equal => MLE {
@@ -198,11 +195,11 @@ impl<'a, 'b, F: Field> Add<&'a MLE<F>> for &'b MLE<F> {
                 nv: None,
             },
             (Some(nv1), None) if nv1 == rhs.mat_mle.num_vars => MLE {
-                mat_mle: &dmle_increase_nv_back(&self.mat_mle, nv1) + &rhs.mat_mle,
+                mat_mle: &increase_nv(&self.mat_mle, nv1) + &rhs.mat_mle,
                 nv: None,
             },
             (None, Some(nv2)) if nv2 == self.mat_mle.num_vars => MLE {
-                mat_mle: &self.mat_mle + &dmle_increase_nv_back(&rhs.mat_mle, nv2),
+                mat_mle: &self.mat_mle + &increase_nv(&rhs.mat_mle, nv2),
                 nv: None,
             },
             _ => {
@@ -259,7 +256,7 @@ impl<F: Field> Sub for MLE<F> {
     }
 }
 
-impl<'a, 'b, F: Field> Sub<&'a MLE<F>> for &'b MLE<F> {
+impl<'a, F: Field> Sub<&'a MLE<F>> for &MLE<F> {
     type Output = MLE<F>;
 
     fn sub(self, rhs: &'a MLE<F>) -> Self::Output {
@@ -268,14 +265,14 @@ impl<'a, 'b, F: Field> Sub<&'a MLE<F>> for &'b MLE<F> {
 }
 
 impl<F: Field> SubAssign for MLE<F> {
-    fn sub_assign(&mut self, other: Self) {
+    fn sub_assign(&mut self, _other: Self) {
         todo!()
     }
 }
 
 impl<'a, F: Field> SubAssign<&'a MLE<F>> for MLE<F> {
     fn sub_assign(&mut self, other: &'a MLE<F>) {
-        *self = &*self - &other;
+        *self = &*self - other;
     }
 }
 
@@ -287,7 +284,7 @@ impl<F: Field> Mul<F> for MLE<F> {
     }
 }
 
-impl<'a, 'b, F: Field> Mul<&'a F> for &'b MLE<F> {
+impl<'a, F: Field> Mul<&'a F> for &MLE<F> {
     type Output = MLE<F>;
 
     fn mul(self, scalar: &'a F) -> Self::Output {
@@ -357,7 +354,7 @@ impl<F: Field> Polynomial<F> for MLE<F> {
 /// variables at the back Ex for input (P(X, Y), 3) result in P'(X, Y, Z), where
 /// P'(X, Y, Z) = P(X, Y)
 /// TODO: Parallelize this function
-pub fn dmle_increase_nv_back<F: Field>(
+fn increase_nv<F: Field>(
     mle: &DenseMultilinearExtension<F>,
     new_nv: usize,
 ) -> DenseMultilinearExtension<F> {
@@ -377,6 +374,7 @@ pub fn dmle_increase_nv_back<F: Field>(
     }
     DenseMultilinearExtension::from_evaluations_vec(new_nv, evals)
 }
+
 fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F> {
     let mut res = vec![F::zero(); 1 << (nv - 1)];
 
@@ -394,12 +392,6 @@ fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F>
     res
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::arithmetic::mat_poly::utils::evaluate_opt;
 
-    use super::*;
-    use ark_ff::UniformRand;
-    use ark_std::test_rng;
-    use ark_test_curves::bls12_381::Fr;
-}
+
+// TODO: Add tests for MLE
