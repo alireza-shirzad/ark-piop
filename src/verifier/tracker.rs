@@ -1,14 +1,11 @@
 use crate::{
     arithmetic::{
-        f_short_str, f_vec_short_str,
+        f_vec_short_str,
         mat_poly::{lde::LDE, mle::MLE, utils::eq_eval},
     },
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
-    piop::{
-        errors::PolyIOPErrors,
-        sum_check::{SumCheck, SumCheckSubClaim},
-    },
+    piop::{errors::PolyIOPErrors, sum_check::SumCheck},
     prover::structs::proof::Proof,
     setup::{errors::SetupError::NoRangePoly, structs::VerifyingKey},
     structs::{
@@ -17,15 +14,10 @@ use crate::{
     },
 };
 use ark_ff::PrimeField;
-use ark_std::{cfg_iter, end_timer, start_timer};
 use itertools::MultiUnzip;
+use tracing::instrument;
 
-use std::{
-    borrow::{Borrow, BorrowMut},
-    collections::BTreeMap,
-    mem::take,
-    sync::Arc,
-};
+use std::{borrow::BorrowMut, collections::BTreeMap, mem::take, sync::Arc};
 
 use derivative::Derivative;
 
@@ -106,13 +98,6 @@ where
     }
 
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_mv_com_by_id",
-            format!("id = {:?}", id)
-        );
-
         let comm: MvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -149,13 +134,6 @@ where
     }
 
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_uv_com_by_id",
-            format!("id = {:?}", id)
-        );
-
         let comm: UvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -458,38 +436,25 @@ where
             _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.state
             .transcript
-            .and_append_challenge(label)
+            .get_and_append_challenge(label)
             .map_err(SnarkError::from)
     }
 
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_sumcheck_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         self.state
             .mv_pcs_substate
             .sum_check_claims
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
     }
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_zerocheck_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         self.state
             .mv_pcs_substate
             .zero_check_claims
             .push(TrackerZerocheckClaim::new(poly_id));
     }
-
 
     pub fn add_mv_eval_claim(
         &mut self,
@@ -497,12 +462,6 @@ where
         point: &[F],
         eval: F,
     ) -> SnarkResult<()> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_eval_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         self.state
             .mv_pcs_substate
             .eval_claims
@@ -559,6 +518,7 @@ where
         }
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
@@ -567,7 +527,7 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .and_append_challenge(b"zerocheck challenge")
+                    .get_and_append_challenge(b"zerocheck challenge")
                     .unwrap();
                 let cp = self.mul_scalar(claim.id(), ch);
                 self.add_oracles(acc, cp)
@@ -576,6 +536,7 @@ where
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Check at this point there should be only one batched zero check claim
         debug_assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
@@ -583,7 +544,7 @@ where
         let r = self
             .state
             .transcript
-            .and_append_challenge_vectors(b"0check r", max_nv)
+            .get_and_append_challenge_vectors(b"0check r", max_nv)
             .unwrap();
         // Get the zero check claim polynomial id
         let z_check_aggr_id = self
@@ -594,7 +555,7 @@ where
             .unwrap()
             .id();
         // create the succint eq(x, r) closure and virtual comm
-        let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { Ok(eq_eval(&pt, r.as_ref())?) };
+        let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { eq_eval(&pt, r.as_ref()) };
         let eq_x_r_oracle = Oracle::Multivariate(Arc::new(eq_x_r_closure));
         let eq_x_r_comm = self.track_oracle(eq_x_r_oracle);
         // create the relevant sumcheck claim, reduce the zero check claim to a sumcheck claim
@@ -607,6 +568,7 @@ where
     // Aggregate the sumcheck claims, instead of verifying p_1 = s_1, p_2 = s_2, ...
     // p_n = s_n, we verify c_1 * p_1 + c_2 * p_2 + ... + c_n * p_n = c_1 *
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
+    #[instrument(level = "debug", skip_all)]
     fn batch_s_check_claims(&mut self) -> SnarkResult<()> {
         // Aggreage te the sumcheck claims
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
@@ -619,7 +581,7 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .and_append_challenge(b"sumcheck challenge")
+                    .get_and_append_challenge(b"sumcheck challenge")
                     .unwrap();
                 let cp = self.mul_scalar(claim.id(), ch);
                 sc_sum += claim.claim() * ch;
@@ -631,6 +593,7 @@ where
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn perform_single_sumcheck(&mut self) -> SnarkResult<()> {
         debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
@@ -651,20 +614,9 @@ where
         Ok(())
     }
 
-
+    #[instrument(level = "debug", skip_all)]
     fn perform_eval_check(&mut self) -> SnarkResult<()> {
         for ((id, point), expected_eval) in &self.state.mv_pcs_substate.eval_claims {
-            tracing::trace!(
-                "{}::{} | {}",
-                module_path!(),
-                "perform_eval_check",
-                format!(
-                    "id: {}, point: {:?}, expected_eval: {:?}",
-                    id,
-                    f_vec_short_str(point),
-                    f_short_str(*expected_eval)
-                )
-            );
             if self.query_mv(*id, point.clone()).unwrap() != *expected_eval {
                 return Err(SnarkError::VerifierError(
                     crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
@@ -677,6 +629,7 @@ where
         Ok(())
     }
 
+    #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Batch all the zero check claims into one
         self.batch_z_check_claims()?;
@@ -692,7 +645,8 @@ where
         Ok(())
     }
 
-    fn verify_mv_pcs_proof(&mut self, max_nv: usize) -> SnarkResult<bool> {
+    #[instrument(level = "debug", skip_all)]
+    fn verify_mv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().mv_pcs_subproof.query_map;
         // Prepare the input for calling the batch verify function
@@ -704,7 +658,7 @@ where
             })
             .multiunzip();
         // Invoke the batch verify function
-        let mut pcs_res: bool;
+        let pcs_res: bool;
         if mat_coms.len() == 1 {
             let opening_proof = match self.proof.as_ref().unwrap().mv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
@@ -756,6 +710,7 @@ where
 
         Ok(pcs_res)
     }
+    #[instrument(level = "debug", skip_all)]
     fn verify_uv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().uv_pcs_subproof.query_map;
@@ -768,7 +723,7 @@ where
             })
             .multiunzip();
         // Invoke the batch verify function
-        let mut pcs_res: bool;
+        let pcs_res: bool;
         if mat_coms.len() == 1 {
             let opening_proof = match self.proof.as_ref().unwrap().uv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
@@ -809,6 +764,7 @@ where
     // Get the max_nv which is the number of variabels for the sumchekck protocol
     // TODO: The aux info should be derivable by the verifier looking at the sql
     // query and io tables
+    #[instrument(level = "debug", skip_all)]
     fn equalize_mat_com_nv(&self) -> usize {
         self.proof
             .as_ref()
@@ -822,13 +778,14 @@ where
     /// 1. Verify the sumcheck proofs
     /// 2. Verify the multivariate evaluation claims using the multivariate PCS
     /// 3. Verify the univariate evaluation claims using the univariate PCS
+    #[instrument(level = "debug", skip_all)]
     pub fn verify(&mut self) -> SnarkResult<()> {
         let max_nv = self.equalize_mat_com_nv();
         // Verify the sumcheck proofs
         self.verify_sc_proofs(max_nv)?;
         // Verify the multivariate pcs proofs
         // assert!(self.verify_mv_pcs_proof(max_nv)?);
-        self.verify_mv_pcs_proof(max_nv)?;
+        self.verify_mv_pcs_proof()?;
         // Verify the multivariate pcs proofs
         // assert!(self.verify_uv_pcs_proof()?);
         self.verify_uv_pcs_proof()?;

@@ -16,22 +16,17 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 
 use super::SumCheckSubClaim;
 
-pub struct SumCheckVerifier<F: PrimeField> {
-    _field: std::marker::PhantomData<F>,
-}
-
 impl<F: PrimeField> SumcheckVerifierState<F> {
     /// Initialize the verifier's state.
-    pub fn verifier_init(index_info: &VPAuxInfo<F>) -> Self {
-        let res = Self {
+    pub(crate) fn verifier_init(index_info: &VPAuxInfo<F>) -> Self {
+        Self {
             round: 1,
             num_vars: index_info.num_variables,
             max_degree: index_info.max_degree,
             finished: false,
             polynomials_received: Vec::with_capacity(index_info.num_variables),
             challenges: Vec::with_capacity(index_info.num_variables),
-        };
-        res
+        }
     }
 
     /// Run verifier for the current round, given a prover message.
@@ -40,7 +35,7 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
     /// challenges; and update the verifier's state accordingly. The actual
     /// verifications are deferred (in batch) to `check_and_generate_subclaim`
     /// at the last step.
-    pub fn verify_round_and_update_state(
+    pub (crate) fn verify_round_and_update_state(
         &mut self,
         prover_msg: &SumcheckProverMessage<F>,
         transcript: &mut Tr<F>,
@@ -59,7 +54,7 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
         // When we turn the protocol to a non-interactive one, it is sufficient to defer
         // such checks to `check_and_generate_subclaim` after the last round.
 
-        let challenge = transcript.and_append_challenge(b"Internal round")?;
+        let challenge = transcript.get_and_append_challenge(b"Internal round")?;
         self.challenges.push(challenge);
         self.polynomials_received
             .push(prover_msg.evaluations.to_vec());

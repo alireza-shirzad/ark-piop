@@ -45,17 +45,8 @@ pub struct SumCheckSubClaim<F: PrimeField> {
 }
 
 impl<F: PrimeField> SumCheck<F> {
-    fn extract_sum(proof: &SumcheckProof<F>) -> F {
-        let res = proof.proofs[0].evaluations[0] + proof.proofs[0].evaluations[1];
-        res
-    }
 
-    fn init_transcript() -> Tr<F> {
-        let res = Tr::<F>::new(b"Initializing SumCheck transcript");
-        res
-    }
-
-    pub fn prove(
+    pub(crate) fn prove(
         poly: &HPVirtualPolynomial<F>,
         transcript: &mut Tr<F>,
     ) -> SnarkResult<SumcheckProof<F>> {
@@ -69,7 +60,7 @@ impl<F: PrimeField> SumCheck<F> {
                 SumcheckProverState::prove_round_and_update_state(&mut prover_state, &challenge)?;
             transcript.append_serializable_element(b"prover msg", &prover_msg)?;
             prover_msgs.push(prover_msg);
-            challenge = Some(transcript.and_append_challenge(b"Internal round")?);
+            challenge = Some(transcript.get_and_append_challenge(b"Internal round")?);
         }
         // pushing the last challenge point to the state
         if let Some(p) = challenge {
@@ -82,7 +73,7 @@ impl<F: PrimeField> SumCheck<F> {
         })
     }
 
-    pub fn verify(
+    pub(crate) fn verify(
         claimed_sum: F,
         proof: &SumcheckProof<F>,
         aux_info: &VPAuxInfo<F>,
@@ -100,7 +91,7 @@ impl<F: PrimeField> SumCheck<F> {
             )?;
         }
 
-        let res = SumcheckVerifierState::check_and_generate_subclaim(&verifier_state, &claimed_sum);
-        res
+        
+        SumcheckVerifierState::check_and_generate_subclaim(&verifier_state, &claimed_sum)
     }
 }

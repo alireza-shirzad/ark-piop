@@ -1,23 +1,23 @@
 /////////////////// Modules //////////////////
 
-pub mod proof;
 pub mod polynomial;
+pub mod proof;
 /////////////////// Imports //////////////////
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-    rc::Rc,
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
-use super::{Prover, tracker::ProverTracker};
 use crate::{
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
-    }, pcs::PCS, piop::DeepClone, prover::structs::polynomial::TrackedPoly, setup::structs::ProvingKey, structs::{
-        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim}, TrackerID
-    }, transcript::Tr
+    },
+    pcs::PCS,
+    prover::structs::polynomial::TrackedPoly,
+    setup::structs::ProvingKey,
+    structs::{
+        TrackerID,
+        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
+    },
+    transcript::Tr,
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;

@@ -1,8 +1,5 @@
 pub(crate) mod errors;
-use crate::{
-    arithmetic::{f_short_str, f_vec_short_str},
-    to_bytes,
-};
+use crate::to_bytes;
 use ark_ff::PrimeField;
 use ark_serialize::CanonicalSerialize;
 use errors::TranscriptError;
@@ -82,7 +79,7 @@ impl<F: PrimeField> Tr<F> {
     // The output field element is statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub(crate) fn and_append_challenge(
+    pub(crate) fn get_and_append_challenge(
         &mut self,
         label: &'static [u8],
     ) -> Result<F, TranscriptError> {
@@ -97,16 +94,6 @@ impl<F: PrimeField> Tr<F> {
         self.transcript.challenge_bytes(label, &mut buf);
         let challenge = F::from_le_bytes_mod_order(&buf);
         self.append_serializable_element(label, &challenge)?;
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "and_append_challenge",
-            format!(
-                "label={}, challenge={:?}",
-                std::str::from_utf8(label).unwrap(),
-                f_short_str(challenge)
-            )
-        );
         Ok(challenge)
     }
 
@@ -116,7 +103,7 @@ impl<F: PrimeField> Tr<F> {
     // The output field element are statistical uniform as long
     // as the field has a size less than 2^384.
 
-    pub(crate) fn and_append_challenge_vectors(
+    pub(crate) fn get_and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
         len: usize,
@@ -130,18 +117,8 @@ impl<F: PrimeField> Tr<F> {
 
         let mut res = vec![];
         for _ in 0..len {
-            res.push(self.and_append_challenge(label)?)
+            res.push(self.get_and_append_challenge(label)?)
         }
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "and_append_challenge_vectors",
-            format!(
-                "label={}, challenge={:?}",
-                std::str::from_utf8(label).unwrap(),
-                f_vec_short_str(&res)
-            )
-        );
         Ok(res)
     }
 }

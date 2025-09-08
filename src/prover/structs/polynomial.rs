@@ -3,10 +3,14 @@ use std::{cell::RefCell, rc::Rc};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 
-use crate::{arithmetic::mat_poly::{lde::LDE, mle::MLE}, pcs::PCS, piop::DeepClone, prover::{tracker::ProverTracker, Prover}, structs::TrackerID};
+use crate::{
+    arithmetic::mat_poly::{lde::LDE, mle::MLE},
+    pcs::PCS,
+    piop::DeepClone,
+    prover::{Prover, tracker::ProverTracker},
+    structs::TrackerID,
+};
 use ark_std::fmt::Debug;
-use std::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
-
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = "MvPCS: PCS<F>"))]

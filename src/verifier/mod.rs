@@ -4,6 +4,7 @@ mod tracker;
 use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use structs::oracle::{Oracle, TrackedOracle};
+use tracing::{instrument, trace};
 
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
@@ -48,6 +49,7 @@ where
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
     // TODO: See if you can shorten this function
+    #[instrument(level = "debug", skip_all)]
     pub fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
         let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
         let range_tr_polys: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>> = vk
@@ -66,22 +68,23 @@ where
         verifier
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker_rc(tracker_rc: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>) -> Self {
         Self { tracker_rc }
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker(tracker: VerifierTracker<F, MvPCS, UvPCS>) -> Self {
         Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn indexed_oracle(
-        &self,
-        data_type: String,
-    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    #[instrument(level = "debug", skip_all)]
+    pub fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         RefCell::borrow(&self.tracker_rc).indexed_oracle(data_type)
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn track_mat_mv_com(
         &self,
         comm: MvPCS::Commitment,
@@ -92,6 +95,7 @@ where
         ))
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn track_oracle(&self, eval_fn: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
         TrackedOracle::new(
             self.tracker_rc.borrow_mut().track_oracle(eval_fn),
@@ -99,50 +103,63 @@ where
         )
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn peek_next_id(&mut self) -> TrackerID {
         self.tracker_rc.borrow_mut().peek_next_id()
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn gen_id(&mut self) -> TrackerID {
         self.tracker_rc.borrow_mut().gen_id()
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn set_proof(&mut self, proof: Proof<F, MvPCS, UvPCS>) {
         self.tracker_rc.borrow_mut().set_proof(proof);
     }
 
-    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
-        self.tracker_rc.borrow_mut().and_append_challenge(label)
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+        let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
+        trace!("challenge {:?}", res);
+        res
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
         self.tracker_rc
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum);
     }
+    #[instrument(level = "debug", skip(self))]
     pub fn add_zerocheck_claim(&mut self, poly_id: TrackerID) {
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id);
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().query_mv(poly_id, point)
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub fn query_uv(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<F> {
         self.tracker_rc.borrow_mut().query_uv(poly_id, point)
     }
 
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
+    #[instrument(level = "debug", skip(self))]
     pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
         let tracker_ref_cell: &RefCell<VerifierTracker<F, MvPCS, UvPCS>> = self.tracker_rc.borrow();
         tracker_ref_cell.borrow().prover_claimed_sum(id)
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub fn commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
         self.tracker_rc.borrow_mut().commitment_num_vars(id)
     }
 
     // TODO: Rename to get oracle
+    #[instrument(level = "debug", skip(self))]
     pub fn track_mv_com_by_id(
         &mut self,
         id: TrackerID,
@@ -152,6 +169,8 @@ where
             self.tracker_rc.clone(),
         ))
     }
+
+    #[instrument(level = "debug", skip(self))]
     pub fn track_uv_com_by_id(
         &mut self,
         id: TrackerID,
@@ -162,15 +181,18 @@ where
         ))
     }
 
+    #[instrument(level = "debug", skip_all)]
     pub fn verify(&self) -> SnarkResult<()> {
         self.tracker_rc.borrow_mut().verify()
     }
 
-    /// TODO: See if you can make this function available only in test
+    #[instrument(level = "debug", skip_all)]
+    #[cfg(feature = "test-utils")]
     pub fn clone_underlying_tracker(&self) -> VerifierTracker<F, MvPCS, UvPCS> {
         RefCell::borrow(&self.tracker_rc).clone()
     }
-    /// TODO: See if you can make this function available only in test
+    #[instrument(level = "debug", skip_all)]
+    #[cfg(feature = "test-utils")]
     pub fn deep_copy(&self) -> Verifier<F, MvPCS, UvPCS> {
         Verifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }

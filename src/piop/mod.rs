@@ -1,6 +1,6 @@
+//! A General Purpose PIOP abstraction.
+
 use ark_ff::PrimeField;
-#[cfg(feature = "honest-prover")]
-use tracing::instrument;
 use tracing::{Level, span};
 
 use crate::{
@@ -13,6 +13,17 @@ use crate::{
 pub mod errors;
 pub mod structs;
 pub mod sum_check;
+/// Any PIOP must implement this trait.
+/// Helper to get a type name without generic parameters.
+#[inline]
+pub(crate) fn type_name_without_generics<T>() -> &'static str {
+    let full = std::any::type_name::<T>();
+    match full.split_once('<') {
+        Some((before, _)) => before,
+        None => full,
+    }
+}
+/// Any PIOP must implement this trait.
 pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>:
     Sized
 {
@@ -20,14 +31,9 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     type ProverOutput;
     type VerifierOutput;
     type VerifierInput;
-    fn type_name_without_generics<T>() -> &'static str {
-        let full = std::any::type_name::<T>();
-        match full.split_once('<') {
-            Some((before, _)) => before,
-            None => full,
-        }
-    }
-    /// Instrumented default wrapper; all impls get this span for free.
+    /// Proves the PIOP.
+    ///
+    /// This is a default wrapper that adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
@@ -36,11 +42,11 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
             span!(
                 Level::TRACE,
                 "piop.prove",
-                piop = Self::type_name_without_generics::<Self>(),
+                piop = type_name_without_generics::<Self>(),
                 ?input
             )
         } else {
-            let struct_name = Self::type_name_without_generics::<Self>();
+            let struct_name = type_name_without_generics::<Self>();
             // span name must be a string literal; record dynamic type name as a field instead
             span!(Level::DEBUG, "piop.prove", piop = struct_name)
         };
@@ -66,7 +72,9 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         res
     }
 
-    /// Make `verify` a default wrapper as well, so we can instrument it once.
+    /// Verifies the PIOP.
+    ///
+    /// This is a default wrapper that adds automatic tracing instrumentation for any PIOP.
     fn verify(
         verifier: &mut Verifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
@@ -75,10 +83,10 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
             span!(
                 Level::TRACE,
                 "piop.verify",
-                piop = Self::type_name_without_generics::<Self>(),
+                piop = type_name_without_generics::<Self>(),
             )
         } else {
-            let struct_name = Self::type_name_without_generics::<Self>();
+            let struct_name = type_name_without_generics::<Self>();
             span!(Level::DEBUG, "piop.verify", piop = struct_name)
         };
         let _guard = span.enter();
@@ -91,16 +99,25 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         res
     }
 
+    /// The actual implementation of the prover logic.
+    ///
+    /// This will be wrapped by `prove`, which adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove_inner(
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
 
+    /// The actual implementation of the verifier logic.
+    ///
+    /// This will be wrapped by `verify`, which adds automatic tracing instrumentation for any PIOP.
     fn verify_inner(
         verifier: &mut Verifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput>;
 
+    /// An optional honest prover check that runs the prover logic in a fresh prover instance and checks that it succeeds.
+    ///
+    /// This is useful for testing and debugging, but is costly and should not be enabled in production. The prover passed to the honest prover check is a deep copy of the original prover, so it won't interfere with the actual protocol state.
     #[cfg(feature = "honest-prover")]
     #[allow(unused_variables)]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<()> {
@@ -108,7 +125,9 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     }
 }
 
-/// unchanged
+/// This trait only used for deep cloning PIOP prover inputs.
+///
+/// Simply cloning the prover input interferes with the actual state of the prover in the protocol. Hence for honest prover checks we need to create a new prover instance and deep clone the input with this new prover instance.
 pub trait DeepClone<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
     fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self;
 }

@@ -2,12 +2,11 @@ use super::structs::{
     ProcessedProvingKey, ProverState,
     proof::{PCSSubproof, Proof},
 };
-use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
 use crate::prover::tracker::SnarkError::ProverError;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
+use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
 use crate::{
     arithmetic::{
-        f_vec_short_str,
         mat_poly::{
             lde::LDE,
             mle::MLE,
@@ -31,8 +30,8 @@ use crate::{
     },
 };
 use ark_ff::PrimeField;
-use ark_poly::{MultilinearExtension, Polynomial};
-use ark_std::{add_single_trace, cfg_iter, end_timer, start_timer};
+use ark_poly::Polynomial;
+use ark_std::cfg_iter;
 use derivative::Derivative;
 
 #[cfg(feature = "parallel")]
@@ -43,6 +42,7 @@ use std::{
     panic,
     sync::Arc,
 };
+use tracing::{debug, instrument};
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their commitments. It is in charge of  
 ///                      1) Recording the structure of virtual polynomials and
@@ -105,10 +105,7 @@ where
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn indexed_tracked_poly(
-        &self,
-        label: String,
-    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         match self.pk.indexed_mles.get(&label) {
             Some(poly) => Ok(poly.clone()),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
@@ -137,14 +134,7 @@ where
     /// returns the TrackerID
     pub fn track_mat_mv_poly(&mut self, polynomial: MLE<F>) -> TrackerID {
         let polynomial = Arc::new(polynomial);
-        let output = self.track_mat_arc_mv_poly(polynomial);
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_mat_mv_poly",
-            format!("id = {:?}", output.0)
-        );
-        output
+        self.track_mat_arc_mv_poly(polynomial)
     }
 
     /// Tracks a materialized polynomial.
@@ -153,14 +143,7 @@ where
     /// returns the TrackerID
     pub fn track_mat_uv_poly(&mut self, polynomial: LDE<F>) -> TrackerID {
         let polynomial = Arc::new(polynomial);
-        let output = self.track_mat_arc_uv_poly(polynomial);
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_mat_uv_poly",
-            format!("id = {:?}", output.0)
-        );
-        output
+        self.track_mat_arc_uv_poly(polynomial)
     }
     /// Tracks materialized polynomial by reference.
     ///
@@ -175,13 +158,6 @@ where
             .mv_pcs_substate
             .materialized_polys
             .insert(poly_id, polynomial.clone());
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_mat_arc_mv_poly",
-            format!("id = {:?}", poly_id.0)
-        );
-
         // Return the new TrackerID
         poly_id
     }
@@ -219,12 +195,6 @@ where
         self.state
             .transcript
             .append_serializable_element(b"comm", &commitment)?;
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_and_commit_mat_mv_p",
-            format!("id = {:?}", poly_id.0)
-        );
         // Return the new TrackerID
         Ok(poly_id)
     }
@@ -247,12 +217,6 @@ where
         self.state
             .transcript
             .append_serializable_element(b"comm", &commitment)?;
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_and_commit_mat_uv_poly",
-            format!("id = {:?}", poly_id.0)
-        );
         // Return the new TrackerID
         Ok(poly_id)
     }
@@ -263,12 +227,6 @@ where
     fn track_virt_poly(&mut self, virt: VirtualPoly<F>) -> TrackerID {
         let poly_id = self.gen_id();
         self.state.virtual_polys.insert(poly_id, virt);
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "track_virt_poly",
-            format!("id = {:?}", poly_id.0)
-        );
         // No need to commit to virtual polynomials
         poly_id
     }
@@ -586,15 +544,13 @@ where
 
     fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<F>> {
         // look up the virtual polynomial
-        let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
-        if mat_poly.is_some() {
-            return mat_poly.unwrap().clone(); // already materialized
+        if let Some(mat_poly) = self.state.mv_pcs_substate.materialized_polys.get(&id) {
+            return mat_poly.clone(); // already materialized
         }
-        let virt_poly = self.state.virtual_polys.get(&id);
-        if virt_poly.is_none() {
-            panic!("Unknown poly id: {:?}", id);
-        }
-        let virt_poly = virt_poly.unwrap().clone(); // Invariant: contains only material PolyIDs
+        let virt_poly = match self.state.virtual_polys.get(&id) {
+            Some(v) => v.clone(),
+            None => panic!("Unknown poly id: {:?}", id),
+        }; // Invariant: contains only material PolyIDs
 
         // figure out the number of variables, assume they all have this nv
         let first_id = virt_poly[0].1[0];
@@ -640,7 +596,7 @@ where
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         // TODO: Change this to_vec
         if let Some(poly) = mat_poly {
-            return Some(evaluate_opt(&poly, &pt.to_vec()));
+            return Some(evaluate_opt(poly, pt));
         }
 
         // look up the virtual polynomial
@@ -682,10 +638,10 @@ where
 
     /// Generate the challenge from the current transcript
     /// and append it to the transcript.
-    pub fn and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
         self.state
             .transcript
-            .and_append_challenge(label)
+            .get_and_append_challenge(label)
             .map_err(SnarkError::from)
     }
 
@@ -695,12 +651,6 @@ where
     /// poly_id is claimed_sum
     // TODO: Remove the claimed_sum
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> SnarkResult<()> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_sumcheck_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
@@ -720,12 +670,6 @@ where
     /// claims that the polynomial with poly_id evaluates to zero all over the
     /// boolean hypercube
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_zerocheck_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
@@ -745,12 +689,6 @@ where
     /// the prover claims that the polynomial with poly_id evaluates to zero
     /// all over the boolean hypercube
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<()> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_uv_eval_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         self.state
             .uv_pcs_substate
             .eval_claims
@@ -759,12 +697,6 @@ where
     }
 
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> SnarkResult<()> {
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "add_mv_eval_claim",
-            format!("poly_id {:?}", poly_id.0)
-        );
         self.state
             .mv_pcs_substate
             .eval_claims
@@ -805,6 +737,7 @@ where
     /// of variables to the max number of variables in the tracker
     /// Used as a preprocessing step before batching polynomials,
     // TODO: This can be potentially reduced
+    #[instrument(level = "debug", skip(self))]
     fn equalize_mat_poly_nv(&mut self) -> usize {
         // calculate the max nv
         let max_nv: usize = self
@@ -816,6 +749,7 @@ where
             .max()
             .ok_or(1)
             .unwrap();
+        debug!("Maximum nv = {}", max_nv);
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv != max_nv {
@@ -846,12 +780,6 @@ where
             point.resize(max_nv, F::zero());
             claim.set_point(point);
         }
-        tracing::trace!(
-            "{}::{} | {}",
-            module_path!(),
-            "equalize_mat_poly_nv",
-            format!("max_nv found: {:?}", max_nv)
-        );
         max_nv
     }
 
@@ -859,7 +787,8 @@ where
     /// technique: If p1=0, ..., pn=0, then c1*p1 + ... + cn*pn = 0 where ci-s
     /// are random. At the end of this function, there should only be one
     /// zerocheck claim in the prover state.
-    fn batch_z_check_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
+    #[instrument(level = "debug", skip(self))]
+    fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
         // build the running aggregate polynomial
         let mut agg = self.track_virt_poly(Vec::new());
         // Perform the random linear combination and aggregate them
@@ -867,7 +796,7 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .and_append_challenge(b"zerocheck challenge")
+                    .get_and_append_challenge(b"zerocheck challenge")
                     .unwrap();
                 let cp = self.mul_scalar(claim.id(), ch);
                 self.add_polys(acc, cp)
@@ -881,7 +810,8 @@ where
     // Aggregate the sumcheck claims, instead of proving p_1 = s_1, p_2 = s_2, ...
     // p_n = s_n, we prove c_1 * p_1 + c_2 * p_2 + ... + c_n * p_n = c_1 *
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
-    fn batch_s_check_claims(&mut self, max_nv: usize) -> SnarkResult<BTreeMap<TrackerID, F>> {
+    #[instrument(level = "debug", skip(self))]
+    fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, F>> {
         let mut agg = self.track_virt_poly(Vec::new());
         let mut sc_sum = F::zero();
 
@@ -900,7 +830,7 @@ where
             .into_iter()
             .fold(agg, |acc, claim| {
                 let ch = self
-                    .and_append_challenge(b"sumcheck challenge")
+                    .get_and_append_challenge(b"sumcheck challenge")
                     .unwrap();
                 let cp = self.mul_scalar(claim.id(), ch);
                 sc_sum += claim.claim() * ch;
@@ -917,6 +847,7 @@ where
     /// zero-check
     /// Technique: Run a sumcheck over f'(X) = f(X) * eq(X, r) for a random
     /// challenge r
+    #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Check at this point there should be only one batched zero check claim
         debug_assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
@@ -924,7 +855,7 @@ where
         let r = self
             .state
             .transcript
-            .and_append_challenge_vectors(b"0check r", max_nv)
+            .get_and_append_challenge_vectors(b"0check r", max_nv)
             .unwrap();
         // Get the zero check claim polynomial id
         let z_check_aggr_id = self
@@ -947,6 +878,7 @@ where
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<F>, VPAuxInfo<F>)> {
         debug_assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
         // Get the sumcheck claim polynomial id
@@ -968,13 +900,14 @@ where
     /// Reduces every zero-check claim, sum-check claim in
     /// the prover state, into a list of evaluation claims. These evaluation
     /// claims will be proved using a PCS
+    #[instrument(level = "debug", skip(self))]
     fn compile_sc_subproof(&mut self, max_nv: usize) -> SnarkResult<SumcheckSubproof<F>> {
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
-        self.batch_z_check_claims(max_nv)?;
+        self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // Batch all the cumcheck claims into one sumcheck claims
-        let individual_sumcheck_claims = self.batch_s_check_claims(max_nv)?;
+        let individual_sumcheck_claims = self.batch_s_check_claims()?;
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
         // Assemble the sumcheck subproof of the prover
@@ -990,6 +923,7 @@ where
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
     /// commitments (c) a batch opening proof corresponding to the query map
+    #[instrument(level = "debug", skip(self))]
     pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, MvPCS>> {
         let mut query_map: BTreeMap<(TrackerID, Vec<F>), F> = BTreeMap::new();
         let mut mat_polys = Vec::new();
@@ -999,15 +933,6 @@ where
             let eval_id = claim.id();
             let eval_point = claim.point();
             let mat_ids = self.extract_mv_openable_ids(eval_id);
-            tracing::trace!(
-                "{}::{} | {}",
-                module_path!(),
-                "compile_mv_pcs_subproof",
-                format!(
-                    "polys add to opening queue: {:?}",
-                    mat_ids.iter().map(|id| id.0).collect::<Vec<_>>()
-                )
-            );
             for mat_id in mat_ids {
                 let eval = self.evaluate_mv(mat_id, eval_point).unwrap();
                 query_map.insert((mat_id, eval_point.clone()), eval);
@@ -1017,7 +942,7 @@ where
             }
         }
 
-        let mut opening_proof: PCSOpeningProof<F, MvPCS>;
+        let opening_proof: PCSOpeningProof<F, MvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = MvPCS::open(&self.pk.mv_pcs_param, &mat_polys[0], &points[0], None)?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
@@ -1048,6 +973,7 @@ where
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
     /// commitments (c) a batch opening proof corresponding to the query map
+    #[instrument(level = "debug", skip(self))]
     pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, UvPCS>> {
         let mut query_map: BTreeMap<(TrackerID, F), F> = BTreeMap::new();
         let mut mat_polys = Vec::new();
@@ -1057,25 +983,16 @@ where
             let eval_id = claim.id();
             let eval_point = claim.point();
             let mat_ids = self.extract_uv_openable_ids(eval_id);
-            tracing::trace!(
-                "{}::{} | {}",
-                module_path!(),
-                "compile_mv_pcs_subproof",
-                format!(
-                    "polys add to opening queue: {:?}",
-                    mat_ids.iter().map(|id| id.0).collect::<Vec<_>>()
-                )
-            );
             for mat_id in mat_ids {
                 let eval = self.evaluate_uv(mat_id, eval_point).unwrap();
-                query_map.insert((mat_id, eval_point.clone()), eval);
+                query_map.insert((mat_id, *eval_point), eval);
                 mat_polys.push(self.mat_uv_poly(mat_id).unwrap().clone());
-                points.push(eval_point.clone());
+                points.push(*eval_point);
                 evals.push(eval);
             }
         }
 
-        let mut opening_proof: PCSOpeningProof<F, UvPCS>;
+        let opening_proof: PCSOpeningProof<F, UvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = UvPCS::open(&self.pk.uv_pcs_param, &mat_polys[0], &points[0], None)?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
@@ -1106,6 +1023,7 @@ where
     /// 1. The batched sumcheck subproof
     /// 2. The multivariate PCS subproof
     /// 3. The univariate PCS subproof
+    #[instrument(level = "debug", skip(self))]
     pub fn compile_proof(&mut self) -> SnarkResult<Proof<F, MvPCS, UvPCS>>
     where
         MvPCS: PCS<F, Poly = MLE<F>>,

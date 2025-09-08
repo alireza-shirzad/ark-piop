@@ -10,11 +10,7 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use derivative::Derivative;
-use std::{
-    collections::{BTreeMap, HashSet},
-    fmt::{Display, Write},
-    io::Read,
-};
+use std::{collections::BTreeMap, fmt::Display, io::Read};
 /////////// Types ///////////
 pub type QueryMap<F, PC> = BTreeMap<(TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point), F>;
 
@@ -60,7 +56,7 @@ where
 }
 
 impl<F: PrimeField> SumcheckSubproof<F> {
-    pub fn new(
+    pub(crate) fn new(
         sc_proof: SumcheckProof<F>,
         sc_aux_info: VPAuxInfo<F>,
         sumcheck_claims: BTreeMap<TrackerID, F>,
@@ -79,7 +75,7 @@ impl<F: PrimeField> SumcheckSubproof<F> {
         &self.sc_proof
     }
 
-    pub fn sc_aux_info(&self) -> &VPAuxInfo<F> {
+    pub(crate) fn sc_aux_info(&self) -> &VPAuxInfo<F> {
         &self.sc_aux_info
     }
 }

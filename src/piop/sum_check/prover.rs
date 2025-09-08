@@ -15,17 +15,13 @@ use std::sync::Arc;
 
 use crate::piop::structs::{SumcheckProverMessage, SumcheckProverState};
 
-pub struct SumCheckProver<F: PrimeField> {
-    _field: std::marker::PhantomData<F>,
-}
-
 impl<F: PrimeField> SumcheckProverState<F> {
     // type HPVirtualPolynomial = HPVirtualPolynomial<F>;
     // type ProverMessage = IOPProverMessage<F>;
 
     /// Initialize the prover state to argue for the sum of the input polynomial
     /// over {0,1}^`num_vars`.
-    pub fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
+    pub(crate) fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
         if polynomial.aux_info.num_variables == 0 {
             return Err(PolyIOPErrors::InvalidParameters(
                 "Attempt to prove a constant.".to_string(),
@@ -50,14 +46,12 @@ impl<F: PrimeField> SumcheckProverState<F> {
     /// next round.
     ///
     /// Main algorithm used is from section 3.2 of [XZZPS19](https://eprint.iacr.org/2019/317.pdf#subsection.3.2).
-    pub fn prove_round_and_update_state(
+    pub(crate) fn prove_round_and_update_state(
         &mut self,
         challenge: &Option<F>,
     ) -> Result<SumcheckProverMessage<F>, PolyIOPErrors> {
         if self.round >= self.poly.aux_info.num_variables {
-            return Err(PolyIOPErrors::Prover(
-                "Prover is not active".to_string(),
-            ));
+            return Err(PolyIOPErrors::Prover("Prover is not active".to_string()));
         }
 
         // Step 1:
@@ -175,7 +169,8 @@ fn barycentric_weights<F: PrimeField>(points: &[F]) -> Vec<F> {
             points
                 .iter()
                 .enumerate()
-                .filter_map(|(i, point_i)| (i != j).then(|| *point_j - point_i))
+                .filter(|&(i, _)| (i != j))
+                .map(|(_, point_i)| *point_j - point_i)
                 .reduce(|acc, value| acc * value)
                 .unwrap_or_else(F::one)
         })

@@ -211,7 +211,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let ell = log2(k) as usize;
 
         // challenge point t
-        let t = transcript.and_append_challenge_vectors("t".as_ref(), ell)?;
+        let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
 
         // eq(t, i) for i in [0..k]
         let eq_t_i_list = build_eq_x_r_vec(t.as_ref())?;
@@ -357,7 +357,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let ell = log2(k) as usize;
         let num_var = batch_proof.sum_check_proof.point.len();
         // challenge point t
-        let t = transcript.and_append_challenge_vectors("t".as_ref(), ell)?;
+        let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
 
         // sum check point (a2)
         let a2 = &batch_proof.sum_check_proof.point[..num_var];

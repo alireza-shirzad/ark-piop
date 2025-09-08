@@ -1,6 +1,5 @@
 /////// Imports /////////
 use crate::{errors::InputShapeError, transcript::errors::TranscriptError};
-use ark_ff::PrimeField;
 use thiserror::Error;
 
 /// An `enum` specifying the possible failure modes of the DB-SNARK verifier

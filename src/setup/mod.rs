@@ -15,6 +15,7 @@ use ark_std::cfg_iter;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf};
 use structs::{ProvingKey, VerifyingKey};
+use tracing::instrument;
 //////// Body /////////
 
 /// A key generator struct
@@ -65,6 +66,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     /// Generate the proving and verifying keys for the system based on the
     /// configuration in the `KeyGenerator` struct
     #[allow(clippy::type_complexity)]
+    #[instrument(level = "debug", skip(self))]
     pub fn gen_keys(
         self,
     ) -> SnarkResult<(ProvingKey<F, MvPCS, UvPCS>, VerifyingKey<F, MvPCS, UvPCS>)> {

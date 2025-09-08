@@ -1,3 +1,5 @@
+//! A General Purpose PCS abstraction and some implementations.
+
 pub(crate) mod errors;
 pub mod kzg10;
 pub mod pst13;
