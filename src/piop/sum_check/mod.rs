@@ -45,7 +45,6 @@ pub struct SumCheckSubClaim<F: PrimeField> {
 }
 
 impl<F: PrimeField> SumCheck<F> {
-
     pub(crate) fn prove(
         poly: &HPVirtualPolynomial<F>,
         transcript: &mut Tr<F>,
@@ -91,7 +90,6 @@ impl<F: PrimeField> SumCheck<F> {
             )?;
         }
 
-        
         SumcheckVerifierState::check_and_generate_subclaim(&verifier_state, &claimed_sum)
     }
 }

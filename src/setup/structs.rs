@@ -1,9 +1,9 @@
 use crate::{arithmetic::mat_poly::mle::MLE, pcs::PCS};
 use ark_ff::PrimeField;
-use derivative::Derivative;
-use std::collections::BTreeMap;
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
+use derivative::Derivative;
+use std::{collections::BTreeMap, sync::Arc};
 // Clone is only implemented if PCS satisfies the PCS<F>
 // bound, which guarantees that PCS::ProverParam
 
@@ -15,8 +15,8 @@ where
     F: PrimeField,
 {
     pub log_db_size: usize,
-    pub mv_pcs_param: MvPCS::ProverParam,
-    pub uv_pcs_param: UvPCS::ProverParam,
+    pub mv_pcs_param: Arc<MvPCS::ProverParam>,
+    pub uv_pcs_param: Arc<UvPCS::ProverParam>,
     pub indexed_mles: BTreeMap<String, MLE<F>>,
     pub vk: VerifyingKey<F, MvPCS, UvPCS>,
 }

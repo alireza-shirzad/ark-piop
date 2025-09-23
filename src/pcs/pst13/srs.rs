@@ -1,8 +1,11 @@
 //! Implementing Structured Reference Strings for multilinear polynomial KZG
 use crate::{
-    arithmetic::mat_poly::{mle::MLE, utils::{build_eq_x_r, eq_eval}},
+    arithmetic::mat_poly::{
+        mle::MLE,
+        utils::{build_eq_x_r, eq_eval},
+    },
     errors::{SnarkError, SnarkResult},
-    pcs::{errors::PCSError, StructuredReferenceString},
+    pcs::{StructuredReferenceString, errors::PCSError},
 };
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
 use ark_ff::{PrimeField, UniformRand};

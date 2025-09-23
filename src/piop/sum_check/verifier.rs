@@ -35,7 +35,7 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
     /// challenges; and update the verifier's state accordingly. The actual
     /// verifications are deferred (in batch) to `check_and_generate_subclaim`
     /// at the last step.
-    pub (crate) fn verify_round_and_update_state(
+    pub(crate) fn verify_round_and_update_state(
         &mut self,
         prover_msg: &SumcheckProverMessage<F>,
         transcript: &mut Tr<F>,

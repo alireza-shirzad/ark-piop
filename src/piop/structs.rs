@@ -1,4 +1,3 @@
-
 //! This module defines structs that are shared by all sub protocols.
 
 use ark_ff::PrimeField;

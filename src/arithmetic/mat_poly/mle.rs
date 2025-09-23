@@ -392,6 +392,4 @@ fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F>
     res
 }
 
-
-
 // TODO: Add tests for MLE

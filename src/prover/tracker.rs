@@ -180,7 +180,17 @@ where
     pub fn track_and_commit_mat_mv_p(&mut self, polynomial: &MLE<F>) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial.clone());
         // commit to the polynomial
-        let commitment = MvPCS::commit(self.pk.mv_pcs_param.clone(), &polynomial)?;
+        let commitment = MvPCS::commit(self.pk.mv_pcs_param.as_ref(), &polynomial)?;
+        Self::track_mat_mv_p_and_commitment(self, &polynomial, commitment)
+    }
+
+    pub fn track_mat_mv_p_and_commitment(
+        &mut self,
+        polynomial: &MLE<F>,
+        commitment: MvPCS::Commitment,
+    ) -> SnarkResult<TrackerID> {
+        let polynomial = Arc::new(polynomial.clone());
+        // commit to the polynomial
 
         // track the polynomial and get its id
         let poly_id = self.track_mat_arc_mv_poly(polynomial);
@@ -202,7 +212,16 @@ where
     pub fn track_and_commit_mat_uv_poly(&mut self, polynomial: LDE<F>) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial);
         // commit to the polynomial
-        let commitment = UvPCS::commit(self.pk.uv_pcs_param.clone(), &polynomial)?;
+        let commitment = UvPCS::commit(self.pk.uv_pcs_param.as_ref(), &polynomial)?;
+        Self::track_mat_uv_p_and_commitment(self, &polynomial, commitment)
+    }
+
+    fn track_mat_uv_p_and_commitment(
+        &mut self,
+        polynomial: &LDE<F>,
+        commitment: UvPCS::Commitment,
+    ) -> SnarkResult<TrackerID> {
+        let polynomial = Arc::new(polynomial.clone());
 
         // track the polynomial and get its id
         let poly_id = self.track_mat_arc_uv_poly(polynomial);
@@ -944,12 +963,17 @@ where
 
         let opening_proof: PCSOpeningProof<F, MvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = MvPCS::open(&self.pk.mv_pcs_param, &mat_polys[0], &points[0], None)?;
+            let single_proof = MvPCS::open(
+                self.pk.mv_pcs_param.as_ref(),
+                &mat_polys[0],
+                &points[0],
+                None,
+            )?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
             let batch_proof = MvPCS::multi_open(
-                &self.pk.mv_pcs_param,
+                self.pk.mv_pcs_param.as_ref(),
                 &mat_polys,
                 &points,
                 &evals,
@@ -994,12 +1018,17 @@ where
 
         let opening_proof: PCSOpeningProof<F, UvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = UvPCS::open(&self.pk.uv_pcs_param, &mat_polys[0], &points[0], None)?;
+            let single_proof = UvPCS::open(
+                self.pk.uv_pcs_param.as_ref(),
+                &mat_polys[0],
+                &points[0],
+                None,
+            )?;
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
             let batch_proof = UvPCS::multi_open(
-                &self.pk.uv_pcs_param,
+                self.pk.uv_pcs_param.as_ref(),
                 &mat_polys,
                 &points,
                 &evals,

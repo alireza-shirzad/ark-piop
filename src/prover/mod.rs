@@ -94,6 +94,12 @@ where
         }
     }
 
+    #[instrument(level = "debug", skip_all)]
+    /// Return a shared handle to the multilinear PCS prover parameters.
+    pub fn mv_pcs_prover_param(&self) -> Arc<MvPCS::ProverParam> {
+        Arc::clone(&self.tracker_rc.borrow().pk.mv_pcs_param)
+    }
+
     /// Get the range tracked polynomial given the data type
     #[instrument(level = "debug", skip(self))]
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
@@ -135,6 +141,27 @@ where
             self.tracker_rc
                 .borrow_mut()
                 .track_and_commit_mat_mv_p(polynomial)?,
+            num_vars,
+            self.tracker_rc.clone(),
+        ))
+    }
+
+    #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
+    /// Track a materialized polynomial using a pre-computed commitment.
+    pub fn track_mat_mv_poly_with_commitment(
+        &mut self,
+        polynomial: &MLE<F>,
+        commitment: MvPCS::Commitment,
+    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+        let num_vars = polynomial.num_vars();
+        Span::current().record("num_vars", num_vars);
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("polynomial", debug(&polynomial));
+        }
+        Ok(TrackedPoly::new(
+            self.tracker_rc
+                .borrow_mut()
+                .track_mat_mv_p_and_commitment(polynomial, commitment)?,
             num_vars,
             self.tracker_rc.clone(),
         ))

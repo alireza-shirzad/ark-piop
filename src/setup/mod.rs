@@ -13,7 +13,7 @@ use ark_std::cfg_iter;
 
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf};
+use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf, sync::Arc};
 use structs::{ProvingKey, VerifyingKey};
 use tracing::instrument;
 //////// Body /////////
@@ -83,16 +83,20 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
             1 << self.log_db_size,
         );
         // Trim the multivariate srs
-        let (mv_pcs_param, mv_v_param) = MvPCS::trim(&mv_srs, None, Some(self.log_db_size))?;
+        let (mv_pcs_param_raw, mv_v_param) = MvPCS::trim(&mv_srs, None, Some(self.log_db_size))?;
         // Trim the univariate srs
-        let (uv_pcs_param, uv_v_param) = UvPCS::trim(&uv_srs, Some(1 << self.log_db_size), None)?;
+        let (uv_pcs_param_raw, uv_v_param) =
+            UvPCS::trim(&uv_srs, Some(1 << self.log_db_size), None)?;
+
+        let mv_pcs_param = Arc::new(mv_pcs_param_raw);
+        let uv_pcs_param = Arc::new(uv_pcs_param_raw);
 
         // Assembling the indexed MLEs
         // let indexed_mles: BTreeMap<String, MLE<F>> = Self::gen_indexed_mles();
         let indexed_mles: BTreeMap<String, MLE<F>> = BTreeMap::new();
         // Assemble the indexed commitments
         let indexed_coms: BTreeMap<String, MvPCS::Commitment> =
-            Self::gen_indexed_coms(&indexed_mles, &mv_pcs_param);
+            Self::gen_indexed_coms(&indexed_mles, mv_pcs_param.as_ref());
 
         // Assemble the verifying key
         let vk = VerifyingKey {

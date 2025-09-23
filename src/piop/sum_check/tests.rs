@@ -39,6 +39,4 @@ pub fn random_mle_list<F: PrimeField, R: RngCore>(
     (list, sum)
 }
 
-
-
 // TODO: Write tests for sumcheck piop
