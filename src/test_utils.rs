@@ -8,6 +8,7 @@ use crate::{
 };
 use ark_ff::{Field, PrimeField};
 use std::sync::Once;
+use tracing::instrument;
 
 /// Compute the JSON log file path for test tracing.
 ///
@@ -170,6 +171,7 @@ pub fn init_tracing_for_tests() {
 /// maximum table size), outputs a ready-to-use instance of the prover and
 /// verifier
 #[allow(clippy::type_complexity)]
+#[instrument(level = "debug")]
 pub fn prelude_with_vars<
     F: Field + PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -190,6 +192,7 @@ pub fn prelude_with_vars<
 /// This function sets up the proof system and gives you a ready-to-use instance
 /// of the prover and verifier
 #[allow(clippy::type_complexity)]
+#[instrument(level = "debug", skip_all)]
 pub fn test_prelude<
     F: Field + PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,

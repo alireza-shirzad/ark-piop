@@ -265,7 +265,7 @@ where
         RefCell::borrow(&self.tracker_rc).clone()
     }
 
-    #[cfg(feature = "test-utils")]
+    #[cfg(any(feature = "test-utils", feature = "honest-prover"))]
     #[instrument(level = "debug", skip_all)]
     pub fn deep_copy(&self) -> Prover<F, MvPCS, UvPCS> {
         Prover::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())

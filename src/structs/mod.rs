@@ -10,7 +10,7 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use derivative::Derivative;
-use std::{collections::BTreeMap, fmt::Display, io::Read};
+use std::{collections::BTreeMap, fmt::Display};
 /////////// Types ///////////
 pub type QueryMap<F, PC> = BTreeMap<(TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point), F>;
 
@@ -93,7 +93,7 @@ where
     PC::Proof: CanonicalSerialize,
     PC::BatchProof: CanonicalSerialize,
 {
-    fn serialize_with_mode<W: std::io::Write>(
+    fn serialize_with_mode<W: ark_serialize::Write>(
         &self,
         mut writer: W,
         compress: Compress,
@@ -128,7 +128,7 @@ where
     PC::Proof: CanonicalDeserialize,
     PC::BatchProof: CanonicalDeserialize,
 {
-    fn deserialize_with_mode<R: Read>(
+    fn deserialize_with_mode<R: ark_serialize::Read>(
         mut reader: R,
         compress: Compress,
         validate: Validate,
