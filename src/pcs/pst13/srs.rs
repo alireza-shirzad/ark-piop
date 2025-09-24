@@ -2,13 +2,14 @@
 use crate::{
     arithmetic::mat_poly::{
         mle::MLE,
-        utils::{build_eq_x_r, eq_eval},
+        utils::{build_eq_x_r, eq_eval, eq_extension},
     },
     errors::{SnarkError, SnarkResult},
     pcs::{StructuredReferenceString, errors::PCSError},
 };
 use ark_ec::{AffineRepr, CurveGroup, ScalarMul, pairing::Pairing};
 use ark_ff::{PrimeField, UniformRand};
+use ark_poly::DenseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::Zero;
 use ark_std::rand::Rng;
@@ -132,10 +133,12 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
 
         let t: Vec<_> = (0..num_vars).map(|_| E::ScalarField::rand(rng)).collect();
 
-        let mut eq: LinkedList<Arc<MLE<E::ScalarField>>> = LinkedList::from_iter(build_eq_x_r(&t));
+        let mut eq: LinkedList<DenseMultilinearExtension<E::ScalarField>> =
+            LinkedList::from_iter(eq_extension(&t));
+        dbg!(eq.len());
         let mut eq_arr = LinkedList::new();
         // TODO: See if you can get rid of the clone next line
-        let mut base = eq.pop_back().unwrap().evaluations().clone();
+        let mut base = eq.pop_back().unwrap().evaluations;
 
         for i in (0..num_vars).rev() {
             eq_arr.push_front(remove_dummy_variable(&base, i)?);
