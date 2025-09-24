@@ -135,7 +135,6 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
 
         let mut eq: LinkedList<DenseMultilinearExtension<E::ScalarField>> =
             LinkedList::from_iter(eq_extension(&t));
-        dbg!(eq.len());
         let mut eq_arr = LinkedList::new();
         // TODO: See if you can get rid of the clone next line
         let mut base = eq.pop_back().unwrap().evaluations;
