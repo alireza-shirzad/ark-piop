@@ -1,7 +1,8 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, panic, rc::Rc};
 
 use ark_ff::PrimeField;
 use derivative::Derivative;
+use either::Either;
 
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
@@ -21,7 +22,7 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    id: TrackerID,
+    pub id_or_const: Either<TrackerID, F>,
     log_size: usize,
     tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
 }
@@ -35,7 +36,7 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackedPoly")
-            .field("id", &self.id)
+            .field("id_or_const", &self.id_or_const)
             .field("num_vars", &self.log_size)
             .finish()
     }
@@ -49,7 +50,7 @@ where
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id && Rc::ptr_eq(&self.tracker, &other.tracker)
+        self.id_or_const == other.id_or_const && Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 }
 
@@ -62,20 +63,27 @@ where
 {
     /// Create a new tracked polynomial
     pub fn new(
-        id: TrackerID,
+        id_or_const: Either<TrackerID, F>,
         log_size: usize,
         tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
     ) -> Self {
         Self {
-            id,
+            id_or_const,
             log_size,
             tracker,
         }
     }
 
     /// Get the id of the tracked polynomial
+    pub fn id_or_const(&self) -> Either<TrackerID, F> {
+        self.id_or_const
+    }
+
     pub fn id(&self) -> TrackerID {
-        self.id
+        match self.id_or_const {
+            Either::Left(id) => id,
+            Either::Right(_) => panic!("TrackedPoly is a constant"),
+        }
     }
 
     /// Get a reference to the underlying tracker
@@ -103,17 +111,144 @@ where
     }
 
     pub fn evaluate(&self, pt: &[F]) -> Option<F> {
-        self.tracker.borrow().evaluate_mv(self.id, pt)
+        match &self.id_or_const {
+            Either::Left(id) => self.tracker.borrow().evaluate_mv(*id, pt),
+            Either::Right(c) => {
+                assert_eq!(pt.len(), 0);
+                Some(*c)
+            }
+        }
     }
 
     pub fn evaluate_uv(&self, pt: &F) -> Option<F> {
-        self.tracker.borrow().evaluate_uv(self.id, pt)
+        match &self.id_or_const {
+            Either::Left(id) => self.tracker.borrow().evaluate_uv(*id, pt),
+            Either::Right(c) => {
+                assert_eq!(pt, &F::zero());
+                Some(*c)
+            }
+        }
     }
 
     pub fn evaluations(&self) -> Vec<F> {
         // TODO: Noe that this has to actually clone the evaluations, which can be
         // expensive
-        self.tracker.borrow_mut().evaluations(self.id).clone()
+        match &self.id_or_const {
+            Either::Left(id) => self.tracker.borrow_mut().evaluations(*id).clone(),
+            Either::Right(c) => vec![*c; 1 << self.log_size],
+        }
+    }
+
+    fn combine_log_sizes(lhs: usize, rhs: usize) -> usize {
+        if lhs == rhs {
+            lhs
+        } else if lhs == 0 {
+            rhs
+        } else if rhs == 0 {
+            lhs
+        } else {
+            panic!("Mismatched log sizes: lhs = {}, rhs = {}", lhs, rhs);
+        }
+    }
+
+    fn compute_add(&self, rhs: &TrackedPoly<F, MvPCS, UvPCS>) -> (Either<TrackerID, F>, usize) {
+        self.assert_same_tracker(rhs);
+        let log_size = Self::combine_log_sizes(self.log_size, rhs.log_size);
+        let id_or_const = match (&self.id_or_const, &rhs.id_or_const) {
+            (Either::Left(id1), Either::Left(id2)) => {
+                let new_id = self.tracker.borrow_mut().add_polys(*id1, *id2);
+                Either::Left(new_id)
+            }
+            (Either::Left(id1), Either::Right(c2)) => {
+                let new_id = self.tracker.borrow_mut().add_scalar(*id1, *c2);
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Left(id2)) => {
+                let new_id = self.tracker.borrow_mut().add_scalar(*id2, *c1);
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Right(c2)) => Either::Right(*c1 + *c2),
+        };
+        (id_or_const, log_size)
+    }
+
+    fn compute_sub(&self, rhs: &TrackedPoly<F, MvPCS, UvPCS>) -> (Either<TrackerID, F>, usize) {
+        self.assert_same_tracker(rhs);
+        let log_size = Self::combine_log_sizes(self.log_size, rhs.log_size);
+        let id_or_const = match (&self.id_or_const, &rhs.id_or_const) {
+            (Either::Left(id1), Either::Left(id2)) => {
+                let new_id = self.tracker.borrow_mut().sub_polys(*id1, *id2);
+                Either::Left(new_id)
+            }
+            (Either::Left(id1), Either::Right(c2)) => {
+                let new_id = self.tracker.borrow_mut().add_scalar(*id1, -*c2);
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Left(id2)) => {
+                let new_id = {
+                    let mut tracker = self.tracker.borrow_mut();
+                    let neg_id = tracker.mul_scalar(*id2, -F::one());
+                    tracker.add_scalar(neg_id, *c1)
+                };
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Right(c2)) => Either::Right(*c1 - *c2),
+        };
+        (id_or_const, log_size)
+    }
+
+    fn compute_mul(&self, rhs: &TrackedPoly<F, MvPCS, UvPCS>) -> (Either<TrackerID, F>, usize) {
+        self.assert_same_tracker(rhs);
+        let log_size = Self::combine_log_sizes(self.log_size, rhs.log_size);
+        let id_or_const = match (&self.id_or_const, &rhs.id_or_const) {
+            (Either::Left(id1), Either::Left(id2)) => {
+                let new_id = self.tracker.borrow_mut().mul_polys(*id1, *id2);
+                Either::Left(new_id)
+            }
+            (Either::Left(id1), Either::Right(c2)) => {
+                let new_id = self.tracker.borrow_mut().mul_scalar(*id1, *c2);
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Left(id2)) => {
+                let new_id = self.tracker.borrow_mut().mul_scalar(*id2, *c1);
+                Either::Left(new_id)
+            }
+            (Either::Right(c1), Either::Right(c2)) => Either::Right(*c1 * *c2),
+        };
+        (id_or_const, log_size)
+    }
+
+    fn compute_add_scalar(&self, scalar: F) -> (Either<TrackerID, F>, usize) {
+        let id_or_const = match &self.id_or_const {
+            Either::Left(id) => {
+                let new_id = self.tracker.borrow_mut().add_scalar(*id, scalar);
+                Either::Left(new_id)
+            }
+            Either::Right(constant) => Either::Right(*constant + scalar),
+        };
+        (id_or_const, self.log_size)
+    }
+
+    fn compute_sub_scalar(&self, scalar: F) -> (Either<TrackerID, F>, usize) {
+        let id_or_const = match &self.id_or_const {
+            Either::Left(id) => {
+                let new_id = self.tracker.borrow_mut().add_scalar(*id, -scalar);
+                Either::Left(new_id)
+            }
+            Either::Right(constant) => Either::Right(*constant - scalar),
+        };
+        (id_or_const, self.log_size)
+    }
+
+    fn compute_mul_scalar(&self, scalar: F) -> (Either<TrackerID, F>, usize) {
+        let id_or_const = match &self.id_or_const {
+            Either::Left(id) => {
+                let new_id = self.tracker.borrow_mut().mul_scalar(*id, scalar);
+                Either::Left(new_id)
+            }
+            Either::Right(constant) => Either::Right(*constant * scalar),
+        };
+        (id_or_const, self.log_size)
     }
 }
 
@@ -122,122 +257,174 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
 {
     fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self {
         Self {
-            id: self.id,
+            id_or_const: self.id_or_const,
             log_size: self.log_size,
             tracker: new_prover.tracker_rc,
         }
     }
 }
 
-// ====================== Operator Trait Implementations via Macros ======================
+// ====================== Operator Trait Implementations ======================
 
-// Macro to implement assignment ops with another TrackedPoly
-macro_rules! impl_assign_poly {
-    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
-        impl<F, MvPCS, UvPCS> std::ops::$trait_<&Self> for TrackedPoly<F, MvPCS, UvPCS>
-        where
-            F: PrimeField,
-            MvPCS: PCS<F, Poly = MLE<F>>,
-            UvPCS: PCS<F, Poly = LDE<F>>,
-        {
-            #[inline]
-            fn $fn_(&mut self, rhs: &Self) {
-                self.assert_same_tracker(rhs);
-                assert_eq!(self.log_size, rhs.log_size);
-                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs.id);
-                self.id = new_id;
-            }
-        }
-    };
+impl<F, MvPCS, UvPCS> std::ops::AddAssign<&Self> for TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    #[inline]
+    fn add_assign(&mut self, rhs: &Self) {
+        let (id_or_const, log_size) = self.compute_add(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
 }
 
-// Macro to implement assignment ops with scalar F
-macro_rules! impl_assign_scalar_poly {
-    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
-        impl<F, MvPCS, UvPCS> std::ops::$trait_<F> for TrackedPoly<F, MvPCS, UvPCS>
-        where
-            F: PrimeField,
-            MvPCS: PCS<F, Poly = MLE<F>>,
-            UvPCS: PCS<F, Poly = LDE<F>>,
-        {
-            #[inline]
-            fn $fn_(&mut self, rhs: F) {
-                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs);
-                self.id = new_id;
-            }
-        }
-    };
+impl<F, MvPCS, UvPCS> std::ops::SubAssign<&Self> for TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    #[inline]
+    fn sub_assign(&mut self, rhs: &Self) {
+        let (id_or_const, log_size) = self.compute_sub(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
 }
 
-// Macro to implement binary ops between &TrackedPoly and &TrackedPoly
-macro_rules! impl_binop_poly {
-    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
-        impl<'a, F, MvPCS, UvPCS> std::ops::$trait_<&'a TrackedPoly<F, MvPCS, UvPCS>>
-            for &'a TrackedPoly<F, MvPCS, UvPCS>
-        where
-            F: PrimeField,
-            MvPCS: PCS<F, Poly = MLE<F>>,
-            UvPCS: PCS<F, Poly = LDE<F>>,
-        {
-            type Output = TrackedPoly<F, MvPCS, UvPCS>;
-            #[inline]
-            fn $fn_(self, rhs: &'a TrackedPoly<F, MvPCS, UvPCS>) -> Self::Output {
-                self.assert_same_tracker(rhs);
-                assert_eq!(self.log_size, rhs.log_size);
-                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs.id);
-                TrackedPoly::new(new_id, self.log_size, self.tracker.clone())
-            }
-        }
-    };
+impl<F, MvPCS, UvPCS> std::ops::MulAssign<&Self> for TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    #[inline]
+    fn mul_assign(&mut self, rhs: &Self) {
+        let (id_or_const, log_size) = self.compute_mul(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
 }
 
-// Macro to implement binary ops between &TrackedPoly and scalar F
-macro_rules! impl_binop_scalar_poly {
-    ($trait_:ident, $fn_:ident, $tracker_fn:ident) => {
-        impl<'a, F, MvPCS, UvPCS> std::ops::$trait_<F> for &'a TrackedPoly<F, MvPCS, UvPCS>
-        where
-            F: PrimeField,
-            MvPCS: PCS<F, Poly = MLE<F>>,
-            UvPCS: PCS<F, Poly = LDE<F>>,
-        {
-            type Output = TrackedPoly<F, MvPCS, UvPCS>;
-            #[inline]
-            fn $fn_(self, rhs: F) -> Self::Output {
-                let new_id = self.tracker.borrow_mut().$tracker_fn(self.id, rhs);
-                TrackedPoly::new(new_id, self.log_size, self.tracker.clone())
-            }
-        }
-    };
+impl<F, MvPCS, UvPCS> std::ops::AddAssign<F> for TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    #[inline]
+    fn add_assign(&mut self, rhs: F) {
+        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
 }
 
-// Special-case macro for subtracting a scalar (uses add_scalar with negation)
-macro_rules! impl_binop_scalar_sub_poly {
-    () => {
-        impl<'a, F, MvPCS, UvPCS> std::ops::Sub<F> for &'a TrackedPoly<F, MvPCS, UvPCS>
-        where
-            F: PrimeField,
-            MvPCS: PCS<F, Poly = MLE<F>>,
-            UvPCS: PCS<F, Poly = LDE<F>>,
-        {
-            type Output = TrackedPoly<F, MvPCS, UvPCS>;
-            #[inline]
-            fn sub(self, rhs: F) -> Self::Output {
-                let new_id = self.tracker.borrow_mut().add_scalar(self.id, -rhs);
-                TrackedPoly::new(new_id, self.log_size, self.tracker.clone())
-            }
-        }
-    };
+impl<F, MvPCS, UvPCS> std::ops::MulAssign<F> for TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    #[inline]
+    fn mul_assign(&mut self, rhs: F) {
+        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
 }
 
-// Invoke macros to create the implementations
-impl_binop_poly!(Add, add, add_polys);
-impl_binop_poly!(Sub, sub, sub_polys);
-impl_binop_poly!(Mul, mul, mul_polys);
-impl_binop_scalar_poly!(Add, add, add_scalar);
-impl_binop_scalar_poly!(Mul, mul, mul_scalar);
-impl_binop_scalar_sub_poly!();
-impl_assign_poly!(AddAssign, add_assign, add_polys);
-impl_assign_poly!(SubAssign, sub_assign, sub_polys);
-impl_assign_poly!(MulAssign, mul_assign, mul_polys);
-impl_assign_scalar_poly!(AddAssign, add_assign, add_scalar);
-impl_assign_scalar_poly!(MulAssign, mul_assign, mul_scalar);
+impl<'a, F, MvPCS, UvPCS> std::ops::Add<&'a TrackedPoly<F, MvPCS, UvPCS>>
+    for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn add(self, rhs: &'a TrackedPoly<F, MvPCS, UvPCS>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_add(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, F, MvPCS, UvPCS> std::ops::Sub<&'a TrackedPoly<F, MvPCS, UvPCS>>
+    for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn sub(self, rhs: &'a TrackedPoly<F, MvPCS, UvPCS>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_sub(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, F, MvPCS, UvPCS> std::ops::Mul<&'a TrackedPoly<F, MvPCS, UvPCS>>
+    for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn mul(self, rhs: &'a TrackedPoly<F, MvPCS, UvPCS>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_mul(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, F, MvPCS, UvPCS> std::ops::Add<F> for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn add(self, rhs: F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, F, MvPCS, UvPCS> std::ops::Sub<F> for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn sub(self, rhs: F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_sub_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, F, MvPCS, UvPCS> std::ops::Mul<F> for &'a TrackedPoly<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    type Output = TrackedPoly<F, MvPCS, UvPCS>;
+
+    #[inline]
+    fn mul(self, rhs: F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}

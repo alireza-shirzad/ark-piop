@@ -115,6 +115,7 @@ dependencies = [
  "ark-test-curves",
  "chrono",
  "derivative",
+ "either",
  "itertools 0.14.0",
  "merlin",
  "proc-macro2",

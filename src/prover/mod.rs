@@ -20,6 +20,7 @@ use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use derivative::Derivative;
+use either::Either;
 use tracing::{Span, field::debug, instrument, trace};
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
@@ -117,7 +118,7 @@ where
             Span::current().record("polynomial", debug(&polynomial));
         }
         TrackedPoly::new(
-            self.tracker_rc.borrow_mut().track_mat_mv_poly(polynomial),
+            Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_poly(polynomial)),
             num_vars,
             self.tracker_rc.clone(),
         )
@@ -138,9 +139,11 @@ where
             Span::current().record("polynomial", debug(&polynomial));
         }
         Ok(TrackedPoly::new(
-            self.tracker_rc
-                .borrow_mut()
-                .track_and_commit_mat_mv_p(polynomial)?,
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_and_commit_mat_mv_p(polynomial)?,
+            ),
             num_vars,
             self.tracker_rc.clone(),
         ))
@@ -159,9 +162,11 @@ where
             Span::current().record("polynomial", debug(&polynomial));
         }
         Ok(TrackedPoly::new(
-            self.tracker_rc
-                .borrow_mut()
-                .track_mat_mv_p_and_commitment(polynomial, commitment)?,
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_mat_mv_p_and_commitment(polynomial, commitment)?,
+            ),
             num_vars,
             self.tracker_rc.clone(),
         ))
@@ -178,7 +183,7 @@ where
             Span::current().record("polynomial", debug(&polynomial));
         }
         TrackedPoly::new(
-            self.tracker_rc.borrow_mut().track_mat_uv_poly(polynomial),
+            Either::Left(self.tracker_rc.borrow_mut().track_mat_uv_poly(polynomial)),
             degree,
             self.tracker_rc.clone(),
         )
@@ -199,9 +204,11 @@ where
             Span::current().record("polynomial", debug(&polynomial));
         }
         Ok(TrackedPoly::new(
-            self.tracker_rc
-                .borrow_mut()
-                .track_and_commit_mat_uv_poly(polynomial)?,
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_and_commit_mat_uv_poly(polynomial)?,
+            ),
             degree,
             self.tracker_rc.clone(),
         ))

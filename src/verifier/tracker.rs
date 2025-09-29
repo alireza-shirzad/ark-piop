@@ -364,6 +364,7 @@ where
                     Ok(o1_cloned(point)? + scalar)
                 })))
             }
+            Oracle::Constant(c) => Oracle::Constant(*c + scalar),
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
@@ -394,6 +395,7 @@ where
                     Ok(o1_cloned(point)? * scalar)
                 })))
             }
+            Oracle::Constant(c) => Oracle::Constant(*c * scalar),
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();

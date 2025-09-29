@@ -3,6 +3,7 @@ pub mod structs;
 mod tracker;
 use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 
+use either::Either;
 use structs::oracle::{Oracle, TrackedOracle};
 use tracing::{instrument, trace};
 
@@ -90,7 +91,7 @@ where
         comm: MvPCS::Commitment,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
-            self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?,
+            Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?),
             self.tracker_rc.clone(),
         ))
     }
@@ -98,7 +99,7 @@ where
     #[instrument(level = "debug", skip_all)]
     pub fn track_oracle(&self, eval_fn: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
         TrackedOracle::new(
-            self.tracker_rc.borrow_mut().track_oracle(eval_fn),
+            Either::Left(self.tracker_rc.borrow_mut().track_oracle(eval_fn)),
             self.tracker_rc.clone(),
         )
     }
@@ -165,7 +166,7 @@ where
         id: TrackerID,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
-            self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?,
+            Either::Left(self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?),
             self.tracker_rc.clone(),
         ))
     }
@@ -176,7 +177,7 @@ where
         id: TrackerID,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
         Ok(TrackedOracle::new(
-            self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?,
+            Either::Left(self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?),
             self.tracker_rc.clone(),
         ))
     }
