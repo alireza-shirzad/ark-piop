@@ -6,11 +6,9 @@ use crate::{
     verifier::tracker::VerifierTracker,
 };
 use ark_ff::{Field, PrimeField};
-use ark_serialize::{CanonicalSerialize, Compress, SerializationError};
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 use either::Either;
-use serde::{Serialize, Serializer, ser::Error as SerError, ser::SerializeStruct};
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
@@ -68,43 +66,7 @@ where
     pub tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
 }
 
-impl<F, MvPCS, UvPCS> Serialize for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField + CanonicalSerialize,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
-    MvPCS::Commitment: CanonicalSerialize,
-{
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut state = serializer.serialize_struct("TrackedOracle", 2)?;
-        match &self.id_or_const {
-            Either::Left(id) => {
-                let commitment = self.tracker.borrow().mv_commitment(*id).ok_or_else(|| {
-                    S::Error::custom("commitment not found for oracle")
-                })?;
-                let mut bytes = Vec::new();
-                commitment
-                    .serialize_with_mode(&mut bytes, Compress::Yes)
-                    .map_err(|e: SerializationError| S::Error::custom(e.to_string()))?;
-                state.serialize_field("kind", "commitment")?;
-                state.serialize_field("data", &bytes)?;
-            }
-            Either::Right(value) => {
-                let mut bytes = Vec::new();
-                value
-                    .serialize_with_mode(&mut bytes, Compress::Yes)
-                    .map_err(|e: SerializationError| S::Error::custom(e.to_string()))?;
-                state.serialize_field("kind", "constant")?;
-                state.serialize_field("data", &bytes)?;
-            }
-        }
-        state.end()
-    }
-}
-
+// Serialization for tracked oracle
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
@@ -303,7 +265,7 @@ where
     }
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS> TrackedOracle<F, MvPCS, UvPCS>
+impl<F, MvPCS, UvPCS> TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -335,6 +297,20 @@ where
             self.same_tracker(other),
             "TrackedOracles are not from the same tracker"
         );
+    }
+
+    pub fn commitment(&self) -> MvPCS::Commitment
+    where
+        MvPCS::Commitment: Clone,
+    {
+        match &self.id_or_const {
+            Either::Left(id) => self
+                .tracker
+                .borrow()
+                .mv_commitment(*id)
+                .expect("TrackedOracle commitment not found"),
+            Either::Right(_) => panic!("TrackedOracle is a constant"),
+        }
     }
 
     fn compute_add(&self, rhs: &TrackedOracle<F, MvPCS, UvPCS>) -> Either<TrackerID, F> {
