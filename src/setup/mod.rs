@@ -22,7 +22,7 @@ use tracing::instrument;
 /// It uses the static information about the table, like the maximum size, etc
 /// and generates the proving and verifying keys
 pub struct KeyGenerator<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
-    log_db_size: usize,
+    log_size: usize,
     srs_path: PathBuf,
     _field: std::marker::PhantomData<F>,
     _mv_pcs: std::marker::PhantomData<MvPCS>,
@@ -34,7 +34,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> 
 {
     fn default() -> Self {
         Self {
-            log_db_size: 23,
+            log_size: 23,
             srs_path: current_dir().unwrap().join("..").join("srs"),
             _field: PhantomData,
             _mv_pcs: PhantomData,
@@ -52,8 +52,8 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     }
 
     /// Sets the log of number of table maximum size.
-    pub fn with_num_mv_vars(mut self, log_db_size: usize) -> Self {
-        self.log_db_size = log_db_size;
+    pub fn with_num_mv_vars(mut self, log_size: usize) -> Self {
+        self.log_size = log_size;
         self
     }
 
@@ -72,21 +72,18 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     ) -> SnarkResult<(ProvingKey<F, MvPCS, UvPCS>, VerifyingKey<F, MvPCS, UvPCS>)> {
         // Load or generate the multivariate SRS
         let mv_srs = load_or_generate_srs::<F, MvPCS>(
-            &self.srs_path.join(format!("mv_{}.srs", self.log_db_size)),
-            self.log_db_size,
+            &self.srs_path.join(format!("mv_{}.srs", self.log_size)),
+            self.log_size,
         );
         // Load or generate the univariate SRS
         let uv_srs = load_or_generate_srs::<F, UvPCS>(
-            &self
-                .srs_path
-                .join(format!("uv_{}.srs", 1 << self.log_db_size)),
-            1 << self.log_db_size,
+            &self.srs_path.join(format!("uv_{}.srs", 1 << self.log_size)),
+            1 << self.log_size,
         );
         // Trim the multivariate srs
-        let (mv_pcs_param_raw, mv_v_param) = MvPCS::trim(&mv_srs, None, Some(self.log_db_size))?;
+        let (mv_pcs_param_raw, mv_v_param) = MvPCS::trim(&mv_srs, None, Some(self.log_size))?;
         // Trim the univariate srs
-        let (uv_pcs_param_raw, uv_v_param) =
-            UvPCS::trim(&uv_srs, Some(1 << self.log_db_size), None)?;
+        let (uv_pcs_param_raw, uv_v_param) = UvPCS::trim(&uv_srs, Some(1 << self.log_size), None)?;
 
         let mv_pcs_param = Arc::new(mv_pcs_param_raw);
         let uv_pcs_param = Arc::new(uv_pcs_param_raw);
@@ -100,14 +97,14 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
 
         // Assemble the verifying key
         let vk = VerifyingKey {
-            log_db_size: self.log_db_size,
+            log_size: self.log_size,
             mv_pcs_vk: mv_v_param,
             uv_pcs_vk: uv_v_param,
             indexed_coms,
         };
         // Assemble the proving key
         let pk = ProvingKey {
-            log_db_size: self.log_db_size,
+            log_size: self.log_size,
             mv_pcs_param,
             uv_pcs_param,
             indexed_mles,

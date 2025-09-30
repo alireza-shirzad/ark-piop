@@ -107,6 +107,10 @@ where
         RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label.clone())
     }
 
+    pub fn tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
+        Rc::clone(&self.tracker_rc)
+    }
+
     /// Track a materialized multivariate polynomial
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID

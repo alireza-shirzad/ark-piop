@@ -14,7 +14,7 @@ pub struct ProvingKey<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
 {
-    pub log_db_size: usize,
+    pub log_size: usize,
     pub mv_pcs_param: Arc<MvPCS::ProverParam>,
     pub uv_pcs_param: Arc<UvPCS::ProverParam>,
     pub indexed_mles: BTreeMap<String, MLE<F>>,
@@ -27,7 +27,7 @@ pub struct VerifyingKey<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
 {
-    pub log_db_size: usize,
+    pub log_size: usize,
     pub mv_pcs_vk: MvPCS::VerifierParam,
     pub uv_pcs_vk: UvPCS::VerifierParam,
     pub indexed_coms: BTreeMap<String, MvPCS::Commitment>,

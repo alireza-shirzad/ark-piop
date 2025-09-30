@@ -133,6 +133,14 @@ where
         Ok(new_id)
     }
 
+    pub fn mv_commitment(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
+        self.state
+            .mv_pcs_substate
+            .materialized_comms
+            .get(&id)
+            .cloned()
+    }
+
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
         let comm: UvPCS::Commitment;
         {

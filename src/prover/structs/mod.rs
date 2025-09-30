@@ -99,7 +99,7 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub log_db_size: usize,
+    pub log_size: usize,
     pub mv_pcs_param: Arc<MvPCS::ProverParam>,
     pub uv_pcs_param: Arc<UvPCS::ProverParam>,
     pub indexed_mles: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>>,
@@ -113,7 +113,7 @@ where
 {
     pub fn new_from_pk(pk: &ProvingKey<F, MvPCS, UvPCS>) -> Self {
         Self {
-            log_db_size: pk.log_db_size,
+            log_size: pk.log_size,
             mv_pcs_param: Arc::clone(&pk.mv_pcs_param),
             uv_pcs_param: Arc::clone(&pk.uv_pcs_param),
             indexed_mles: BTreeMap::new(),

@@ -6,9 +6,11 @@ use crate::{
     verifier::tracker::VerifierTracker,
 };
 use ark_ff::{Field, PrimeField};
+use ark_serialize::{CanonicalSerialize, Compress, SerializationError};
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 use either::Either;
+use serde::{Serialize, Serializer, ser::Error as SerError, ser::SerializeStruct};
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
@@ -16,7 +18,6 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-
 ////////////////////////////// Structs & Enums //////////////////////////////
 
 pub trait CloneableFn<F: 'static, In>: Fn(In) -> SnarkResult<F> + Send + Sync {
@@ -38,12 +39,12 @@ impl<F: 'static, In: 'static> Clone for Box<dyn CloneableFn<F, In>> {
     }
 }
 
-pub enum Oracle<F: Field+'static> {
+pub enum Oracle<F: Field + 'static> {
     Univariate(Arc<dyn CloneableFn<F, F>>),
     Multivariate(Arc<dyn CloneableFn<F, Vec<F>>>),
     Constant(F),
 }
-impl<F: 'static+Field> Clone for Oracle<F> {
+impl<F: 'static + Field> Clone for Oracle<F> {
     fn clone(&self) -> Self {
         match self {
             Oracle::Univariate(f) => Oracle::Univariate(f.clone()),
@@ -65,6 +66,43 @@ where
 {
     pub id_or_const: Either<TrackerID, F>,
     pub tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+}
+
+impl<F, MvPCS, UvPCS> Serialize for TrackedOracle<F, MvPCS, UvPCS>
+where
+    F: PrimeField + CanonicalSerialize,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS::Commitment: CanonicalSerialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("TrackedOracle", 2)?;
+        match &self.id_or_const {
+            Either::Left(id) => {
+                let commitment = self.tracker.borrow().mv_commitment(*id).ok_or_else(|| {
+                    S::Error::custom("commitment not found for oracle")
+                })?;
+                let mut bytes = Vec::new();
+                commitment
+                    .serialize_with_mode(&mut bytes, Compress::Yes)
+                    .map_err(|e: SerializationError| S::Error::custom(e.to_string()))?;
+                state.serialize_field("kind", "commitment")?;
+                state.serialize_field("data", &bytes)?;
+            }
+            Either::Right(value) => {
+                let mut bytes = Vec::new();
+                value
+                    .serialize_with_mode(&mut bytes, Compress::Yes)
+                    .map_err(|e: SerializationError| S::Error::custom(e.to_string()))?;
+                state.serialize_field("kind", "constant")?;
+                state.serialize_field("data", &bytes)?;
+            }
+        }
+        state.end()
+    }
 }
 
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedOracle<F, MvPCS, UvPCS>

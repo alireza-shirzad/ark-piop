@@ -735,6 +735,9 @@ where
             panic!("Unknown poly id: {:?}", id);
         }
         let poly = poly.unwrap(); // Invariant: contains only material PolyIDs
+        if poly.is_empty() {
+            return HPVirtualPolynomial::new(1);
+        }
         let first_id = poly[0].1[0];
         let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
 
