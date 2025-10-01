@@ -179,7 +179,6 @@ pub fn prelude_with_vars<
 >(
     num_mv_vars: usize,
 ) -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
-    init_tracing_for_tests();
     let key_generator = KeyGenerator::<F, MvPCS, UvPCS>::new().with_num_mv_vars(num_mv_vars);
     let (pk, vk) = key_generator.gen_keys().unwrap();
     let prover = Prover::new_from_pk(pk);
@@ -198,6 +197,7 @@ pub fn test_prelude<
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 >() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
+    init_tracing_for_tests();
     prelude_with_vars::<F, MvPCS, UvPCS>(16)
 }
 
