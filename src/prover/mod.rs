@@ -129,6 +129,17 @@ where
     }
 
     /// Track a materialized multivariate polynomial
+    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
+    /// map and returns the TrackerID
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_mat_mv_cnst_poly(&mut self, nv: usize, cnst: F) -> TrackedPoly<F, MvPCS, UvPCS> {
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("cnst", debug(&cnst));
+        }
+        TrackedPoly::new(Either::Right(cnst), nv, self.tracker_rc.clone())
+    }
+
+    /// Track a materialized multivariate polynomial
     /// sends a commitment to the polynomials to the verifier, moves the
     /// multivariate polynomial to heap, assigns a TracckerID to it in map and
     /// returns the TrackerID
