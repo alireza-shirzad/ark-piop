@@ -69,7 +69,7 @@ pub struct ProcessedProof<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
 {
-    pub sc_subproof: SumcheckSubproof<F>,
+    pub sc_subproof: Option<SumcheckSubproof<F>>,
     pub mv_pcs_subproof: ProcessedPCSSubproof<F, MvPCS>,
     pub uv_pcs_subproof: ProcessedPCSSubproof<F, UvPCS>,
 }

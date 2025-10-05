@@ -15,7 +15,7 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use itertools::MultiUnzip;
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take, sync::Arc};
 
@@ -417,6 +417,8 @@ where
             .as_ref()
             .unwrap()
             .sc_subproof
+            .as_ref()
+            .expect("No sumcheck subproof in the proof")
             .sumcheck_claims()
             .get(&id)
             .cloned()
@@ -429,6 +431,8 @@ where
                 .as_ref()
                 .unwrap()
                 .sc_subproof
+                .as_ref()
+                .expect("No sumcheck subproof in the proof")
                 .sc_aux_info()
                 .num_variables,
             F::zero(),
@@ -530,9 +534,17 @@ where
 
     #[instrument(level = "debug", skip_all)]
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
+        let num_claims = self.state.mv_pcs_substate.zero_check_claims.len();
+
+        if (num_claims == 0) {
+            debug!("No zerocheck claims to batch",);
+            return Ok(());
+        }
+
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
         let mut agg = self.track_oracle(zero_oracle);
+
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
             .fold(agg, |acc, claim| {
@@ -543,11 +555,21 @@ where
                 self.add_oracles(acc, cp)
             });
         self.add_mv_zerocheck_claim(agg);
+        debug!(
+            "{} zerocheck claims were batched into 1 zerocheck claim",
+            num_claims
+        );
+
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
+        if (self.state.mv_pcs_substate.zero_check_claims.is_empty()) {
+            debug!("No zerocheck claims to convert to sumcheck claims",);
+            return Ok(());
+        }
+
         // Check at this point there should be only one batched zero check claim
         debug_assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
         // sample the random challenge r
@@ -572,6 +594,7 @@ where
         let new_sc_claim_comm = self.mul_oracles(z_check_aggr_id, eq_x_r_comm);
         // Add this new sumcheck claim to other sumcheck claims
         self.add_mv_sumcheck_claim(new_sc_claim_comm, F::zero());
+        debug!("The only zerocheck claim was converted to a sumcheck claim",);
         Ok(())
     }
 
@@ -580,6 +603,13 @@ where
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
     #[instrument(level = "debug", skip_all)]
     fn batch_s_check_claims(&mut self) -> SnarkResult<()> {
+        let num_claims = self.state.mv_pcs_substate.sum_check_claims.len();
+
+        if num_claims == 0 {
+            debug!("No sumcheck claims to batch",);
+            return Ok(());
+        }
+
         // Aggreage te the sumcheck claims
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
@@ -587,6 +617,7 @@ where
         let mut sc_sum = F::zero();
         // Iterate over the sumcheck claims and aggregate them
         // Order matters here, DO NOT PARALLELIZE
+
         agg = take(&mut self.state.mv_pcs_substate.sum_check_claims)
             .into_iter()
             .fold(agg, |acc, claim| {
@@ -600,19 +631,39 @@ where
         // Now the sumcheck claims are empty
         // Add the new aggregated sumcheck claim to the list of claims
         self.add_mv_sumcheck_claim(agg, sc_sum);
+        debug!(
+            "{} sumcheck claims were batched into 1 sumcheck claim",
+            num_claims
+        );
         Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
     fn perform_single_sumcheck(&mut self) -> SnarkResult<()> {
+        if (self.state.mv_pcs_substate.sum_check_claims.is_empty()) {
+            debug!("No sumcheck claims to verify",);
+            return Ok(());
+        }
         debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
-            self.proof.as_ref().unwrap().sc_subproof.sc_proof(),
-            self.proof.as_ref().unwrap().sc_subproof.sc_aux_info(),
+            self.proof
+                .as_ref()
+                .unwrap()
+                .sc_subproof
+                .as_ref()
+                .expect("No sumcheck subproof in the proof")
+                .sc_proof(),
+            self.proof
+                .as_ref()
+                .unwrap()
+                .sc_subproof
+                .as_ref()
+                .expect("No sumcheck subproof in the proof")
+                .sc_aux_info(),
             &mut self.state.transcript,
         )?;
         self.add_mv_eval_claim(
@@ -776,12 +827,15 @@ where
     // query and io tables
     #[instrument(level = "debug", skip_all)]
     fn equalize_mat_com_nv(&self) -> usize {
-        self.proof
-            .as_ref()
+        dbg!(self.state.mv_pcs_substate.materialized_comms.len());
+        self.state
+            .mv_pcs_substate
+            .materialized_comms
+            .values()
+            .map(|p| p.num_vars())
+            .max()
+            .ok_or(1)
             .unwrap()
-            .sc_subproof
-            .sc_aux_info()
-            .num_variables
     }
 
     /// Verify the claims of the proof

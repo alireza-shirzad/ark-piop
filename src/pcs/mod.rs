@@ -360,6 +360,14 @@ pub fn load_or_generate_srs<F: PrimeField, PCSImpl: PCS<F>>(
         let srs = PCSImpl::gen_srs_for_testing(&mut rng, size).unwrap();
         let mut serialized = Vec::new();
         srs.serialize_uncompressed(&mut serialized).unwrap();
+        if let Some(parent) = srs_path.parent() {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                panic!(
+                    "could not create parent directory for SRS at {:?}: {}",
+                    srs_path, err
+                );
+            }
+        }
         BufWriter::new(
             File::create(srs_path)
                 .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", srs_path)),

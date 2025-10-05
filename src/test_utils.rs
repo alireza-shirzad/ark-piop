@@ -211,5 +211,6 @@ pub fn bench_prelude<
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 >() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
-    prelude_with_vars::<F, MvPCS, UvPCS>(23)
+    init_tracing_for_tests();
+    prelude_with_vars::<F, MvPCS, UvPCS>(20)
 }

@@ -25,7 +25,7 @@ where
     <MvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
     <UvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
-    pub sc_subproof: SumcheckSubproof<F>,
+    pub sc_subproof: Option<SumcheckSubproof<F>>,
     pub mv_pcs_subproof: PCSSubproof<F, MvPCS>,
     pub uv_pcs_subproof: PCSSubproof<F, UvPCS>,
 }

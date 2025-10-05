@@ -811,6 +811,13 @@ where
     /// zerocheck claim in the prover state.
     #[instrument(level = "debug", skip(self))]
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
+        let num_claims = self.state.mv_pcs_substate.zero_check_claims.len();
+
+        if (num_claims == 0) {
+            debug!("No zerocheck claims to batch",);
+            return Ok(());
+        }
+
         // build the running aggregate polynomial
         let mut agg = self.track_virt_poly(Vec::new());
         // Perform the random linear combination and aggregate them
@@ -826,6 +833,10 @@ where
 
         // Push the new aggregated claim to the prover state as the inly zerocheck claim
         self.add_mv_zerocheck_claim(agg)?;
+        debug!(
+            "{} zerocheck claims were batched into 1 zerocheck claim",
+            num_claims
+        );
         Ok(())
     }
 
@@ -834,6 +845,13 @@ where
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
     #[instrument(level = "debug", skip(self))]
     fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, F>> {
+        let num_claims = self.state.mv_pcs_substate.sum_check_claims.len();
+
+        if (num_claims == 0) {
+            debug!("No sumcheck claims to batch",);
+            return Ok(BTreeMap::new());
+        }
+
         let mut agg = self.track_virt_poly(Vec::new());
         let mut sc_sum = F::zero();
 
@@ -861,6 +879,10 @@ where
         // Now the sumcheck claims are empty
         // Add the new aggregated sumcheck claim to the list of claims
         self.add_mv_sumcheck_claim(agg, sc_sum)?;
+        debug!(
+            "{} sumcheck claims were batched into 1 sumcheck claim",
+            num_claims
+        );
         Ok(individual_sumcheck_claims)
     }
 
@@ -871,6 +893,10 @@ where
     /// challenge r
     #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
+        if (self.state.mv_pcs_substate.zero_check_claims.is_empty()) {
+            debug!("No zerocheck claims to convert to sumcheck claims",);
+            return Ok(());
+        }
         // Check at this point there should be only one batched zero check claim
         debug_assert_eq!(self.state.mv_pcs_substate.zero_check_claims.len(), 1);
         // sample the random challenge r
@@ -897,6 +923,7 @@ where
 
         // Add this new sumcheck claim to other sumcheck claims
         self.add_mv_sumcheck_claim(new_sc_claim_poly, F::zero())?;
+        debug!("The only zerocheck claim was converted to a sumcheck claim",);
         Ok(())
     }
 
@@ -923,13 +950,17 @@ where
     /// the prover state, into a list of evaluation claims. These evaluation
     /// claims will be proved using a PCS
     #[instrument(level = "debug", skip(self))]
-    fn compile_sc_subproof(&mut self, max_nv: usize) -> SnarkResult<SumcheckSubproof<F>> {
+    fn compile_sc_subproof(&mut self, max_nv: usize) -> SnarkResult<Option<SumcheckSubproof<F>>> {
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // Batch all the cumcheck claims into one sumcheck claims
         let individual_sumcheck_claims = self.batch_s_check_claims()?;
+        if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
+            debug!("No sumcheck claims to prove",);
+            return Ok(None);
+        }
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
         // Assemble the sumcheck subproof of the prover
@@ -938,7 +969,7 @@ where
             sc_aux_info.clone(),
             individual_sumcheck_claims,
         );
-        Ok(sc_subproof)
+        Ok(Some(sc_subproof))
     }
 
     /// Compiles the PCS subproof, a proof containg (a) a list of commitments to
