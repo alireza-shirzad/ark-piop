@@ -90,10 +90,12 @@ where
         &self,
         comm: MvPCS::Commitment,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
-        Ok(TrackedOracle::new(
+        let tracked_oracle = TrackedOracle::new(
             Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?),
             self.tracker_rc.clone(),
-        ))
+        );
+        trace!("assigned id {}", tracked_oracle.id());
+        Ok(tracked_oracle)
     }
 
     #[instrument(level = "debug", skip_all)]

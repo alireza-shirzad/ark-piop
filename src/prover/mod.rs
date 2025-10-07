@@ -173,10 +173,7 @@ where
     ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         let num_vars = polynomial.num_vars();
         Span::current().record("num_vars", num_vars);
-        if tracing::level_enabled!(tracing::Level::TRACE) {
-            Span::current().record("polynomial", debug(&polynomial));
-        }
-        Ok(TrackedPoly::new(
+        let tracked_poly =  TrackedPoly::new(
             Either::Left(
                 self.tracker_rc
                     .borrow_mut()
@@ -184,7 +181,9 @@ where
             ),
             num_vars,
             self.tracker_rc.clone(),
-        ))
+        );
+        trace!("{} {}", "id assigned:", tracked_poly.id());
+        Ok(tracked_poly)
     }
 
     /// Track a materialized univariate polynomial
