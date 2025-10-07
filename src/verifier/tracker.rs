@@ -827,7 +827,6 @@ where
     // query and io tables
     #[instrument(level = "debug", skip_all)]
     fn equalize_mat_com_nv(&self) -> usize {
-        dbg!(self.state.mv_pcs_substate.materialized_comms.len());
         self.state
             .mv_pcs_substate
             .materialized_comms

@@ -43,8 +43,10 @@ test-utils = []
 parallel = [
     "std",
     "ark-ff/parallel",
+    "ark-ec/parallel",
     "ark-poly/parallel",
     "ark-std/parallel",
+    "ark-serialize/parallel",
     "rayon",
 ]
 honest-prover = []
