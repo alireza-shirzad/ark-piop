@@ -44,6 +44,6 @@ where
     <PC::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
     pub opening_proof: PCSOpeningProof<F, PC>,
-    pub commitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
+    pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub query_map: QueryMap<F, PC>,
 }

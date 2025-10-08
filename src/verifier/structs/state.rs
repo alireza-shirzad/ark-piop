@@ -104,7 +104,7 @@ where
     PC: PCS<F>,
 {
     pub opening_proof: PCSOpeningProof<F, PC>,
-    pub commitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
+    pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub query_map: Arc<QueryMap<F, PC>>,
 }
 
@@ -117,7 +117,7 @@ where
     pub fn new_from_pcs_subproof(pcs_subproof: &PCSSubproof<F, PC>) -> Self {
         Self {
             opening_proof: pcs_subproof.opening_proof.clone(),
-            commitments: pcs_subproof.commitments.clone(),
+            comitments: pcs_subproof.comitments.clone(),
             query_map: Arc::new(pcs_subproof.query_map.clone()),
         }
     }

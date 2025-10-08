@@ -10,6 +10,7 @@ use tracing::{instrument, trace};
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkResult,
+    pcs::PolynomialCommitment,
     prover::structs::proof::Proof,
     setup::structs::VerifyingKey,
     structs::TrackerID,
@@ -90,19 +91,23 @@ where
         &self,
         comm: MvPCS::Commitment,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+        let nv = comm.log_size();
         let tracked_oracle = TrackedOracle::new(
             Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?),
             self.tracker_rc.clone(),
+            nv,
         );
         trace!("assigned id {}", tracked_oracle.id());
         Ok(tracked_oracle)
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn track_oracle(&self, eval_fn: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
+    pub fn track_oracle(&self, oracle: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
+        let log_size = oracle.log_size();
         TrackedOracle::new(
-            Either::Left(self.tracker_rc.borrow_mut().track_oracle(eval_fn)),
+            Either::Left(self.tracker_rc.borrow_mut().track_oracle(oracle)),
             self.tracker_rc.clone(),
+            log_size,
         )
     }
 
@@ -167,9 +172,11 @@ where
         &mut self,
         id: TrackerID,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+        let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?;
         Ok(TrackedOracle::new(
-            Either::Left(self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?),
+            Either::Left(tracker_id),
             self.tracker_rc.clone(),
+            nv,
         ))
     }
 
@@ -178,9 +185,11 @@ where
         &mut self,
         id: TrackerID,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+let (degree,tracker_id)=self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?;
         Ok(TrackedOracle::new(
-            Either::Left(self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?),
+            Either::Left(tracker_id),
             self.tracker_rc.clone(),
+            degree,
         ))
     }
 

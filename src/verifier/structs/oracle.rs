@@ -37,17 +37,56 @@ impl<F: 'static, In: 'static> Clone for Box<dyn CloneableFn<F, In>> {
     }
 }
 
-pub enum Oracle<F: Field + 'static> {
+pub enum InnerOracle<F: Field + 'static> {
     Univariate(Arc<dyn CloneableFn<F, F>>),
     Multivariate(Arc<dyn CloneableFn<F, Vec<F>>>),
     Constant(F),
 }
-impl<F: 'static + Field> Clone for Oracle<F> {
+
+#[derive(Clone)]
+pub struct Oracle<F: Field + 'static> {
+    log_size: usize,
+    inner: InnerOracle<F>,
+}
+
+impl<F: 'static + Field> Oracle<F> {
+    pub fn log_size(&self) -> usize {
+        self.log_size
+    }
+
+    pub fn new_univariate(log_size: usize, f: impl CloneableFn<F, F> + 'static) -> Self {
+        Self {
+            log_size,
+            inner: InnerOracle::Univariate(Arc::new(f)),
+        }
+    }
+
+    pub fn new_multivariate(log_size: usize, f: impl CloneableFn<F, Vec<F>> + 'static) -> Self {
+        Self {
+            log_size,
+            inner: InnerOracle::Multivariate(Arc::new(f)),
+        }
+    }
+
+    pub fn new_constant(log_size: usize, c: F) -> Self {
+        Self {
+            log_size,
+            inner: InnerOracle::Constant(c),
+        }
+    }
+
+    //TODO: Remove this inner in the future and replace it with proper APIs
+    pub fn inner(&self) -> &InnerOracle<F> {
+        &self.inner
+    }
+}
+
+impl<F: 'static + Field> Clone for InnerOracle<F> {
     fn clone(&self) -> Self {
         match self {
-            Oracle::Univariate(f) => Oracle::Univariate(f.clone()),
-            Oracle::Multivariate(f) => Oracle::Multivariate(f.clone()),
-            Oracle::Constant(c) => Oracle::Constant(*c),
+            InnerOracle::Univariate(f) => InnerOracle::Univariate(f.clone()),
+            InnerOracle::Multivariate(f) => InnerOracle::Multivariate(f.clone()),
+            InnerOracle::Constant(c) => InnerOracle::Constant(*c),
         }
     }
 }
@@ -62,8 +101,26 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub id_or_const: Either<TrackerID, F>,
-    pub tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+    id_or_const: Either<TrackerID, F>,
+    tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+    log_size: usize,
+}
+
+impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> TrackedOracle<F, MvPCS, UvPCS>
+where
+    F: PrimeField,
+    MvPCS: PCS<F, Poly = MLE<F>>,
+    UvPCS: PCS<F, Poly = LDE<F>>,
+{
+    /// Returns the number of variables in the tracked oracle
+    pub fn log_size(&self) -> usize {
+        self.log_size
+    }
+
+
+    pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>> {
+        self.tracker.clone()
+    }
 }
 
 // Serialization for tracked oracle
@@ -162,8 +219,12 @@ where
 
     #[inline]
     fn add(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
+        debug_assert_eq!(
+            self.log_size, rhs.log_size,
+            "Cannot add TrackedOracles with different log_size"
+        );
         let id_or_const = self.compute_add(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -178,8 +239,13 @@ where
 
     #[inline]
     fn sub(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
+        // debug_assert_eq!(
+        //     self.log_size(),
+        //     rhs.log_size(),
+        //     "Cannot add TrackedOracles with different log_size"
+        // );
         let id_or_const = self.compute_sub(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -194,8 +260,13 @@ where
 
     #[inline]
     fn mul(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
+        // debug_assert_eq!(
+        //     self.log_size(),
+        //     rhs.log_size(),
+        //     "Cannot add TrackedOracles with different log_size"
+        // );
         let id_or_const = self.compute_mul(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -210,7 +281,7 @@ where
     #[inline]
     fn add(self, rhs: F) -> Self::Output {
         let id_or_const = self.compute_add_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -225,7 +296,7 @@ where
     #[inline]
     fn sub(self, rhs: F) -> Self::Output {
         let id_or_const = self.compute_sub_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -240,7 +311,7 @@ where
     #[inline]
     fn mul(self, rhs: F) -> Self::Output {
         let id_or_const = self.compute_mul_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone())
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
@@ -261,7 +332,7 @@ where
             }
             Either::Right(c) => Either::Right(-c),
         };
-        TrackedOracle::new(id_or_const, tracker)
+        TrackedOracle::new(id_or_const, tracker, self.log_size)
     }
 }
 
@@ -274,10 +345,12 @@ where
     pub fn new(
         id_or_const: Either<TrackerID, F>,
         tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+        log_size: usize,
     ) -> Self {
         Self {
             id_or_const,
             tracker,
+            log_size,
         }
     }
 

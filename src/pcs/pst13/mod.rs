@@ -49,7 +49,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     type SRS = PST13UniversalParams<E>;
     // Polynomial and its associated types
     type Poly = MLE<E::ScalarField>;
-    // Commitments and proofs
+    // comitments and proofs
     type Commitment = PST13Commitment<E>;
     type Proof = PST13Proof<E>;
     type BatchProof = PST13BatchProof<E, Self>;
@@ -347,13 +347,13 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     /// `poly_i` committed inside `comm`.
     fn batch_verify_inner(
         verifier_param: &Self::VerifierParam,
-        commitments: &[Self::Commitment],
+        comitments: &[Self::Commitment],
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
         _evals: &[E::ScalarField],
         batch_proof: &Self::BatchProof,
         transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<bool> {
-        let k = commitments.len();
+        let k = comitments.len();
         let ell = log2(k) as usize;
         let num_var = batch_proof.sum_check_proof.point.len();
         // challenge point t
@@ -371,7 +371,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         for (i, point) in points.iter().enumerate() {
             let eq_i_a2 = eq_eval(a2, point)?;
             scalars.push(eq_i_a2 * eq_t_list[i]);
-            bases.push(commitments[i].com);
+            bases.push(comitments[i].com);
         }
         let g_prime_commit = E::G1::msm_unchecked(&bases, &scalars);
 

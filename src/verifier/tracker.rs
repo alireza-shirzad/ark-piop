@@ -12,6 +12,7 @@ use crate::{
         PCSOpeningProof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
+    verifier::structs::oracle::InnerOracle,
 };
 use ark_ff::PrimeField;
 use itertools::MultiUnzip;
@@ -32,12 +33,12 @@ use super::{
 };
 
 /// The Tracker is a data structure for creating and managing virtual
-/// commnomials and their commitments. It is in charge of  
+/// commnomials and their comitments. It is in charge of  
 ///                      1) Recording the structure of virtual commnomials and
 ///                         their products
 ///                      2) Recording the structure of virtual commnomials and
 ///                         their products
-///                      3) Recording the commitments of virtual commnomials and
+///                      3) Recording the comitments of virtual commnomials and
 ///                         their products
 ///                      4) Providing methods for adding virtual commnomials
 ///                         together
@@ -97,7 +98,7 @@ where
         TrackerID(self.state.num_tracked_polys)
     }
 
-    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
+    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize,TrackerID)> {
         let comm: MvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -106,7 +107,7 @@ where
                 .as_ref()
                 .unwrap()
                 .mv_pcs_subproof
-                .commitments
+                .comitments
                 .get(&id);
             match comm_opt {
                 Some(value) => {
@@ -120,6 +121,7 @@ where
                 }
             }
         }
+        let nv = comm.log_size();
         let new_id: TrackerID = self.track_mat_mv_com(comm).unwrap();
 
         #[cfg(debug_assertions)]
@@ -130,7 +132,7 @@ where
                 id, new_id
             );
         }
-        Ok(new_id)
+        Ok((nv,new_id))
     }
 
     pub fn mv_commitment(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
@@ -141,12 +143,12 @@ where
             .cloned()
     }
 
-    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackerID> {
+    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize,TrackerID)> {
         let comm: UvPCS::Commitment;
         {
             // Scope the immutable borrow
             let proof = self.proof.as_ref().unwrap();
-            let comm_opt: Option<&UvPCS::Commitment> = proof.uv_pcs_subproof.commitments.get(&id);
+            let comm_opt: Option<&UvPCS::Commitment> = proof.uv_pcs_subproof.comitments.get(&id);
             match comm_opt {
                 Some(value) => {
                     comm = value.clone();
@@ -159,6 +161,7 @@ where
                 }
             }
         }
+        let log_degree = comm.log_size();
         let new_id: TrackerID = self.track_mat_uv_com(comm).unwrap();
 
         #[cfg(debug_assertions)]
@@ -169,7 +172,7 @@ where
                 id, new_id
             );
         }
-        Ok(new_id)
+        Ok((log_degree,new_id))
     }
 
     /// Track a materiazlied multivariate commitment
@@ -183,7 +186,7 @@ where
 
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                    Oracle::new_multivariate(comm.log_size(), move |point: Vec<F>| {
                         let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
                             SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
                                 id.0,
@@ -191,16 +194,11 @@ where
                             )),
                         )?;
                         Ok(query_res)
-                    })),
+                    }),
                 );
             }
             None => {
-                self.state.virtual_oracles.insert(
-                    id,
-                    Oracle::Multivariate(Arc::new(move |_point: Vec<F>| {
-                        panic!("Should not be called");
-                    })),
-                );
+                panic!("Should not be called");
             }
         }
 
@@ -226,19 +224,14 @@ where
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::Univariate(Arc::new(move |point: F| {
+                    Oracle::new_univariate(comm.log_size(), move |point: F| {
                         let query_res = uv_queries_clone.get(&(id, point)).unwrap();
                         Ok(*query_res)
-                    })),
+                    }),
                 );
             }
             None => {
-                self.state.virtual_oracles.insert(
-                    id,
-                    Oracle::Univariate(Arc::new(move |_point: F| {
-                        panic!("Should not be called");
-                    })),
-                );
+                panic!("Should not be called");
             }
         }
 
@@ -267,21 +260,24 @@ where
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
+        let log_size = o1_eval_box.log_size();
+        // debug_assert_eq!(log_size, o2_eval_box.log_size());
+
         // Create the new virtual oracle
-        let res_oracle = match (o1_eval_box, o2_eval_box) {
-            (Oracle::Multivariate(o1), Oracle::Multivariate(o2)) => {
+        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
+            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
-                }))
+                })
             }
-            (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
+            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
+                Oracle::new_univariate(log_size, move |point: F| {
                     Ok(o1_cloned(point)? + o2_cloned(point)?)
-                })))
+                })
             }
             _ => panic!("Mismatched oracle types"),
         };
@@ -297,21 +293,24 @@ where
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
+        let log_size = o1_eval_box.log_size();
+        // debug_assert_eq!(log_size, o2_eval_box.log_size());
+
         // Create the new virtual oracle
-        let res_oracle = match (o1_eval_box, o2_eval_box) {
-            (Oracle::Multivariate(o1), Oracle::Multivariate(o2)) => {
+        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
+            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? - o2_cloned(point.clone())?)
-                }))
+                })
             }
-            (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
+            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
+                Oracle::new_univariate(log_size, move |point: F| {
                     Ok(o1_cloned(point)? - o2_cloned(point)?)
-                })))
+                })
             }
             _ => panic!("Mismatched oracle types"),
         };
@@ -327,21 +326,23 @@ where
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
+        let log_size = o1_eval_box.log_size();
+        // debug_assert_eq!(log_size, o2_eval_box.log_size());
         // Create the new virtual oracle
-        let res_oracle = match (o1_eval_box, o2_eval_box) {
-            (Oracle::Multivariate(o1), Oracle::Multivariate(o2)) => {
+        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
+            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? * o2_cloned(point.clone())?)
-                }))
+                })
             }
-            (Oracle::Univariate(o1), Oracle::Univariate(o2)) => {
+            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
+                Oracle::new_univariate(log_size, move |point: F| {
                     Ok(o1_cloned(point)? * o2_cloned(point)?)
-                })))
+                })
             }
             _ => panic!("Mismatched oracle types"),
         };
@@ -357,22 +358,21 @@ where
 
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
+        let log_size = o1_eval_box.log_size();
 
         // Create the new virtual oracle
-        let res_oracle = match o1_eval_box {
-            Oracle::Multivariate(o1) => {
+        let res_oracle = match o1_eval_box.inner() {
+            InnerOracle::Multivariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? + scalar)
-                }))
+                })
             }
-            Oracle::Univariate(o1) => {
+            InnerOracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
-                    Ok(o1_cloned(point)? + scalar)
-                })))
+                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? + scalar))
             }
-            Oracle::Constant(c) => Oracle::Constant(*c + scalar),
+            InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c + scalar),
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
@@ -388,22 +388,20 @@ where
     pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
-
+        let log_size = o1_eval_box.log_size();
         // Create the new virtual oracle
-        let res_oracle = match o1_eval_box {
-            Oracle::Multivariate(o1) => {
+        let res_oracle = match o1_eval_box.inner() {
+            InnerOracle::Multivariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Multivariate(Arc::new(move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
                     Ok(o1_cloned(point.clone())? * scalar)
-                }))
+                })
             }
-            Oracle::Univariate(o1) => {
+            InnerOracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::Univariate(Arc::new(Box::new(move |point: F| -> SnarkResult<F> {
-                    Ok(o1_cloned(point)? * scalar)
-                })))
+                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? * scalar))
             }
-            Oracle::Constant(c) => Oracle::Constant(*c * scalar),
+            InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c * scalar),
         };
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
@@ -438,15 +436,15 @@ where
             F::zero(),
         );
         let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
-        match oracle {
-            Oracle::Multivariate(f) => f(equalized_point),
+        match oracle.inner() {
+            InnerOracle::Multivariate(f) => f(equalized_point),
             _ => Err(SnarkError::DummyError),
         }
     }
     pub fn query_uv(&self, oracle_id: TrackerID, point: F) -> SnarkResult<F> {
         let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
-        match oracle {
-            Oracle::Univariate(f) => f(point),
+        match oracle.inner() {
+            InnerOracle::Univariate(f) => f(point),
             _ => Err(SnarkError::DummyError),
         }
     }
@@ -483,7 +481,7 @@ where
         Ok(())
     }
 
-    // Set range commitments for the tracker
+    // Set range comitments for the tracker
     pub(crate) fn set_indexed_oracles(
         &mut self,
         range_tr_comms: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>>,
@@ -509,7 +507,7 @@ where
             .as_ref()
             .unwrap()
             .mv_pcs_subproof
-            .commitments
+            .comitments
             .get(&id)
             .cloned()
     }
@@ -521,11 +519,11 @@ where
             .as_ref()
             .unwrap()
             .mv_pcs_subproof
-            .commitments
+            .comitments
             .get(&id)
             .cloned()
         {
-            Some(comm) => Ok(comm.num_vars()),
+            Some(comm) => Ok(comm.log_size()),
             None => Err(SnarkError::from(PolyIOPErrors::InvalidVerifier(
                 "Commitment not found".to_string(),
             ))),
@@ -533,7 +531,7 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
+    fn batch_z_check_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
         let num_claims = self.state.mv_pcs_substate.zero_check_claims.len();
 
         if (num_claims == 0) {
@@ -542,8 +540,9 @@ where
         }
 
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
-        let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
+        let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
         let mut agg = self.track_oracle(zero_oracle);
+        
 
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
@@ -588,7 +587,7 @@ where
             .id();
         // create the succint eq(x, r) closure and virtual comm
         let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { eq_eval(&pt, r.as_ref()) };
-        let eq_x_r_oracle = Oracle::Multivariate(Arc::new(eq_x_r_closure));
+        let eq_x_r_oracle = Oracle::new_multivariate(max_nv, eq_x_r_closure);
         let eq_x_r_comm = self.track_oracle(eq_x_r_oracle);
         // create the relevant sumcheck claim, reduce the zero check claim to a sumcheck claim
         let new_sc_claim_comm = self.mul_oracles(z_check_aggr_id, eq_x_r_comm);
@@ -602,7 +601,7 @@ where
     // p_n = s_n, we verify c_1 * p_1 + c_2 * p_2 + ... + c_n * p_n = c_1 *
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
     #[instrument(level = "debug", skip_all)]
-    fn batch_s_check_claims(&mut self) -> SnarkResult<()> {
+    fn batch_s_check_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
         let num_claims = self.state.mv_pcs_substate.sum_check_claims.len();
 
         if num_claims == 0 {
@@ -612,7 +611,7 @@ where
 
         // Aggreage te the sumcheck claims
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
-        let zero_oracle = Oracle::Multivariate(Arc::new(zero_closure));
+        let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
         let mut agg = self.track_oracle(zero_oracle);
         let mut sc_sum = F::zero();
         // Iterate over the sumcheck claims and aggregate them
@@ -693,11 +692,11 @@ where
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Batch all the zero check claims into one
-        self.batch_z_check_claims()?;
+        self.batch_z_check_claims(max_nv)?;
         // Convert the only zero check claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // aggregate the sumcheck claims
-        self.batch_s_check_claims()?;
+        self.batch_s_check_claims(max_nv)?;
         // verify the sumcheck proof
         self.perform_single_sumcheck()?;
         // Verify the evaluation claims
@@ -831,7 +830,7 @@ where
             .mv_pcs_substate
             .materialized_comms
             .values()
-            .map(|p| p.num_vars())
+            .map(|p| p.log_size())
             .max()
             .ok_or(1)
             .unwrap()

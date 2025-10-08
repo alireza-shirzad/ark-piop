@@ -38,7 +38,7 @@ pub trait PCS<F: PrimeField>: Clone {
         + Eq
         + CanonicalSerialize
         + CanonicalDeserialize;
-    /// Commitments
+    /// comitments
     type Commitment: PolynomialCommitment<F>
         + Clone
         + CanonicalSerialize
@@ -137,7 +137,7 @@ pub trait PCS<F: PrimeField>: Clone {
     /// `poly_i` committed inside `comm`.
     fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
-        _commitments: &[Self::Commitment],
+        _comitments: &[Self::Commitment],
         _points: &[<Self::Poly as Polynomial<F>>::Point],
         _evals: &[F],
         _batch_proof: &Self::BatchProof,
@@ -262,7 +262,7 @@ pub trait PCS<F: PrimeField>: Clone {
     #[inline(always)]
     fn batch_verify(
         _verifier_param: &Self::VerifierParam,
-        _commitments: &[Self::Commitment],
+        _comitments: &[Self::Commitment],
         _points: &[<Self::Poly as Polynomial<F>>::Point],
         _evals: &[F],
         _batch_proof: &Self::BatchProof,
@@ -272,18 +272,18 @@ pub trait PCS<F: PrimeField>: Clone {
             tracing::span!(
                 Level::TRACE,
                 "pcs.batch_verify",
-                num_commitments = _commitments.len(),
-                size = _commitments.len(),
+                num_comitments = _comitments.len(),
+                size = _comitments.len(),
                 points = ?_points,
                 evals = ?_evals
             )
         } else {
-            tracing::span!(Level::DEBUG, "pcs.batch_verify", size = _commitments.len())
+            tracing::span!(Level::DEBUG, "pcs.batch_verify", size = _comitments.len())
         };
         let enter_guard = span.enter();
         let res = Self::batch_verify_inner(
             _verifier_param,
-            _commitments,
+            _comitments,
             _points,
             _evals,
             _batch_proof,
@@ -332,8 +332,8 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
 }
 
 pub trait PolynomialCommitment<F: Field>: Sized {
-    fn num_vars(&self) -> usize;
-    fn set_num_vars(&mut self, nv: usize);
+    fn log_size(&self) -> usize;
+    fn set_log_size(&mut self, nv: usize);
 }
 
 #[instrument(level = "debug", skip(srs_path))]

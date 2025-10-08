@@ -44,12 +44,12 @@ use std::{
 };
 use tracing::{debug, instrument};
 /// The Tracker is a data structure for creating and managing virtual
-/// polynomials and their commitments. It is in charge of  
+/// polynomials and their comitments. It is in charge of  
 ///                      1) Recording the structure of virtual polynomials and
 ///                         their products
 ///                      2) Recording the structure of virtual polynomials and
 ///                         their products
-///                      3) Recording the commitments of virtual polynomials and
+///                      3) Recording the comitments of virtual polynomials and
 ///                         their products
 ///                      4) Providing methods for adding virtual polynomials
 ///                         together
@@ -972,10 +972,10 @@ where
         Ok(Some(sc_subproof))
     }
 
-    /// Compiles the PCS subproof, a proof containg (a) a list of commitments to
+    /// Compiles the PCS subproof, a proof containg (a) a list of comitments to
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
-    /// commitments (c) a batch opening proof corresponding to the query map
+    /// comitments (c) a batch opening proof corresponding to the query map
     #[instrument(level = "debug", skip(self))]
     pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, MvPCS>> {
         let mut query_map: BTreeMap<(TrackerID, Vec<F>), F> = BTreeMap::new();
@@ -1023,14 +1023,14 @@ where
         Ok(PCSSubproof {
             query_map,
             opening_proof,
-            commitments: self.state.mv_pcs_substate.materialized_comms.clone(),
+            comitments: self.state.mv_pcs_substate.materialized_comms.clone(),
         })
     }
 
-    /// Compiles the PCS subproof, a proof containg (a) a list of commitments to
+    /// Compiles the PCS subproof, a proof containg (a) a list of comitments to
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
-    /// commitments (c) a batch opening proof corresponding to the query map
+    /// comitments (c) a batch opening proof corresponding to the query map
     #[instrument(level = "debug", skip(self))]
     pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, UvPCS>> {
         let mut query_map: BTreeMap<(TrackerID, F), F> = BTreeMap::new();
@@ -1078,7 +1078,7 @@ where
         Ok(PCSSubproof {
             query_map,
             opening_proof,
-            commitments: self.state.uv_pcs_substate.materialized_comms.clone(),
+            comitments: self.state.uv_pcs_substate.materialized_comms.clone(),
         })
     }
 

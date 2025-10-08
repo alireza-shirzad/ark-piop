@@ -91,7 +91,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
         // Assembling the indexed MLEs
         // let indexed_mles: BTreeMap<String, MLE<F>> = Self::gen_indexed_mles();
         let indexed_mles: BTreeMap<String, MLE<F>> = BTreeMap::new();
-        // Assemble the indexed commitments
+        // Assemble the indexed comitments
         let indexed_coms: BTreeMap<String, MvPCS::Commitment> =
             Self::gen_indexed_coms(&indexed_mles, mv_pcs_param.as_ref());
 
@@ -124,7 +124,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     //         .collect();
     //     indexed_mles
     // }
-    /// Generate the indexed commitments, these commitments are produced in the
+    /// Generate the indexed comitments, these comitments are produced in the
     /// setup and sent as a part of the vk to the verifier
     fn gen_indexed_coms(
         indexed_mles: &BTreeMap<String, MLE<F>>,

@@ -301,7 +301,7 @@ where
         self.tracker_rc.borrow_mut().next_id()
     }
 
-    /// Build the zkSQL proof from the claims and commitments
+    /// Build the zkSQL proof from the claims and comitments
     #[instrument(level = "debug", skip_all)]
     pub fn build_proof(&mut self) -> SnarkResult<Proof<F, MvPCS, UvPCS>> {
         self.tracker_rc.borrow_mut().compile_proof()

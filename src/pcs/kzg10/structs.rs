@@ -25,10 +25,10 @@ pub struct KZG10Commitment<E: Pairing> {
     pub nv: usize,
 }
 impl<E: Pairing> PolynomialCommitment<E::ScalarField> for KZG10Commitment<E> {
-    fn num_vars(&self) -> usize {
+    fn log_size(&self) -> usize {
         self.nv
     }
-    fn set_num_vars(&mut self, nv: usize) {
+    fn set_log_size(&mut self, nv: usize) {
         self.nv = nv;
     }
 }

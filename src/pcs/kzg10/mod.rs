@@ -169,7 +169,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     /// `poly_i` committed inside `comm`.
     fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
-        _commitments: &[Self::Commitment],
+        _comitments: &[Self::Commitment],
         _points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
         _evals: &[E::ScalarField],
         _batch_proof: &Self::BatchProof,
@@ -177,7 +177,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     ) -> SnarkResult<bool> {
         // The output bool is the and of all the individual verifications.
         let mut aggr_res = true;
-        _commitments
+        _comitments
             .iter()
             .zip(_points.iter())
             .zip(_batch_proof.0.iter())
