@@ -103,7 +103,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
 
         Ok(KZG10Commitment {
             com: commitment,
-            nv: poly.degree(),
+            nv: poly.degree() as u8,
         })
     }
 

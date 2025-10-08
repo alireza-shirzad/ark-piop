@@ -23,13 +23,13 @@ use derivative::Derivative;
 pub struct PST13Commitment<E: Pairing> {
     /// the actual commitment is an affine point.
     pub com: E::G1Affine,
-    pub nv: usize,
+    pub nv: u8,
 }
 impl<E: Pairing> PolynomialCommitment<E::ScalarField> for PST13Commitment<E> {
-    fn log_size(&self) -> usize {
+    fn log_size(&self) -> u8 {
         self.nv
     }
-    fn set_log_size(&mut self, nv: usize) {
+    fn set_log_size(&mut self, nv: u8) {
         self.nv = nv;
     }
 }

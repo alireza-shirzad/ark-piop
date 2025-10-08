@@ -25,6 +25,7 @@ tracing = "0.1.37"
 chrono = "0.4"
 tracing-chrome = "0.7"
 tracing-flame = "0.2"
+indexmap = "2.11.4"
 tracing-tree = "0.4.*"
 either = "1.8.0"
 serde = { version = "1.0", features = ["derive"] }

@@ -7,10 +7,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 use super::{VerifierEvalClaimMap, oracle::Oracle};
 use crate::{
@@ -22,7 +19,7 @@ use crate::{
     },
     transcript::Tr,
 };
-
+use indexmap::IndexMap;
 // Clone is only implemented if PCS satisfies the PCS<F>
 // bound, which guarantees that PCS::ProverParam
 #[derive(Derivative)]
@@ -36,7 +33,7 @@ where
 {
     pub transcript: Tr<F>,
     pub num_tracked_polys: usize,
-    pub virtual_oracles: HashMap<TrackerID, Oracle<F>>,
+    pub virtual_oracles: IndexMap<TrackerID, Oracle<F>>,
     pub mv_pcs_substate: VerifierPCSubstate<F, MvPCS>,
     pub uv_pcs_substate: VerifierPCSubstate<F, UvPCS>,
 }

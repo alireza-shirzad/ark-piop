@@ -110,7 +110,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
 
         Ok(PST13Commitment {
             com: commitment,
-            nv: poly.num_vars(),
+            nv: poly.num_vars() as u8,
         })
     }
 
@@ -406,7 +406,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             verifier_param,
             &PST13Commitment {
                 com: g_prime_commit.into_affine(),
-                nv: num_var,
+                nv: num_var as u8,
             },
             a2.to_vec().as_ref(),
             &tilde_g_eval,

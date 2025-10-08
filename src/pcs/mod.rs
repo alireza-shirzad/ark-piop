@@ -332,8 +332,8 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
 }
 
 pub trait PolynomialCommitment<F: Field>: Sized {
-    fn log_size(&self) -> usize;
-    fn set_log_size(&mut self, nv: usize);
+    fn log_size(&self) -> u8;
+    fn set_log_size(&mut self, nv: u8);
 }
 
 #[instrument(level = "debug", skip(srs_path))]

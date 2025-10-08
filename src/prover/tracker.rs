@@ -128,6 +128,11 @@ where
         TrackerID(self.state.num_tracked_polys)
     }
 
+    // Peek at the next TrackerID without incrementing the counter
+    pub(crate) fn peek_next_id(&mut self) -> TrackerID {
+        TrackerID(self.state.num_tracked_polys)
+    }
+
     /// Tracks a materialized polynomial.
     ///
     /// moves the polynomial to heap, assigns a TracckerID to it in map and

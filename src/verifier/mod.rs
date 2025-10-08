@@ -95,7 +95,7 @@ where
         let tracked_oracle = TrackedOracle::new(
             Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?),
             self.tracker_rc.clone(),
-            nv,
+            nv as usize,
         );
         trace!("assigned id {}", tracked_oracle.id());
         Ok(tracked_oracle)

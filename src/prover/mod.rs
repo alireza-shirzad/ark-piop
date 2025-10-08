@@ -153,7 +153,7 @@ where
         if tracing::level_enabled!(tracing::Level::TRACE) {
             Span::current().record("polynomial", debug(&polynomial));
         }
-        Ok(TrackedPoly::new(
+        let tracked_poly = TrackedPoly::new(
             Either::Left(
                 self.tracker_rc
                     .borrow_mut()
@@ -161,7 +161,9 @@ where
             ),
             num_vars,
             self.tracker_rc.clone(),
-        ))
+        );
+        tracing::debug!("assigned id {}", tracked_poly.id());
+        Ok(tracked_poly)
     }
 
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
@@ -173,7 +175,7 @@ where
     ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
         let num_vars = polynomial.num_vars();
         Span::current().record("num_vars", num_vars);
-        let tracked_poly =  TrackedPoly::new(
+        let tracked_poly = TrackedPoly::new(
             Either::Left(
                 self.tracker_rc
                     .borrow_mut()
@@ -299,6 +301,11 @@ where
     #[instrument(level = "debug", skip_all)]
     pub fn next_tracker_id(&mut self) -> TrackerID {
         self.tracker_rc.borrow_mut().next_id()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn peek_next_id(&mut self) -> TrackerID {
+        self.tracker_rc.borrow_mut().peek_next_id()
     }
 
     /// Build the zkSQL proof from the claims and comitments

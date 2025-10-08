@@ -98,7 +98,7 @@ where
         TrackerID(self.state.num_tracked_polys)
     }
 
-    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize,TrackerID)> {
+    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         let comm: MvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -132,7 +132,7 @@ where
                 id, new_id
             );
         }
-        Ok((nv,new_id))
+        Ok((nv as usize, new_id))
     }
 
     pub fn mv_commitment(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
@@ -143,7 +143,7 @@ where
             .cloned()
     }
 
-    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize,TrackerID)> {
+    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         let comm: UvPCS::Commitment;
         {
             // Scope the immutable borrow
@@ -172,7 +172,7 @@ where
                 id, new_id
             );
         }
-        Ok((log_degree,new_id))
+        Ok((log_degree as usize, new_id))
     }
 
     /// Track a materiazlied multivariate commitment
@@ -186,7 +186,7 @@ where
 
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::new_multivariate(comm.log_size(), move |point: Vec<F>| {
+                    Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<F>| {
                         let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
                             SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
                                 id.0,
@@ -224,7 +224,7 @@ where
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::new_univariate(comm.log_size(), move |point: F| {
+                    Oracle::new_univariate(comm.log_size() as usize, move |point: F| {
                         let query_res = uv_queries_clone.get(&(id, point)).unwrap();
                         Ok(*query_res)
                     }),
@@ -468,6 +468,7 @@ where
             .push(TrackerZerocheckClaim::new(poly_id));
     }
 
+    #[instrument(level = "debug", skip(self))]
     pub fn add_mv_eval_claim(
         &mut self,
         poly_id: TrackerID,
@@ -523,7 +524,7 @@ where
             .get(&id)
             .cloned()
         {
-            Some(comm) => Ok(comm.log_size()),
+            Some(comm) => Ok(comm.log_size() as usize),
             None => Err(SnarkError::from(PolyIOPErrors::InvalidVerifier(
                 "Commitment not found".to_string(),
             ))),
@@ -542,7 +543,6 @@ where
         let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
         let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
         let mut agg = self.track_oracle(zero_oracle);
-        
 
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
@@ -830,7 +830,7 @@ where
             .mv_pcs_substate
             .materialized_comms
             .values()
-            .map(|p| p.log_size())
+            .map(|p| p.log_size() as usize)
             .max()
             .ok_or(1)
             .unwrap()
