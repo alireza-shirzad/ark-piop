@@ -5,7 +5,7 @@ use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use either::Either;
 use structs::oracle::{Oracle, TrackedOracle};
-use tracing::{instrument, trace};
+use tracing::{field::debug, instrument, trace, Span};
 
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
@@ -101,6 +101,18 @@ where
         Ok(tracked_oracle)
     }
 
+    /// Track a materialized multivariate polynomial
+    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
+    /// map and returns the TrackerID
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: F) -> TrackedOracle<F, MvPCS, UvPCS> {
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("cnst", debug(&cnst));
+        }
+        let _ = self.tracker_rc.borrow_mut().gen_id();
+        TrackedOracle::new(Either::Right(cnst), self.tracker_rc.clone(), nv)
+    }
+
     #[instrument(level = "debug", skip_all)]
     pub fn track_oracle(&self, oracle: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
         let log_size = oracle.log_size();
@@ -185,7 +197,7 @@ where
         &mut self,
         id: TrackerID,
     ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
-let (degree,tracker_id)=self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?;
+        let (degree, tracker_id) = self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?;
         Ok(TrackedOracle::new(
             Either::Left(tracker_id),
             self.tracker_rc.clone(),

@@ -182,6 +182,7 @@ where
             }
             (Either::Left(id1), Either::Right(c2)) => {
                 let new_id = self.tracker.borrow_mut().add_scalar(*id1, -*c2);
+                
                 Either::Left(new_id)
             }
             (Either::Right(c1), Either::Left(id2)) => {

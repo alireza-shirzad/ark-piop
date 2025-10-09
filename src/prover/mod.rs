@@ -136,6 +136,9 @@ where
         if tracing::level_enabled!(tracing::Level::TRACE) {
             Span::current().record("cnst", debug(&cnst));
         }
+        let _ = self.tracker_rc
+            .borrow_mut()
+            .gen_id(); 
         TrackedPoly::new(Either::Right(cnst), nv, self.tracker_rc.clone())
     }
 

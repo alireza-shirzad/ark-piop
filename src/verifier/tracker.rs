@@ -254,16 +254,15 @@ where
         id
     }
 
+
+
     // TODO: Lots of code duplication here for add, sub, mul, etc. need to refactor.
     pub fn add_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
-        let log_size = o1_eval_box.log_size();
-        // debug_assert_eq!(log_size, o2_eval_box.log_size());
+        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
 
-        // Create the new virtual oracle
         let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
@@ -279,24 +278,46 @@ where
                     Ok(o1_cloned(point)? + o2_cloned(point)?)
                 })
             }
+            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(o1_cloned(point.clone())? + c2)
+                })
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(c1 + o2_cloned(point.clone())?)
+                })
+            }
+            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? + c2))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_univariate(log_size, move |point: F| Ok(c1 + o2_cloned(point)?))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
+                Oracle::new_constant(log_size, *c1 + *c2)
+            }
             _ => panic!("Mismatched oracle types"),
         };
-        // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
-        // Return the new TrackerID
         res_id
     }
 
     pub fn sub_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
-        let log_size = o1_eval_box.log_size();
-        // debug_assert_eq!(log_size, o2_eval_box.log_size());
+        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
 
-        // Create the new virtual oracle
         let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
@@ -312,23 +333,46 @@ where
                     Ok(o1_cloned(point)? - o2_cloned(point)?)
                 })
             }
+            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(o1_cloned(point.clone())? - c2)
+                })
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(c1 - o2_cloned(point.clone())?)
+                })
+            }
+            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? - c2))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_univariate(log_size, move |point: F| Ok(c1 - o2_cloned(point)?))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
+                Oracle::new_constant(log_size, *c1 - *c2)
+            }
             _ => panic!("Mismatched oracle types"),
         };
-        // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
-        // Return the new TrackerID
         res_id
     }
 
     pub fn mul_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
 
-        let log_size = o1_eval_box.log_size();
-        // debug_assert_eq!(log_size, o2_eval_box.log_size());
-        // Create the new virtual oracle
+        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
+
         let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
@@ -344,18 +388,42 @@ where
                     Ok(o1_cloned(point)? * o2_cloned(point)?)
                 })
             }
+            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(o1_cloned(point.clone())? * c2)
+                })
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                    Ok(c1 * o2_cloned(point.clone())?)
+                })
+            }
+            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
+                let o1_cloned = o1.clone();
+                let c2 = *c2;
+                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? * c2))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
+                let c1 = *c1;
+                let o2_cloned = o2.clone();
+                Oracle::new_univariate(log_size, move |point: F| Ok(c1 * o2_cloned(point)?))
+            }
+            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
+                Oracle::new_constant(log_size, *c1 * *c2)
+            }
             _ => panic!("Mismatched oracle types"),
         };
-        // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
-        // Return the new TrackerID
         res_id
     }
 
     pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
         let _ = self.gen_id(); // burn a tracker id to match how prover::add_scalar works
-
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let log_size = o1_eval_box.log_size();
