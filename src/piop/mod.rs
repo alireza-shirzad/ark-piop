@@ -38,15 +38,15 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         prover: &mut Prover<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
+        let struct_name = type_name_without_generics::<Self>();
         let span = if tracing::level_enabled!(Level::TRACE) {
             span!(
                 Level::TRACE,
                 "piop.prove",
-                piop = type_name_without_generics::<Self>(),
+                piop = struct_name,
                 ?input
             )
         } else {
-            let struct_name = type_name_without_generics::<Self>();
             // span name must be a string literal; record dynamic type name as a field instead
             span!(Level::DEBUG, "piop.prove", piop = struct_name)
         };
@@ -54,11 +54,17 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         #[cfg(feature = "honest-prover")]
         {
             // Nested span for honest prover check so it's visible alongside prove/verify.
-            let _hp_guard = span!(Level::TRACE, "piop.honest_prover_check",).entered();
+            let _hp_guard =
+                span!(Level::TRACE, "piop.honest_prover_check", piop = struct_name).entered();
             let new_prover = prover.deep_copy();
             let res = Self::honest_prover_check(input.deep_clone(new_prover));
             if let Err(ref e) = res {
-                tracing::error!(parent: &span, error = %e, "honest prover check failed");
+                tracing::error!(
+                    parent: &span,
+                    piop = struct_name,
+                    error = %e,
+                    "honest prover check failed"
+                );
             }
             drop(_hp_guard);
             res?
@@ -79,14 +85,14 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
         verifier: &mut Verifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
+        let struct_name = type_name_without_generics::<Self>();
         let span = if tracing::level_enabled!(Level::TRACE) {
             span!(
                 Level::TRACE,
                 "piop.verify",
-                piop = type_name_without_generics::<Self>(),
+                piop = struct_name,
             )
         } else {
-            let struct_name = type_name_without_generics::<Self>();
             span!(Level::DEBUG, "piop.verify", piop = struct_name)
         };
         let _guard = span.enter();
