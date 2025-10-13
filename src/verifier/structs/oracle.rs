@@ -9,6 +9,7 @@ use ark_ff::{Field, PrimeField};
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 use either::Either;
+use serde::de;
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
@@ -117,7 +118,6 @@ where
         self.log_size
     }
 
-
     pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>> {
         self.tracker.clone()
     }
@@ -219,10 +219,23 @@ where
 
     #[inline]
     fn add(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        debug_assert_eq!(
-            self.log_size, rhs.log_size,
-            "Cannot add TrackedOracles with different log_size"
-        );
+        #[cfg(debug_assertions)]
+        {
+            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
+                assert!(
+                    self.same_tracker(rhs),
+                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
+                    self.tracker.as_ptr(),
+                    rhs.tracker.as_ptr()
+                );
+                assert!(
+                    self.log_size() == rhs.log_size(),
+                    "Cannot add TrackedOracles with different log_size: {} and {}",
+                    self.log_size(),
+                    rhs.log_size()
+                );
+            }
+        }
         let id_or_const = self.compute_add(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
@@ -239,11 +252,23 @@ where
 
     #[inline]
     fn sub(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        // debug_assert_eq!(
-        //     self.log_size(),
-        //     rhs.log_size(),
-        //     "Cannot add TrackedOracles with different log_size"
-        // );
+        #[cfg(debug_assertions)]
+        {
+            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
+                assert!(
+                    self.same_tracker(rhs),
+                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
+                    self.tracker.as_ptr(),
+                    rhs.tracker.as_ptr()
+                );
+                assert!(
+                    self.log_size() == rhs.log_size(),
+                    "Cannot add TrackedOracles with different log_size: {} and {}",
+                    self.log_size(),
+                    rhs.log_size()
+                );
+            }
+        }
         let id_or_const = self.compute_sub(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
@@ -260,11 +285,23 @@ where
 
     #[inline]
     fn mul(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        // debug_assert_eq!(
-        //     self.log_size(),
-        //     rhs.log_size(),
-        //     "Cannot add TrackedOracles with different log_size"
-        // );
+        #[cfg(debug_assertions)]
+        {
+            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
+                assert!(
+                    self.same_tracker(rhs),
+                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
+                    self.tracker.as_ptr(),
+                    rhs.tracker.as_ptr()
+                );
+                assert!(
+                    self.log_size() == rhs.log_size(),
+                    "Cannot add TrackedOracles with different log_size: {} and {}",
+                    self.log_size(),
+                    rhs.log_size()
+                );
+            }
+        }
         let id_or_const = self.compute_mul(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
