@@ -5,7 +5,7 @@ use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use either::Either;
 use structs::oracle::{Oracle, TrackedOracle};
-use tracing::{field::debug, instrument, trace, Span};
+use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
@@ -105,7 +105,11 @@ where
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: F) -> TrackedOracle<F, MvPCS, UvPCS> {
+    pub fn track_mat_mv_cnst_oracle(
+        &mut self,
+        nv: usize,
+        cnst: F,
+    ) -> TrackedOracle<F, MvPCS, UvPCS> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
             Span::current().record("cnst", debug(&cnst));
         }

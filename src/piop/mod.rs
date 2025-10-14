@@ -40,12 +40,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ) -> SnarkResult<Self::ProverOutput> {
         let struct_name = type_name_without_generics::<Self>();
         let span = if tracing::level_enabled!(Level::TRACE) {
-            span!(
-                Level::TRACE,
-                "piop.prove",
-                piop = struct_name,
-                ?input
-            )
+            span!(Level::TRACE, "piop.prove", piop = struct_name, ?input)
         } else {
             // span name must be a string literal; record dynamic type name as a field instead
             span!(Level::DEBUG, "piop.prove", piop = struct_name)
@@ -87,11 +82,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ) -> SnarkResult<Self::VerifierOutput> {
         let struct_name = type_name_without_generics::<Self>();
         let span = if tracing::level_enabled!(Level::TRACE) {
-            span!(
-                Level::TRACE,
-                "piop.verify",
-                piop = struct_name,
-            )
+            span!(Level::TRACE, "piop.verify", piop = struct_name,)
         } else {
             span!(Level::DEBUG, "piop.verify", piop = struct_name)
         };

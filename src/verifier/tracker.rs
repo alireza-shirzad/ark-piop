@@ -254,8 +254,6 @@ where
         id
     }
 
-
-
     // TODO: Lots of code duplication here for add, sub, mul, etc. need to refactor.
     pub fn add_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
