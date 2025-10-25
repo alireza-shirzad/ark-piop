@@ -521,6 +521,13 @@ where
             .map_err(SnarkError::from)
     }
 
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<F> {
+        self.proof
+            .as_ref()
+            .and_then(|proof| proof.miscellaneous_field_elements.get(label).cloned())
+            .ok_or(SnarkError::DummyError)
+    }
+
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
         self.state
             .mv_pcs_substate

@@ -268,6 +268,13 @@ where
         res
     }
 
+    pub fn add_miscellaneous_field_element(&mut self, key: String, field: F) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .insert_miscellaneous_field(key, field);
+        Ok(())
+    }
+
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<()> {

@@ -720,6 +720,10 @@ where
         Ok(())
     }
 
+    pub fn insert_miscellaneous_field(&mut self, key: String, field: F) {
+        self.state.miscellaneous_field_elements.insert(key, field);
+    }
+
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate
@@ -1101,10 +1105,13 @@ where
         // number of variables needed
         let max_nv = self.equalize_mat_poly_nv();
         // Assemble and output the final proof
-        Ok(Proof {
+        let proof = Proof {
             sc_subproof: self.compile_sc_subproof(max_nv)?,
             mv_pcs_subproof: self.compile_mv_pcs_subproof()?,
             uv_pcs_subproof: self.compile_uv_pcs_subproof()?,
-        })
+            miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
+        };
+        self.state.miscellaneous_field_elements.clear();
+        Ok(proof)
     }
 }

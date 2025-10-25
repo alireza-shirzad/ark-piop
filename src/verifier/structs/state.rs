@@ -69,6 +69,7 @@ where
     pub sc_subproof: Option<SumcheckSubproof<F>>,
     pub mv_pcs_subproof: ProcessedPCSSubproof<F, MvPCS>,
     pub uv_pcs_subproof: ProcessedPCSSubproof<F, UvPCS>,
+    pub miscellaneous_field_elements: BTreeMap<String, F>,
 }
 
 impl<F, MvPCS, UvPCS> ProcessedProof<F, MvPCS, UvPCS>
@@ -84,6 +85,7 @@ where
             sc_subproof: proof.sc_subproof.clone(),
             mv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.mv_pcs_subproof),
             uv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.uv_pcs_subproof),
+            miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
         }
     }
 }

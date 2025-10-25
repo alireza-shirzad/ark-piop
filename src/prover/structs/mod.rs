@@ -74,6 +74,7 @@ where
 
     pub mv_pcs_substate: ProverPCSubstate<F, MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<F, UvPCS>,
+    pub miscellaneous_field_elements: BTreeMap<String, F>,
 }
 
 #[derive(Derivative)]

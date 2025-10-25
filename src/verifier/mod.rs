@@ -150,6 +150,10 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<F> {
+        RefCell::borrow(&self.tracker_rc).miscellaneous_field_element(label)
+    }
+
     pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
         self.tracker_rc
             .borrow_mut()

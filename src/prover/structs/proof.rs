@@ -28,6 +28,7 @@ where
     pub sc_subproof: Option<SumcheckSubproof<F>>,
     pub mv_pcs_subproof: PCSSubproof<F, MvPCS>,
     pub uv_pcs_subproof: PCSSubproof<F, UvPCS>,
+    pub miscellaneous_field_elements: BTreeMap<String, F>,
 }
 
 /// The PCS subproof of a SNARK for the ZKSQL protocol.
