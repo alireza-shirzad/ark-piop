@@ -1059,7 +1059,7 @@ where
             }
         }
 
-        let opening_proof: PCSOpeningProof<F, UvPCS>;
+                let opening_proof: PCSOpeningProof<F, UvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = UvPCS::open(
                 self.pk.uv_pcs_param.as_ref(),
