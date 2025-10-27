@@ -7,7 +7,7 @@ use crate::errors::InputShapeError;
 #[derive(Error, Debug)]
 pub enum ProverError {
     /// Error in the honest prover case
-    #[error("DbSNARK Honest Prover Error")]
+    #[error("TruthTable Honest Prover Error")]
     HonestProverError(#[from] HonestProverError),
 }
 

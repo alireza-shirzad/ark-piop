@@ -32,15 +32,15 @@ pub enum SnarkError {
     PolyIOPErrors(#[from] PolyIOPErrors),
 
     /// Error in the verifier phase
-    #[error("DbSNARK Verifier Error")]
+    #[error("TruthTable Verifier Error")]
     VerifierError(#[from] VerifierError),
 
     /// Error in the prover phase
-    #[error("DbSNARK Prover Error")]
+    #[error("TruthTable Prover Error")]
     ProverError(#[from] ProverError),
 
     /// Error in the setup phase
-    #[error("DbSNARK Prover Error")]
+    #[error("TruthTable Prover Error")]
     SetupError(#[from] SetupError),
 
     #[error("Error")]
