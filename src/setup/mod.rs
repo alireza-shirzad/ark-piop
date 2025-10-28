@@ -14,7 +14,7 @@ use ark_std::cfg_iter;
 #[cfg(feature = "parallel")]
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::BTreeMap, env::current_dir, marker::PhantomData, path::PathBuf, sync::Arc};
-use structs::{ProvingKey, VerifyingKey};
+use structs::{SNARKPk, SNARKVk};
 use tracing::instrument;
 //////// Body /////////
 
@@ -69,7 +69,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     #[instrument(level = "debug", skip(self))]
     pub fn gen_keys(
         self,
-    ) -> SnarkResult<(ProvingKey<F, MvPCS, UvPCS>, VerifyingKey<F, MvPCS, UvPCS>)> {
+    ) -> SnarkResult<(SNARKPk<F, MvPCS, UvPCS>, SNARKVk<F, MvPCS, UvPCS>)> {
         // Load or generate the multivariate SRS
         let mv_srs = load_or_generate_srs::<F, MvPCS>(
             &self.srs_path.join(format!("mv_{}.srs", self.log_size)),
@@ -96,14 +96,14 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
             Self::gen_indexed_coms(&indexed_mles, mv_pcs_param.as_ref());
 
         // Assemble the verifying key
-        let vk = VerifyingKey {
+        let vk = SNARKVk {
             log_size: self.log_size,
             mv_pcs_vk: mv_v_param,
             uv_pcs_vk: uv_v_param,
             indexed_coms,
         };
         // Assemble the proving key
-        let pk = ProvingKey {
+        let pk = SNARKPk {
             log_size: self.log_size,
             mv_pcs_param,
             uv_pcs_param,

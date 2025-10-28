@@ -1,5 +1,5 @@
 use super::structs::{
-    ProcessedProvingKey, ProverState,
+    ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, Proof},
 };
 use crate::prover::tracker::SnarkError::ProverError;
@@ -22,7 +22,7 @@ use crate::{
     piop::{structs::SumcheckProof, sum_check::SumCheck},
     setup::{
         errors::SetupError::NoRangePoly,
-        structs::{ProvingKey, VerifyingKey},
+        structs::{SNARKPk, SNARKVk},
     },
     structs::{
         PCSOpeningProof, SumcheckSubproof, TrackerID,
@@ -65,7 +65,7 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub pk: ProcessedProvingKey<F, MvPCS, UvPCS>,
+    pub pk: ProcessedSNARKPk<F, MvPCS, UvPCS>,
     pub state: ProverState<F, MvPCS, UvPCS>,
 }
 
@@ -75,16 +75,16 @@ where
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub fn new_from_pk(pk: ProvingKey<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: SNARKPk<F, MvPCS, UvPCS>) -> Self {
         let mut tracker = Self {
-            pk: ProcessedProvingKey::new_from_pk(&pk),
+            pk: ProcessedSNARKPk::new_from_pk(&pk),
             state: ProverState::default(),
         };
         tracker.add_vk_to_transcript(pk.vk.clone());
         tracker
     }
 
-    fn add_vk_to_transcript(&mut self, vk: VerifyingKey<F, MvPCS, UvPCS>) {
+    fn add_vk_to_transcript(&mut self, vk: SNARKVk<F, MvPCS, UvPCS>) {
         self.state
             .transcript
             .append_serializable_element(b"vk", &vk)

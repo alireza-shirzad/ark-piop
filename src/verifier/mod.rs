@@ -12,7 +12,7 @@ use crate::{
     errors::SnarkResult,
     pcs::PolynomialCommitment,
     prover::structs::proof::Proof,
-    setup::structs::VerifyingKey,
+    setup::structs::SNARKVk,
     structs::TrackerID,
 };
 use ark_ff::PrimeField;
@@ -52,7 +52,7 @@ where
 {
     // TODO: See if you can shorten this function
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_vk(vk: SNARKVk<F, MvPCS, UvPCS>) -> Self {
         let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
         let range_tr_polys: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>> = vk
             .indexed_coms

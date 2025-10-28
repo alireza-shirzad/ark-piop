@@ -7,7 +7,7 @@ use crate::{
     pcs::{PCS, PolynomialCommitment},
     piop::{errors::PolyIOPErrors, sum_check::SumCheck},
     prover::structs::proof::Proof,
-    setup::{errors::SetupError::NoRangePoly, structs::VerifyingKey},
+    setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     structs::{
         PCSOpeningProof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
@@ -26,7 +26,7 @@ use super::{
     TrackedOracle,
     errors::VerifierError,
     structs::{
-        ProcessedVerifyingKey,
+        ProcessedSNARKVk,
         oracle::Oracle,
         state::{ProcessedProof, VerifierState},
     },
@@ -52,7 +52,7 @@ pub struct VerifierTracker<
 > where
     F: PrimeField,
 {
-    vk: ProcessedVerifyingKey<F, MvPCS, UvPCS>,
+    vk: ProcessedSNARKVk<F, MvPCS, UvPCS>,
     state: VerifierState<F, MvPCS, UvPCS>,
     proof: Option<ProcessedProof<F, MvPCS, UvPCS>>,
 }
@@ -64,9 +64,9 @@ where
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
     // Create new verifier tracker with clean state given a verifying key
-    pub(crate) fn new_from_vk(vk: VerifyingKey<F, MvPCS, UvPCS>) -> Self {
+    pub(crate) fn new_from_vk(vk: SNARKVk<F, MvPCS, UvPCS>) -> Self {
         let mut tracker = Self {
-            vk: ProcessedVerifyingKey::new_from_vk(&vk),
+            vk: ProcessedSNARKVk::new_from_vk(&vk),
             state: VerifierState::default(),
             proof: None,
         };
@@ -74,7 +74,7 @@ where
         tracker
     }
 
-    fn add_vk_to_transcript(&mut self, vk: VerifyingKey<F, MvPCS, UvPCS>) {
+    fn add_vk_to_transcript(&mut self, vk: SNARKVk<F, MvPCS, UvPCS>) {
         self.state
             .transcript
             .append_serializable_element(b"vk", &vk)

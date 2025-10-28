@@ -4,7 +4,7 @@ pub mod state;
 use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     pcs::PCS,
-    setup::structs::VerifyingKey,
+    setup::structs::SNARKVk,
     structs::TrackerID,
 };
 use ark_ff::PrimeField;
@@ -20,7 +20,7 @@ pub type VerifierEvalClaimMap<F, PC> = HashSet<(
 )>;
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct ProcessedVerifyingKey<F, MvPCS, UvPCS>
+pub struct ProcessedSNARKVk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -32,13 +32,13 @@ where
     pub range_comms: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>>,
 }
 
-impl<F, MvPCS, UvPCS> ProcessedVerifyingKey<F, MvPCS, UvPCS>
+impl<F, MvPCS, UvPCS> ProcessedSNARKVk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub fn new_from_vk(vk: &VerifyingKey<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_vk(vk: &SNARKVk<F, MvPCS, UvPCS>) -> Self {
         Self {
             log_size: vk.log_size,
             mv_pcs_param: vk.mv_pcs_vk.clone(),

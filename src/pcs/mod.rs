@@ -24,7 +24,7 @@ use tracing::instrument;
 /// Note that for our usage of PCS, we do not require the hiding property.
 pub trait PCS<F: PrimeField>: Clone {
     /// Prover parameters
-    type ProverParam: Clone + Sync + Send;
+    type ProverParam: Clone + Sync + Send + CanonicalSerialize + CanonicalDeserialize;
     /// Verifier parameters
     type VerifierParam: Clone + CanonicalSerialize + CanonicalDeserialize;
     /// Structured reference string

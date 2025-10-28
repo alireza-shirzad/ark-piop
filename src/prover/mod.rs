@@ -13,7 +13,7 @@ use crate::{
     errors::SnarkResult,
     pcs::PCS,
     prover::structs::polynomial::TrackedPoly,
-    setup::structs::ProvingKey,
+    setup::structs::SNARKPk,
     structs::TrackerID,
 };
 use ark_ec::pairing::Pairing;
@@ -62,7 +62,7 @@ where
 {
     #[instrument(level = "debug", skip_all)]
     /// Create a prover from the proving key
-    pub fn new_from_pk(pk: ProvingKey<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: SNARKPk<F, MvPCS, UvPCS>) -> Self {
         let mut prover = Self::new_from_tracker(ProverTracker::new_from_pk(pk.clone()));
         let indexed_polys: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>> = pk
             .indexed_mles

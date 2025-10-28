@@ -12,7 +12,7 @@ use crate::{
     },
     pcs::PCS,
     prover::structs::polynomial::TrackedPoly,
-    setup::structs::ProvingKey,
+    setup::structs::SNARKPk,
     structs::{
         TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
@@ -94,7 +94,7 @@ where
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct ProcessedProvingKey<F, MvPCS, UvPCS>
+pub struct ProcessedSNARKPk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -106,13 +106,13 @@ where
     pub indexed_mles: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>>,
 }
 
-impl<F, MvPCS, UvPCS> ProcessedProvingKey<F, MvPCS, UvPCS>
+impl<F, MvPCS, UvPCS> ProcessedSNARKPk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
     UvPCS: PCS<F, Poly = LDE<F>>,
 {
-    pub fn new_from_pk(pk: &ProvingKey<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: &SNARKPk<F, MvPCS, UvPCS>) -> Self {
         Self {
             log_size: pk.log_size,
             mv_pcs_param: Arc::clone(&pk.mv_pcs_param),
