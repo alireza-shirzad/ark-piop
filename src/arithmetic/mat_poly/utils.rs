@@ -1,7 +1,10 @@
 use ark_ff::{Field, PrimeField};
-use ark_poly::DenseMultilinearExtension;
+use ark_poly::{
+    DenseMVPolynomial, DenseMultilinearExtension,
+    multivariate::{SparsePolynomial, SparseTerm, Term},
+};
 use ark_std::cfg_iter_mut;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(feature = "parallel")]
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
@@ -75,6 +78,54 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
     let mle = MLE::from_evaluations_vec(r.len(), evals);
 
     Ok(Arc::new(mle))
+}
+
+/// Build the multivariate sparse representation of eq(x, r).
+pub fn build_sparse_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<SparsePolynomial<F, SparseTerm>> {
+    if r.is_empty() {
+        return Err(ArithErrors::InvalidParameters("r length is 0".to_string()).into());
+    }
+
+    let mut terms: BTreeMap<Vec<usize>, F> = BTreeMap::new();
+    terms.insert(Vec::new(), F::one());
+
+    for (idx, &ri) in r.iter().enumerate() {
+        let mut next_terms: BTreeMap<Vec<usize>, F> = BTreeMap::new();
+        let const_factor = F::one() - ri;
+        let linear_factor = ri + ri - F::one();
+
+        for (mon, coeff) in terms.iter() {
+            let const_coeff = *coeff * const_factor;
+            if !const_coeff.is_zero() {
+                next_terms
+                    .entry(mon.clone())
+                    .and_modify(|c| *c += const_coeff)
+                    .or_insert(const_coeff);
+            }
+
+            let mut mon_with_var = mon.clone();
+            mon_with_var.push(idx);
+            let linear_coeff = *coeff * linear_factor;
+            if !linear_coeff.is_zero() {
+                next_terms
+                    .entry(mon_with_var)
+                    .and_modify(|c| *c += linear_coeff)
+                    .or_insert(linear_coeff);
+            }
+        }
+
+        terms = next_terms;
+    }
+
+    let coeffs = terms
+        .into_iter()
+        .map(|(mon, coeff)| {
+            let sparse_term = SparseTerm::new(mon.into_iter().map(|i| (i, 1)).collect());
+            (coeff, sparse_term)
+        })
+        .collect();
+
+    Ok(SparsePolynomial::from_coefficients_vec(r.len(), coeffs))
 }
 /// This function build the eq(x, r) polynomial for any given r, and output the
 /// evaluation of eq(x, r) in its vector form.
