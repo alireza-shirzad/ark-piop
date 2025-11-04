@@ -67,9 +67,7 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     /// configuration in the `KeyGenerator` struct
     #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip(self))]
-    pub fn gen_keys(
-        self,
-    ) -> SnarkResult<(SNARKPk<F, MvPCS, UvPCS>, SNARKVk<F, MvPCS, UvPCS>)> {
+    pub fn gen_keys(self) -> SnarkResult<(SNARKPk<F, MvPCS, UvPCS>, SNARKVk<F, MvPCS, UvPCS>)> {
         // Load or generate the multivariate SRS
         let mv_srs = load_or_generate_srs::<F, MvPCS>(
             &self.srs_path.join(format!("mv_{}.srs", self.log_size)),

@@ -4,7 +4,11 @@ use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
 use derivative::Derivative;
-use std::{collections::BTreeMap, io::{Read, Write}, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+    sync::Arc,
+};
 // Clone is only implemented if PCS satisfies the PCS<F>
 // bound, which guarantees that PCS::ProverParam
 
@@ -64,14 +68,8 @@ where
 
     fn serialized_size(&self, compress: Compress) -> usize {
         let mut size = self.log_size.serialized_size(compress);
-        size += self
-            .mv_pcs_param
-            .as_ref()
-            .serialized_size(compress);
-        size += self
-            .uv_pcs_param
-            .as_ref()
-            .serialized_size(compress);
+        size += self.mv_pcs_param.as_ref().serialized_size(compress);
+        size += self.uv_pcs_param.as_ref().serialized_size(compress);
         size += self.indexed_mles.serialized_size(compress);
         size += self.vk.serialized_size(compress);
         size
@@ -95,14 +93,11 @@ where
         validate: Validate,
     ) -> Result<Self, SerializationError> {
         let log_size = usize::deserialize_with_mode(&mut reader, compress, validate)?;
-        let mv_param =
-            MvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
-        let uv_param =
-            UvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
+        let mv_param = MvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
+        let uv_param = UvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
         let indexed_mles =
             BTreeMap::<String, MLE<F>>::deserialize_with_mode(&mut reader, compress, validate)?;
-        let vk =
-            SNARKVk::<F, MvPCS, UvPCS>::deserialize_with_mode(reader, compress, validate)?;
+        let vk = SNARKVk::<F, MvPCS, UvPCS>::deserialize_with_mode(reader, compress, validate)?;
 
         Ok(Self {
             log_size,

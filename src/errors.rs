@@ -13,8 +13,8 @@ pub type SnarkResult<T> = Result<T, SnarkError>;
 #[derive(Error, Debug)]
 #[allow(private_interfaces)]
 pub enum SnarkError {
-    #[error("The proof system does not support the given data type")]
-    DataTypeNotSupported,
+    #[error("Arithmetic data type error")]
+    DataTypeError(#[from] crate::arithmetic::errors::DataTypeError),
 
     #[error("Error")]
     TranscriptErrors(#[from] TranscriptError),
