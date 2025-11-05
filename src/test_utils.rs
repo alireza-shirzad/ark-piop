@@ -7,8 +7,19 @@ use crate::{
     verifier::Verifier,
 };
 use ark_ff::{Field, PrimeField};
-use std::sync::Once;
-use tracing::instrument;
+use std::{
+    io::Write as _,
+    sync::Once,
+    time::{Duration, Instant},
+};
+use tracing::{
+    Subscriber, instrument,
+    span::{Attributes, Id},
+};
+use tracing_subscriber::{
+    layer::{Context, Layer},
+    registry::LookupSpan,
+};
 
 /// Compute the JSON log file path for test tracing.
 ///
@@ -122,6 +133,7 @@ pub fn init_tracing_for_tests() {
             .with_indent_lines(true)
             .with_bracketed_fields(true)
             .with_timer(tracing_tree::time::Uptime::default()) // time since process start
+            .with_verbose_exit(true)
             .with_span_modes(true); // labels like `open`/`close`
 
         // Layer 2: JSON logs to a file (fresh file per run)
@@ -156,8 +168,11 @@ pub fn init_tracing_for_tests() {
             .expect("failed to create tracing-flame output file");
         let _flame_guard: &'static _ = Box::leak(Box::new(flame_guard));
 
+        let span_timing_layer = SpanTimingLayer::default();
+
         let subscriber = tracing_subscriber::registry()
             .with(env_filter)
+            .with(span_timing_layer)
             .with(stdout_layer)
             .with(json_layer)
             .with(chrome_layer)
@@ -213,4 +228,117 @@ pub fn bench_prelude<
 >() -> Result<(Prover<F, MvPCS, UvPCS>, Verifier<F, MvPCS, UvPCS>), SnarkError> {
     init_tracing_for_tests();
     prelude_with_vars::<F, MvPCS, UvPCS>(20)
+}
+
+#[derive(Default)]
+struct SpanTimingLayer;
+
+#[derive(Default)]
+struct SpanTiming {
+    first_enter_wall: Option<chrono::DateTime<chrono::Local>>,
+    first_enter_instant: Option<Instant>,
+    enter_stack: Vec<Instant>,
+    busy: Duration,
+    enters: u64,
+}
+
+impl<S> Layer<S> for SpanTimingLayer
+where
+    S: Subscriber + for<'span> LookupSpan<'span>,
+{
+    fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            span.extensions_mut().insert(SpanTiming::default());
+        }
+    }
+
+    fn on_enter(&self, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let mut extensions = span.extensions_mut();
+            let data = match extensions.get_mut::<SpanTiming>() {
+                Some(existing) => existing,
+                None => {
+                    extensions.insert(SpanTiming::default());
+                    extensions
+                        .get_mut::<SpanTiming>()
+                        .expect("timing layer inserted span data")
+                }
+            };
+            let now = Instant::now();
+            if data.first_enter_instant.is_none() {
+                data.first_enter_instant = Some(now);
+                data.first_enter_wall = Some(chrono::Local::now());
+            }
+            data.enter_stack.push(now);
+            data.enters = data.enters.saturating_add(1);
+        }
+    }
+
+    fn on_exit(&self, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+            let mut extensions = span.extensions_mut();
+            let Some(data) = extensions.get_mut::<SpanTiming>() else {
+                return;
+            };
+            if let Some(start) = data.enter_stack.pop() {
+                let now = Instant::now();
+                data.busy += now.duration_since(start);
+            }
+        }
+    }
+
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(&id) {
+            let mut extensions = span.extensions_mut();
+            if let Some(mut data) = extensions.remove::<SpanTiming>() {
+                let now = Instant::now();
+                while let Some(start) = data.enter_stack.pop() {
+                    data.busy += now.duration_since(start);
+                }
+
+                let Some(first_enter) = data.first_enter_instant else {
+                    return;
+                };
+                let total_elapsed = now.duration_since(first_enter);
+                let start_wall = data
+                    .first_enter_wall
+                    .unwrap_or_else(|| chrono::Local::now());
+                let end_wall = chrono::Local::now();
+
+                let depth = span.scope().from_root().count().saturating_sub(1);
+                let indent = "  ".repeat(depth);
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(
+                    stderr,
+                    "{indent}span {}::{} closed; wall={} busy={} entries={} ({} -> {})",
+                    span.metadata().target(),
+                    span.metadata().name(),
+                    format_duration(total_elapsed),
+                    format_duration(data.busy),
+                    data.enters,
+                    format_wall_time(start_wall),
+                    format_wall_time(end_wall),
+                );
+            }
+        }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.is_zero() {
+        return "0s".to_string();
+    }
+    if duration.as_secs() >= 1 {
+        format!("{:.3}s", duration.as_secs_f64())
+    } else if duration.as_millis() >= 1 {
+        format!("{:.3}ms", duration.as_secs_f64() * 1_000.0)
+    } else if duration.as_micros() >= 1 {
+        format!("{}us", duration.as_micros())
+    } else {
+        format!("{}ns", duration.as_nanos())
+    }
+}
+
+fn format_wall_time(ts: chrono::DateTime<chrono::Local>) -> String {
+    ts.format("%H:%M:%S%.3f").to_string()
 }
