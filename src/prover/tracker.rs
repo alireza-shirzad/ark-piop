@@ -770,7 +770,7 @@ where
     /// Used as a preprocessing step before batching polynomials,
     // TODO: This can be potentially reduced
     #[instrument(level = "debug", skip(self))]
-    fn equalize_mat_poly_nv(&mut self) -> usize {
+ fn equalize_mat_poly_nv(&mut self) -> usize {
         // calculate the max nv
         let max_nv: usize = self
             .state
@@ -792,22 +792,52 @@ where
         }
         // update the sumcheck claims because resizing messes stuff up
         // TODO: Do this normalization on the verifier side also
-       let mat_polys = &self.state.mv_pcs_substate.materialized_polys;
-       self.state.mv_pcs_substate.sum_check_claims
+        let old_sumcheck_claims = self.state.mv_pcs_substate.sum_check_claims.clone();
+        let true_sums: Vec<F> = old_sumcheck_claims
+            .iter()
+            .map(|claim| self.evaluations(claim.id()).iter().sum::<F>())
+            .collect();
+        for (claim, &true_sum) in self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
             .iter_mut()
-            .for_each(|claim| {
-                let nv = mat_polys[&claim.id()].num_vars();
-                let sum = claim.claim();
-                claim.set_claim(sum * F::from(1 << (max_nv - nv)))
-            });
+            .zip(true_sums.iter())
+        {
+            claim.set_claim(true_sum);
+        }
 
-        for claim in &mut self.state.mv_pcs_substate.eval_claims {
+
+        //         let claim_nvs: Vec<(usize, F)> = self
+        //     .state
+        //     .mv_pcs_substate
+        //     .sum_check_claims
+        //     .iter()
+        //     .map(|claim| {
+        //         let nv = self.poly_nv(claim.id());
+        //         let sum = claim.claim();
+        //         (nv, sum)
+        //     })
+        //     .collect();
+
+        // for (claim, (nv, sum)) in self
+        //     .state
+        //     .mv_pcs_substate
+        //     .sum_check_claims
+        //     .iter_mut()
+        //     .zip(claim_nvs.into_iter())
+        // {
+        //     claim.set_claim(sum * F::from(1 << (max_nv - nv)))
+        // }
+
+        for claim in self.state.mv_pcs_substate.eval_claims.iter_mut() {
             let mut point = claim.point().clone();
             point.resize(max_nv, F::zero());
             claim.set_point(point);
         }
         max_nv
     }
+
 
     /// converts all the zerocheck claims into a single zero claim
     /// technique: If p1=0, ..., pn=0, then c1*p1 + ... + cn*pn = 0 where ci-s
