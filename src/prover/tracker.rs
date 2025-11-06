@@ -30,7 +30,7 @@ use crate::{
     },
 };
 use ark_ff::PrimeField;
-use ark_poly::Polynomial;
+use ark_poly::{MultilinearExtension, Polynomial};
 use ark_std::cfg_iter;
 use derivative::Derivative;
 
@@ -45,14 +45,14 @@ use std::{
 use tracing::{debug, instrument};
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
-///                      1) Recording the structure of virtual polynomials and
-///                         their products
-///                      2) Recording the structure of virtual polynomials and
-///                         their products
-///                      3) Recording the comitments of virtual polynomials and
-///                         their products
-///                      4) Providing methods for adding virtual polynomials
-///                         together
+///  1) Recording the structure of virtual polynomials and
+///     their products
+///  2) Recording the structure of virtual polynomials and
+///     their products
+///  3) Recording the comitments of virtual polynomials and
+///     their products
+///  4) Providing methods for adding virtual polynomials
+///     together
 
 // Clone is only implemented if PCS satisfies the PCS<F>
 // bound, which guarantees that PCS::ProverParam
@@ -785,29 +785,23 @@ where
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv != max_nv {
-                // TODO: Fix this, just change the nv instead of cloning
-                let new_poly = Arc::new(MLE::new(poly.mat_mle().clone(), Some(max_nv)));
-                *poly = new_poly;
+                let inner_poly = Arc::get_mut(poly).unwrap();
+                let inner = std::mem::take(inner_poly.mat_mle_mut());
+                *poly = Arc::new(MLE::new(inner, Some(max_nv)));
             }
         }
         // update the sumcheck claims because resizing messes stuff up
         // TODO: Do this normalization on the verifier side also
-        let old_sumcheck_claims = self.state.mv_pcs_substate.sum_check_claims.clone();
-        let true_sums: Vec<F> = old_sumcheck_claims
-            .iter()
-            .map(|claim| self.evaluations(claim.id()).iter().sum::<F>())
-            .collect();
-        for (claim, &true_sum) in self
-            .state
-            .mv_pcs_substate
-            .sum_check_claims
+       let mat_polys = &self.state.mv_pcs_substate.materialized_polys;
+       self.state.mv_pcs_substate.sum_check_claims
             .iter_mut()
-            .zip(true_sums.iter())
-        {
-            claim.set_claim(true_sum);
-        }
+            .for_each(|claim| {
+                let nv = mat_polys[&claim.id()].num_vars();
+                let sum = claim.claim();
+                claim.set_claim(sum * F::from(1 << (max_nv - nv)))
+            });
 
-        for claim in self.state.mv_pcs_substate.eval_claims.iter_mut() {
+        for claim in &mut self.state.mv_pcs_substate.eval_claims {
             let mut point = claim.point().clone();
             point.resize(max_nv, F::zero());
             claim.set_point(point);
@@ -823,7 +817,7 @@ where
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
         let num_claims = self.state.mv_pcs_substate.zero_check_claims.len();
 
-        if (num_claims == 0) {
+        if num_claims == 0 {
             debug!("No zerocheck claims to batch",);
             return Ok(());
         }
@@ -857,7 +851,7 @@ where
     fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, F>> {
         let num_claims = self.state.mv_pcs_substate.sum_check_claims.len();
 
-        if (num_claims == 0) {
+        if num_claims == 0 {
             debug!("No sumcheck claims to batch",);
             return Ok(BTreeMap::new());
         }
@@ -903,7 +897,7 @@ where
     /// challenge r
     #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
-        if (self.state.mv_pcs_substate.zero_check_claims.is_empty()) {
+        if self.state.mv_pcs_substate.zero_check_claims.is_empty() {
             debug!("No zerocheck claims to convert to sumcheck claims",);
             return Ok(());
         }
