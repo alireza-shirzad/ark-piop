@@ -733,6 +733,7 @@ where
     }
 
     // TODO: Is this only used to be compatible with the hyperplonk code?
+    #[instrument(level = "debug", skip_all)]
     pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<F> {
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
