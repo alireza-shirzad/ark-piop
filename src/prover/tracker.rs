@@ -378,7 +378,6 @@ where
     /// Get the number of variables of a polynomial, by its TrackerID
     pub fn poly_nv(&self, id: TrackerID) -> usize {
         self.state.num_vars.get(&id).copied().unwrap()
-        
     }
 
     /// Adds/Subtracts two polynomials together
@@ -398,21 +397,27 @@ where
             (Some(_), None, Some(_), None) => {
                 new.push((F::one(), vec![p1]));
                 new.push((sign_coeff, vec![p2]));
-            },
+            }
 
             // p1: materialized, p2: virtual
             (Some(_), None, None, Some(p2)) => {
                 new.push((F::one(), vec![p1]));
-                new.extend(p2.iter().map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())));
-            },
+                new.extend(
+                    p2.iter()
+                        .map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())),
+                );
+            }
             // p1: virtual, p2: materialized
             (None, Some(p1), Some(_), None) => {
                 new.push((sign_coeff, vec![p2]));
                 new.extend_from_slice(p1);
-            },
+            }
             (None, Some(p1), None, Some(p2)) => {
                 new.extend_from_slice(p1);
-                new.extend(p2.iter().map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())));
+                new.extend(
+                    p2.iter()
+                        .map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())),
+                );
             }
             (None, None, _, _) => panic!("Unknown p1 TrackerID {p1:?}"),
             (_, _, None, None) => panic!("Unknown p2 TrackerID {p2:?}"),
@@ -461,13 +466,13 @@ where
                     prod.push(p1);
                     new.push((coeff, prod));
                 });
-            }, 
+            }
             (None, Some(p), Some(_), None) => {
                 p.iter().cloned().for_each(|(coeff, mut prod)| {
                     prod.push(p2);
                     new.push((coeff, prod));
                 });
-            },
+            }
             // Case 3: both p1 and p2 are virtual
             (None, Some(p1), None, Some(p2)) => {
                 for (coeff1, prod1) in p1 {
@@ -477,7 +482,7 @@ where
                         new.push((*coeff1 * *coeff2, prod1));
                     }
                 }
-            },
+            }
             (_, _, _, _) => unreachable!(),
         };
         self.track_virt_poly(new)
@@ -512,7 +517,7 @@ where
         if let Some(mat_poly) = self.state.mv_pcs_substate.materialized_polys.get(&id) {
             return mat_poly.clone(); // already materialized
         }
-        let virt_poly = self.state.virtual_polys[&id].clone();  // Invariant: contains only material PolyIDs
+        let virt_poly = self.state.virtual_polys[&id].clone(); // Invariant: contains only material PolyIDs
 
         // figure out the number of variables, assume they all have this nv
         let first_id = virt_poly[0].1[0];
@@ -709,7 +714,7 @@ where
     /// Used as a preprocessing step before batching polynomials,
     // TODO: This can be potentially reduced
     #[instrument(level = "debug", skip(self))]
- fn equalize_mat_poly_nv(&mut self) -> usize {
+    fn equalize_mat_poly_nv(&mut self) -> usize {
         // calculate the max nv
         let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
 
@@ -721,13 +726,8 @@ where
                 *poly = Arc::new(MLE::new(inner, Some(max_nv)));
             }
         }
-        
 
-        for claim in &mut self
-            .state
-            .mv_pcs_substate
-            .sum_check_claims
-        {
+        for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             let nv = self.state.num_vars[&claim.id()];
             claim.set_claim(claim.claim() * F::from(1 << (max_nv - nv)))
         }
@@ -739,7 +739,6 @@ where
         }
         max_nv
     }
-
 
     /// converts all the zerocheck claims into a single zero claim
     /// technique: If p1=0, ..., pn=0, then c1*p1 + ... + cn*pn = 0 where ci-s

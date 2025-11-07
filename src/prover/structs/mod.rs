@@ -93,8 +93,6 @@ where
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
 }
 
-
-
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct ProcessedSNARKPk<F, MvPCS, UvPCS>
