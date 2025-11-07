@@ -163,6 +163,7 @@ where
             .mv_pcs_substate
             .materialized_polys
             .insert(poly_id, polynomial.clone());
+        self.state.num_vars.insert(poly_id, polynomial.num_vars());
         // Return the new TrackerID
         poly_id
     }
@@ -248,9 +249,16 @@ where
     /// Tracks a virtual polynomial
     ///
     /// generates a new TrackerID and adds the virtual polynomial to the map
-    fn track_virt_poly(&mut self, virt: VirtualPoly<F>) -> TrackerID {
+    fn track_virt_poly(&mut self, p: VirtualPoly<F>) -> TrackerID {
         let poly_id = self.gen_id();
-        self.state.virtual_polys.insert(poly_id, virt);
+
+        let nv = p
+            .iter()
+            .flat_map(|(_, prod_ids)| prod_ids.iter().map(|id| self.state.num_vars[id]))
+            .max()
+            .unwrap_or_default();
+        self.state.num_vars.insert(poly_id, nv);
+        self.state.virtual_polys.insert(poly_id, p);
         // No need to commit to virtual polynomials
         poly_id
     }
@@ -309,7 +317,7 @@ where
 
             // b) otherwise follow the virtual-poly reference if it exists
             if let Some(vpoly) = self.state.virtual_polys.get(&id) {
-                for (_, child_ids) in vpoly {
+                for (_, child_ids) in vpoly.iter() {
                     stack.extend(child_ids.iter().copied());
                 }
             }
@@ -357,7 +365,7 @@ where
 
             // b) otherwise follow the virtual-poly reference if it exists
             if let Some(vpoly) = self.state.virtual_polys.get(&id) {
-                for (_, child_ids) in vpoly {
+                for (_, child_ids) in vpoly.iter() {
                     stack.extend(child_ids.iter().copied());
                 }
             }
@@ -369,92 +377,48 @@ where
 
     /// Get the number of variables of a polynomial, by its TrackerID
     pub fn poly_nv(&self, id: TrackerID) -> usize {
-        // If it's materialized, simply return the number of variables
-        let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
-
-        if let Some(mat_poly) = mat_poly {
-            return mat_poly.num_vars();
-        }
-
-        // look up the virtual polynomial
-        let virt_poly = self.state.virtual_polys.get(&id);
-        if virt_poly.is_none() {
-            panic!("Unknown poly id: {:?}", id);
-        }
-        let virt_poly: &VirtualPoly<F> = virt_poly.unwrap(); // Invariant: contains only material PolyIDs //TODO: Why?
-
-        // TODO: Wouldn't it be better to store the number of variables in the virtual
-        // polynomial?
-        // figure out the number of variables, assume they all have
-        // this nv Get the nv from the first polynomial of the first term of the
-        // virtual polynomial This polynomial might itself be virtual, so we
-        // need to recurse
-        let first_id = virt_poly[0].1[0];
-        let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
-        nv
+        self.state.num_vars.get(&id).copied().unwrap()
+        
     }
 
     /// Adds/Subtracts two polynomials together
     /// The two polynomials are identified by their TrackerIDs, Each one can be
     /// either materialized or virtual
     /// The output is a tracker to a new virtual polynomial
-    pub fn add_sub_polys(&mut self, p1_id: TrackerID, p2_id: TrackerID, do_sub: bool) -> TrackerID {
-        let sign_coeff: F = if do_sub { F::one().neg() } else { F::one() };
+    pub fn add_sub_polys(&mut self, p1: TrackerID, p2: TrackerID, do_sub: bool) -> TrackerID {
+        let sign_coeff: F = if do_sub { -F::one() } else { F::one() };
 
-        let p1_mat = self.mat_mv_poly(p1_id);
-        let p1_virt = self.virt_poly(p1_id);
-        let p2_mat = self.mat_mv_poly(p2_id);
-        let p2_virt = self.virt_poly(p2_id);
+        let p1_mat = self.mat_mv_poly(p1);
+        let p1_virt = self.virt_poly(p1);
+        let p2_mat = self.mat_mv_poly(p2);
+        let p2_virt = self.virt_poly(p2);
 
-        let mut new_virt_rep: VirtualPoly<F> = Vec::new(); // Invariant: contains only material TrackerIDs
-        match (
-            p1_mat.is_some(),
-            p1_virt.is_some(),
-            p2_mat.is_some(),
-            p2_virt.is_some(),
-        ) {
-            // Bad Case: p1 not found
-            (false, false, ..) => {
-                panic!("Unknown p1 TrackerID {:?}", p1_id);
+        let mut new = VirtualPoly::new(); // Invariant: contains only material TrackerIDs
+        match (p1_mat, p1_virt, p2_mat, p2_virt) {
+            (Some(_), None, Some(_), None) => {
+                new.push((F::one(), vec![p1]));
+                new.push((sign_coeff, vec![p2]));
+            },
+
+            // p1: materialized, p2: virtual
+            (Some(_), None, None, Some(p2)) => {
+                new.push((F::one(), vec![p1]));
+                new.extend(p2.iter().map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())));
+            },
+            // p1: virtual, p2: materialized
+            (None, Some(p1), Some(_), None) => {
+                new.push((sign_coeff, vec![p2]));
+                new.extend_from_slice(p1);
+            },
+            (None, Some(p1), None, Some(p2)) => {
+                new.extend_from_slice(p1);
+                new.extend(p2.iter().map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())));
             }
-            // Bad Case: p2 not found
-            (_, _, false, false) => {
-                panic!("Unknown p2 TrackerID {:?}", p2_id);
-            }
-            // Case 1: both p1 and p2 are materialized
-            (true, false, true, false) => {
-                new_virt_rep.push((F::one(), vec![p1_id]));
-                new_virt_rep.push((sign_coeff, vec![p2_id]));
-            }
-            // Case 2: p1 is materialized and p2 is virtual
-            (true, false, false, true) => {
-                new_virt_rep.push((F::one(), vec![p1_id]));
-                p2_virt.unwrap().iter().for_each(|(coeff, prod)| {
-                    new_virt_rep.push((sign_coeff * *coeff, prod.clone()));
-                });
-            }
-            // Case 3: p2 is materialized and p1 is virtual
-            (false, true, true, false) => {
-                p1_virt.unwrap().iter().for_each(|(coeff, prod)| {
-                    new_virt_rep.push((*coeff, prod.clone()));
-                });
-                new_virt_rep.push((sign_coeff, vec![p2_id]));
-            }
-            // Case 4: both p1 and p2 are virtual
-            (false, true, false, true) => {
-                p1_virt.unwrap().iter().for_each(|(coeff, prod)| {
-                    new_virt_rep.push((*coeff, prod.clone()));
-                });
-                p2_virt.unwrap().iter().for_each(|(coeff, prod)| {
-                    new_virt_rep.push((sign_coeff * *coeff, prod.clone()));
-                });
-            }
-            // Handling unexpected cases
-            _ => {
-                panic!("Internal tracker::add_polys error. This code should be unreachable");
-            }
+            (None, None, _, _) => panic!("Unknown p1 TrackerID {p1:?}"),
+            (_, _, None, None) => panic!("Unknown p2 TrackerID {p2:?}"),
+            (_, _, _, _) => unreachable!(),
         }
-        self.track_virt_poly(new_virt_rep)
+        self.track_virt_poly(new)
     }
 
     /// Adds two polynomials together
@@ -477,68 +441,46 @@ where
     /// The two polynomials are identified by their TrackerIDs, Each one can be
     /// either materialized or virtual
     /// The output is a tracker to a new virtual polynomial
-    pub fn mul_polys(&mut self, p1_id: TrackerID, p2_id: TrackerID) -> TrackerID {
-        let p1_mat = self.mat_mv_poly(p1_id);
-        let p1_virt = self.virt_poly(p1_id);
-        let p2_mat = self.mat_mv_poly(p2_id);
-        let p2_virt = self.virt_poly(p2_id);
+    pub fn mul_polys(&mut self, p1: TrackerID, p2: TrackerID) -> TrackerID {
+        let p1_mat = self.mat_mv_poly(p1);
+        let p1_virt = self.virt_poly(p1);
+        let p2_mat = self.mat_mv_poly(p2);
+        let p2_virt = self.virt_poly(p2);
 
-        let mut new_virt_rep = Vec::new(); // Invariant: contains only material TrackerIDs
-        match (
-            p1_mat.is_some(),
-            p1_virt.is_some(),
-            p2_mat.is_some(),
-            p2_virt.is_some(),
-        ) {
+        let mut new = VirtualPoly::new(); // Invariant: contains only material TrackerIDs
+        match (p1_mat, p1_virt, p2_mat, p2_virt) {
             // Bad Case: p1 not found
-            (false, false, ..) => {
-                panic!("Unknown p1 TrackerID {:?}", p1_id);
-            }
+            (None, None, ..) => panic!("Unknown p1 TrackerID {p1:?}"),
             // Bad Case: p2 not found
-            (_, _, false, false) => {
-                panic!("Unknown p2 TrackerID {:?}", p2_id);
-            }
+            (_, _, None, None) => panic!("Unknown p1 TrackerID {p2:?}"),
             // Case 1: both p1 and p2 are materialized
-            (true, false, true, false) => {
-                new_virt_rep.push((F::one(), vec![p1_id, p2_id]));
-            }
+            (Some(_), None, Some(_), None) => new.push((F::one(), vec![p1, p2])),
             // Case 2: p1 is materialized and p2 is virtual
-            (true, false, false, true) => {
-                let p2_rep = p2_virt.unwrap();
-                p2_rep.iter().for_each(|(coeff, prod)| {
-                    let mut new_prod = prod.clone();
-                    new_prod.push(p1_id);
-                    new_virt_rep.push((*coeff, new_prod));
+            (Some(_), None, None, Some(p)) => {
+                p.iter().cloned().for_each(|(coeff, mut prod)| {
+                    prod.push(p1);
+                    new.push((coeff, prod));
                 });
-            }
-            // Case 3: p2 is materialized and p1 is virtual
-            (false, true, true, false) => {
-                let p1_rep = p1_virt.unwrap();
-                p1_rep.iter().for_each(|(coeff, prod)| {
-                    let mut new_prod = prod.clone();
-                    new_prod.push(p2_id);
-                    new_virt_rep.push((*coeff, new_prod));
+            }, 
+            (None, Some(p), Some(_), None) => {
+                p.iter().cloned().for_each(|(coeff, mut prod)| {
+                    prod.push(p2);
+                    new.push((coeff, prod));
                 });
-            }
-            // Case 4: both p1 and p2 are virtual
-            (false, true, false, true) => {
-                let p1_rep = p1_virt.unwrap();
-                let p2_rep = p2_virt.unwrap();
-                p1_rep.iter().for_each(|(p1_coeff, p1_prod)| {
-                    p2_rep.iter().for_each(|(p2_coeff, p2_prod)| {
-                        let new_coeff = *p1_coeff * p2_coeff;
-                        let mut new_prod_vec = p1_prod.clone();
-                        new_prod_vec.extend(p2_prod.clone());
-                        new_virt_rep.push((new_coeff, new_prod_vec));
-                    })
-                });
-            }
-            // Handling unexpected cases
-            _ => {
-                panic!("Internal tracker::mul_polys error. This code should be unreachable");
-            }
-        }
-        self.track_virt_poly(new_virt_rep)
+            },
+            // Case 3: both p1 and p2 are virtual
+            (None, Some(p1), None, Some(p2)) => {
+                for (coeff1, prod1) in p1 {
+                    for (coeff2, prod2) in p2 {
+                        let mut prod1 = prod1.clone();
+                        prod1.extend_from_slice(prod2);
+                        new.push((*coeff1 * *coeff2, prod1));
+                    }
+                }
+            },
+            (_, _, _, _) => unreachable!(),
+        };
+        self.track_virt_poly(new)
     }
 
     /// Adds a scalar to a polynomial, returns a new virtual polynomial
@@ -552,18 +494,17 @@ where
 
     /// Multiplies a polynomial by a scalar, returns a new virtual polynomial
     pub fn mul_scalar(&mut self, poly_id: TrackerID, c: F) -> TrackerID {
-        let mut new_virt_rep = Vec::new(); // Invariant: contains only material TrackerIDs
-
-        let p_mat = self.mat_mv_poly(poly_id);
-        if p_mat.is_some() {
-            new_virt_rep.push((c, vec![poly_id]));
-        } else {
-            let p_virt = self.virt_poly(poly_id);
-            p_virt.unwrap().iter().for_each(|(coeff, prod)| {
-                new_virt_rep.push((*coeff * c, prod.clone()));
-            });
+        let mut new = VirtualPoly::new();
+        match self.mat_mv_poly(poly_id) {
+            Some(_) => new.push((c, vec![poly_id])),
+            None => {
+                let p = self.virt_poly(poly_id).unwrap();
+                p.iter().for_each(|(coeff, prod)| {
+                    new.push((*coeff * c, prod.clone()));
+                });
+            }
         }
-        self.track_virt_poly(new_virt_rep)
+        self.track_virt_poly(new)
     }
 
     fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<F>> {
@@ -571,10 +512,7 @@ where
         if let Some(mat_poly) = self.state.mv_pcs_substate.materialized_polys.get(&id) {
             return mat_poly.clone(); // already materialized
         }
-        let virt_poly = match self.state.virtual_polys.get(&id) {
-            Some(v) => v.clone(),
-            None => panic!("Unknown poly id: {:?}", id),
-        }; // Invariant: contains only material PolyIDs
+        let virt_poly = self.state.virtual_polys[&id].clone();  // Invariant: contains only material PolyIDs
 
         // figure out the number of variables, assume they all have this nv
         let first_id = virt_poly[0].1[0];
@@ -609,6 +547,7 @@ where
         // cache the result by updating the materialized poly map
         Arc::new(MLE::from_evaluations_vec(nv, evals))
     }
+
     pub fn evaluate_uv(&self, id: TrackerID, pt: &F) -> Option<F> {
         let mat_poly = self.state.uv_pcs_substate.materialized_polys.get(&id);
         // TODO: Change this to_vec
@@ -772,16 +711,8 @@ where
     #[instrument(level = "debug", skip(self))]
  fn equalize_mat_poly_nv(&mut self) -> usize {
         // calculate the max nv
-        let max_nv: usize = self
-            .state
-            .mv_pcs_substate
-            .materialized_polys
-            .values()
-            .map(|p| p.num_vars())
-            .max()
-            .ok_or(1)
-            .unwrap();
-        debug!("Maximum nv = {}", max_nv);
+        let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
+
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv != max_nv {
@@ -790,45 +721,16 @@ where
                 *poly = Arc::new(MLE::new(inner, Some(max_nv)));
             }
         }
-        // update the sumcheck claims because resizing messes stuff up
-        // TODO: Do this normalization on the verifier side also
-        let old_sumcheck_claims = self.state.mv_pcs_substate.sum_check_claims.clone();
-        let true_sums: Vec<F> = old_sumcheck_claims
-            .iter()
-            .map(|claim| self.evaluations(claim.id()).iter().sum::<F>())
-            .collect();
-        for (claim, &true_sum) in self
+        
+
+        for claim in &mut self
             .state
             .mv_pcs_substate
             .sum_check_claims
-            .iter_mut()
-            .zip(true_sums.iter())
         {
-            claim.set_claim(true_sum);
+            let nv = self.state.num_vars[&claim.id()];
+            claim.set_claim(claim.claim() * F::from(1 << (max_nv - nv)))
         }
-
-
-        //         let claim_nvs: Vec<(usize, F)> = self
-        //     .state
-        //     .mv_pcs_substate
-        //     .sum_check_claims
-        //     .iter()
-        //     .map(|claim| {
-        //         let nv = self.poly_nv(claim.id());
-        //         let sum = claim.claim();
-        //         (nv, sum)
-        //     })
-        //     .collect();
-
-        // for (claim, (nv, sum)) in self
-        //     .state
-        //     .mv_pcs_substate
-        //     .sum_check_claims
-        //     .iter_mut()
-        //     .zip(claim_nvs.into_iter())
-        // {
-        //     claim.set_claim(sum * F::from(1 << (max_nv - nv)))
-        // }
 
         for claim in self.state.mv_pcs_substate.eval_claims.iter_mut() {
             let mut point = claim.point().clone();

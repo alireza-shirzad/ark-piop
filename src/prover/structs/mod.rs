@@ -75,6 +75,7 @@ where
     pub mv_pcs_substate: ProverPCSubstate<F, MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<F, UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, F>,
+    pub num_vars: BTreeMap<TrackerID, usize>,
 }
 
 #[derive(Derivative)]
@@ -91,6 +92,8 @@ where
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
 }
+
+
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
