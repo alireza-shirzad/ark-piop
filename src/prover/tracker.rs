@@ -2,9 +2,11 @@ use super::structs::{
     ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, Proof},
 };
-use crate::prover::tracker::SnarkError::ProverError;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
 use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
+use crate::{
+    arithmetic::mat_poly::utils::evaluate_with_eq, prover::tracker::SnarkError::ProverError,
+};
 use crate::{
     arithmetic::{
         mat_poly::{
@@ -31,11 +33,11 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_poly::{MultilinearExtension, Polynomial};
-use ark_std::cfg_iter;
+use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
 
 #[cfg(feature = "parallel")]
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::prelude::*;
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet},
     mem::take,
@@ -513,44 +515,43 @@ where
     }
 
     fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<F>> {
-        // look up the virtual polynomial
-        if let Some(mat_poly) = self.state.mv_pcs_substate.materialized_polys.get(&id) {
-            return mat_poly.clone(); // already materialized
-        }
-        let virt_poly = self.state.virtual_polys[&id].clone(); // Invariant: contains only material PolyIDs
-
-        // figure out the number of variables, assume they all have this nv
-        let first_id = virt_poly[0].1[0];
-        let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
-
-        // calculate the evaluation of each product list
-        let prod_evaluations: Vec<Vec<F>> = virt_poly
-            .iter()
-            .map(|(coeff, prod)| {
-                let mut res = vec![*coeff; 2_usize.pow(nv as u32)];
-                prod.iter().for_each(|poly| {
-                    let poly_evals = self.evaluations(*poly);
-                    res = res
+        match self.mat_mv_poly(id) {
+            Some(mat_poly) => return mat_poly.clone(), // already materialized
+            None => {
+                let virt_poly = self.state.virtual_polys[&id].clone();
+                // Invariant: contains only material PolyIDs
+                assert!(
+                    virt_poly
                         .iter()
-                        .zip(poly_evals.iter())
-                        .map(|(a, b)| *a * b)
-                        .collect()
-                });
-                res
-            })
-            .collect();
-        // sum the evaluations of each product list
-        let mut evals = vec![F::zero(); 2_usize.pow(nv as u32)];
-        prod_evaluations.iter().for_each(|prod_eval| {
-            evals = evals
-                .iter()
-                .zip(prod_eval.iter())
-                .map(|(a, b)| *a + b)
-                .collect()
-        });
+                        .all(|(_, ids)| ids.iter().all(|id| self.mat_mv_poly(*id).is_some()))
+                );
+                // Ensure all the product polynomials have the same number of variables
+                assert_eq!(
+                    virt_poly
+                        .iter()
+                        .flat_map(|(_, ids)| ids.iter().map(|id| self.poly_nv(*id)))
+                        .collect::<HashSet<_>>()
+                        .len(),
+                    1
+                );
+                let nv = self.poly_nv(id);
 
-        // cache the result by updating the materialized poly map
-        Arc::new(MLE::from_evaluations_vec(nv, evals))
+                let evals =
+                    virt_poly
+                        .iter()
+                        .fold(vec![F::ZERO; 1 << nv], |mut acc, (coeff, products)| {
+                            let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
+                                cfg_iter_mut!(acc)
+                                    .zip(self.mat_mv_poly(*id).unwrap().evaluations())
+                                    .for_each(|(a, b)| *a *= b);
+                                acc
+                            });
+                            cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);
+                            acc
+                        });
+                Arc::new(MLE::from_evaluations_vec(nv, evals))
+            }
+        }
     }
 
     pub fn evaluate_uv(&self, id: TrackerID, pt: &F) -> Option<F> {
@@ -558,42 +559,63 @@ where
         // TODO: Change this to_vec
         mat_poly.map(|poly| poly.evaluate(pt))
     }
+
     /// Evaluates a polynomial at a point
     pub fn evaluate_mv(&self, id: TrackerID, pt: &[F]) -> Option<F> {
-        // if the poly is materialized, return the evaluation
-        let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
-        // TODO: Change this to_vec
-        if let Some(poly) = mat_poly {
-            return Some(evaluate_opt(poly, pt));
+        match self.state.mv_pcs_substate.materialized_polys.get(&id) {
+            Some(poly) => {
+                let nv = poly.mat_mle().num_vars;
+                let eq_eval = build_eq_x_r(&pt[..nv]).unwrap();
+                Some(evaluate_with_eq(poly, &eq_eval))
+            }
+            None => {
+                let p = self.virt_poly(id).unwrap();
+                // calculate the evaluation of each product list
+                let result = p
+                    .iter()
+                    .map(|(coeff, prod)| {
+                        *coeff
+                            * prod
+                                .iter()
+                                .map(|poly| self.evaluate_mv(*poly, pt).unwrap())
+                                .product::<F>()
+                    })
+                    .sum::<F>();
+                Some(result)
+            }
         }
+    }
 
-        // look up the virtual polynomial
-        let virt_poly = self.state.virtual_polys.get(&id);
-        if virt_poly.is_none() {
-            panic!("Unknown poly id: {:?}", id);
+    /// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
+    /// This assumes that `eq_evals` contains the evaluations of the eq polynomial for each number
+    /// of variables of the *actual* underlying `DenseMultilinearExtension` of the materialized polynomials.
+    pub fn evaluate_mv_with_eq_evals(
+        &self,
+        id: TrackerID,
+        eq_evals: &BTreeMap<usize, MLE<F>>,
+    ) -> Option<F> {
+        match self.state.mv_pcs_substate.materialized_polys.get(&id) {
+            Some(poly) => {
+                let nv = poly.mat_mle().num_vars;
+                Some(evaluate_with_eq(poly, &eq_evals[&nv]))
+            }
+            None => {
+                let p = self.virt_poly(id).unwrap();
+                let result = p
+                    .iter()
+                    .map(|(coeff, prod)| {
+                        *coeff
+                            * prod
+                                .iter()
+                                .map(|poly| {
+                                    self.evaluate_mv_with_eq_evals(*poly, eq_evals).unwrap()
+                                })
+                                .product::<F>()
+                    })
+                    .sum::<F>();
+                Some(result)
+            }
         }
-        let virt_poly = virt_poly.unwrap(); // Invariant: contains only material TrackerIDs
-
-        // calculate the evaluation of each product list
-        let prod_evals: Vec<F> = virt_poly
-            .iter()
-            .map(|(coeff, prod)| {
-                let mut res = *coeff;
-                prod.iter().for_each(|poly| {
-                    res *= self.evaluate_mv(*poly, pt).unwrap();
-                });
-                res
-            })
-            .collect();
-
-        // sum the evaluations of each product list
-        let mut eval = F::zero();
-        prod_evals.iter().for_each(|prod_eval| {
-            eval += prod_eval;
-        });
-
-        // return the eval
-        Some(eval)
     }
 
     /// Returns the evaluations of a polynomial on the boolean hypercube

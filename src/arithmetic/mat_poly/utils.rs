@@ -7,7 +7,7 @@ use ark_std::cfg_iter_mut;
 use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(feature = "parallel")]
-use rayon::iter::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
+use rayon::prelude::*;
 
 use crate::{arithmetic::errors::ArithErrors, errors::SnarkResult};
 
@@ -16,6 +16,14 @@ use super::mle::MLE;
 pub(crate) fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
     assert_eq!(poly.num_vars(), point.len());
     fix_variables(poly, point).evaluations()[0]
+}
+
+pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
+    assert_eq!(poly.mat_mle().num_vars, eq.num_vars());
+    ark_std::cfg_iter!(eq.mat_mle().evaluations)
+        .zip(&poly.mat_mle().evaluations)
+        .map(|(e, p)| *e * p)
+        .sum::<F>()
 }
 
 //TODO: Why do we need this when we have a fix-variables method for MLE? is it because of the way MLE fixes variables?
