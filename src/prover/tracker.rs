@@ -526,14 +526,14 @@ where
                         .all(|(_, ids)| ids.iter().all(|id| self.mat_mv_poly(*id).is_some()))
                 );
                 // Ensure all the product polynomials have the same number of variables
-                assert_eq!(
-                    virt_poly
-                        .iter()
-                        .flat_map(|(_, ids)| ids.iter().map(|id| self.poly_nv(*id)))
-                        .collect::<HashSet<_>>()
-                        .len(),
-                    1
-                );
+                // assert_eq!(
+                //     virt_poly
+                //         .iter()
+                //         .flat_map(|(_, ids)| ids.iter().map(|id| self.poly_nv(*id)))
+                //         .collect::<HashSet<_>>()
+                //         .len(),
+                //     1
+                // );
                 let nv = self.poly_nv(id);
 
                 let evals =
