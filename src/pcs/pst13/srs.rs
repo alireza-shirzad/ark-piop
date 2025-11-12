@@ -14,6 +14,8 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::Zero;
 use ark_std::rand::Rng;
 use core::{iter::FromIterator, panic};
+use rayon::iter::ParallelIterator;
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
 
 use std::{collections::LinkedList, sync::Arc};
 /// Evaluations over {0,1}^n for G1 or G2
@@ -144,8 +146,8 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
             if i != 0 {
                 let mul = eq.pop_back().unwrap();
                 base = base
-                    .into_iter()
-                    .zip(mul.iter())
+                    .into_par_iter()
+                    .zip(&mul.evaluations)
                     .map(|(a, b)| a * b)
                     .collect();
             }
