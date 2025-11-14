@@ -173,10 +173,10 @@ pub fn init_tracing_for_tests() {
         let subscriber = tracing_subscriber::registry()
             .with(env_filter)
             .with(span_timing_layer)
-            .with(stdout_layer)
-            .with(json_layer)
-            .with(chrome_layer)
-            .with(flame_layer);
+            .with(stdout_layer);
+            // .with(json_layer)
+            // .with(chrome_layer)
+            // .with(flame_layer);
 
         let _ = subscriber.try_init();
     });
