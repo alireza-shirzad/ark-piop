@@ -136,47 +136,12 @@ pub fn init_tracing_for_tests() {
             .with_verbose_exit(true)
             .with_span_modes(true); // labels like `open`/`close`
 
-        // Layer 2: JSON logs to a file (fresh file per run)
-        let level_suffix = env_filter
-            .max_level_hint()
-            .map(|lf| lf.to_string().to_uppercase())
-            .unwrap_or_else(|| "UNSPEC".to_string());
-        let json_path = compute_json_log_path(&level_suffix);
-        let json_layer = fmt::layer()
-            .json()
-            .pretty()
-            .with_ansi(false)
-            .with_span_events(FmtSpan::ENTER | FmtSpan::CLOSE)
-            .with_writer(move || {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&json_path)
-                    .expect("failed to open JSON log file for appending")
-            });
-
-        // Chrome tracing layer (writes to a .json trace file for chrome://tracing)
-        let chrome_path = compute_chrome_trace_path(&level_suffix);
-        let (chrome_layer, chrome_guard) = tracing_chrome::ChromeLayerBuilder::new()
-            .file(chrome_path)
-            .build();
-        let _guard: &'static _ = Box::leak(Box::new(chrome_guard));
-
-        // Flamegraph layer (writes a .folded stack file consumable by inferno/flamegraph)
-        let flame_path = compute_flame_path(&level_suffix);
-        let (flame_layer, flame_guard) = tracing_flame::FlameLayer::with_file(flame_path)
-            .expect("failed to create tracing-flame output file");
-        let _flame_guard: &'static _ = Box::leak(Box::new(flame_guard));
-
         let span_timing_layer = SpanTimingLayer::default();
 
         let subscriber = tracing_subscriber::registry()
             .with(env_filter)
             .with(span_timing_layer)
             .with(stdout_layer);
-            // .with(json_layer)
-            // .with(chrome_layer)
-            // .with(flame_layer);
 
         let _ = subscriber.try_init();
     });
