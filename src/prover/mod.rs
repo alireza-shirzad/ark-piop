@@ -31,7 +31,7 @@ use tracker::ProverTracker;
 /// A prover for the ZKSQL protocol.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
-pub struct Prover<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
+pub struct ArgProver<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -42,7 +42,7 @@ where
 
 /// Implement PartialEq for Prover
 /// Two provers are equal if they point to the same tracker
-impl<F: Pairing, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for Prover<F, MvPCS, UvPCS>
+impl<F: Pairing, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgProver<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -54,7 +54,7 @@ where
 }
 
 /// Prover implementation
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Prover<F, MvPCS, UvPCS>
+impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgProver<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -330,7 +330,7 @@ where
 
     #[cfg(any(feature = "test-utils", feature = "honest-prover"))]
     #[instrument(level = "debug", skip_all)]
-    pub fn deep_copy(&self) -> Prover<F, MvPCS, UvPCS> {
-        Prover::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
+    pub fn deep_copy(&self) -> ArgProver<F, MvPCS, UvPCS> {
+        ArgProver::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }
 }

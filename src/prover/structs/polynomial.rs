@@ -8,7 +8,7 @@ use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     pcs::PCS,
     piop::DeepClone,
-    prover::{Prover, tracker::ProverTracker},
+    prover::{ArgProver, tracker::ProverTracker},
     structs::TrackerID,
 };
 use ark_std::fmt::Debug;
@@ -256,7 +256,7 @@ where
 impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
     DeepClone<F, MvPCS, UvPCS> for TrackedPoly<F, MvPCS, UvPCS>
 {
-    fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self {
+    fn deep_clone(&self, new_prover: ArgProver<F, MvPCS, UvPCS>) -> Self {
         Self {
             id_or_const: self.id_or_const,
             log_size: self.log_size,

@@ -7,7 +7,7 @@ use crate::{
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkResult,
     pcs::PCS,
-    prover::Prover,
+    prover::ArgProver,
     verifier::Verifier,
 };
 pub mod errors;
@@ -35,7 +35,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ///
     /// This is a default wrapper that adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove(
-        prover: &mut Prover<F, MvPCS, UvPCS>,
+        prover: &mut ArgProver<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
         let struct_name = type_name_without_generics::<Self>();
@@ -100,7 +100,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ///
     /// This will be wrapped by `prove`, which adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove_inner(
-        prover: &mut Prover<F, MvPCS, UvPCS>,
+        prover: &mut ArgProver<F, MvPCS, UvPCS>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
 
@@ -126,5 +126,5 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
 ///
 /// Simply cloning the prover input interferes with the actual state of the prover in the protocol. Hence for honest prover checks we need to create a new prover instance and deep clone the input with this new prover instance.
 pub trait DeepClone<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
-    fn deep_clone(&self, new_prover: Prover<F, MvPCS, UvPCS>) -> Self;
+    fn deep_clone(&self, new_prover: ArgProver<F, MvPCS, UvPCS>) -> Self;
 }
