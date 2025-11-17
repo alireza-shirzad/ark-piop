@@ -25,7 +25,7 @@ use tracker::VerifierTracker;
 #[derive(Derivative)]
 #[derivative(Clone(bound = "MvPCS: PCS<F>"))]
 #[derivative(Clone(bound = "UvPCS: PCS<F>"))]
-pub struct Verifier<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
+pub struct ArgVerifier<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -33,7 +33,7 @@ where
 {
     tracker_rc: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
 }
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for Verifier<F, MvPCS, UvPCS>
+impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgVerifier<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -44,7 +44,7 @@ where
     }
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Verifier<F, MvPCS, UvPCS>
+impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgVerifier<F, MvPCS, UvPCS>
 where
     F: PrimeField,
     MvPCS: PCS<F, Poly = MLE<F>>,
@@ -225,7 +225,7 @@ where
     }
     #[instrument(level = "debug", skip_all)]
     #[cfg(feature = "test-utils")]
-    pub fn deep_copy(&self) -> Verifier<F, MvPCS, UvPCS> {
-        Verifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
+    pub fn deep_copy(&self) -> ArgVerifier<F, MvPCS, UvPCS> {
+        ArgVerifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }
 }

@@ -8,7 +8,7 @@ use crate::{
     errors::SnarkResult,
     pcs::PCS,
     prover::ArgProver,
-    verifier::Verifier,
+    verifier::ArgVerifier,
 };
 pub mod errors;
 pub mod structs;
@@ -77,7 +77,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ///
     /// This is a default wrapper that adds automatic tracing instrumentation for any PIOP.
     fn verify(
-        verifier: &mut Verifier<F, MvPCS, UvPCS>,
+        verifier: &mut ArgVerifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
         let struct_name = type_name_without_generics::<Self>();
@@ -108,7 +108,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
     ///
     /// This will be wrapped by `verify`, which adds automatic tracing instrumentation for any PIOP.
     fn verify_inner(
-        verifier: &mut Verifier<F, MvPCS, UvPCS>,
+        verifier: &mut ArgVerifier<F, MvPCS, UvPCS>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput>;
 
