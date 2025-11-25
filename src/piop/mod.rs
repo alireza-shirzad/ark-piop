@@ -24,7 +24,8 @@ pub(crate) fn type_name_without_generics<T>() -> &'static str {
     }
 }
 /// Any PIOP must implement this trait.
-pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>:
+pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,>:
     Sized
 {
     type ProverInput: DeepClone<F, MvPCS, UvPCS> + std::fmt::Debug;
@@ -125,6 +126,7 @@ pub trait PIOP<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly =
 /// This trait only used for deep cloning PIOP prover inputs.
 ///
 /// Simply cloning the prover input interferes with the actual state of the prover in the protocol. Hence for honest prover checks we need to create a new prover instance and deep clone the input with this new prover instance.
-pub trait DeepClone<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
+pub trait DeepClone<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,> {
     fn deep_clone(&self, new_prover: ArgProver<F, MvPCS, UvPCS>) -> Self;
 }

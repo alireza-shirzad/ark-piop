@@ -64,8 +64,8 @@ use tracing::{debug, instrument};
 pub struct ProverTracker<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     pub pk: ProcessedSNARKPk<F, MvPCS, UvPCS>,
     pub state: ProverState<F, MvPCS, UvPCS>,
@@ -74,8 +74,8 @@ where
 impl<F, MvPCS, UvPCS> ProverTracker<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     pub fn new_from_pk(pk: SNARKPk<F, MvPCS, UvPCS>) -> Self {
         let mut tracker = Self {

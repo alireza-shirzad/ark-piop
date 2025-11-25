@@ -28,16 +28,16 @@ use tracker::VerifierTracker;
 pub struct ArgVerifier<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     tracker_rc: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
 }
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgVerifier<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker_rc, &other.tracker_rc)
@@ -47,8 +47,8 @@ where
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgVerifier<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     // TODO: See if you can shorten this function
     #[instrument(level = "debug", skip_all)]

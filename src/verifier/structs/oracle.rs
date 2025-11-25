@@ -99,8 +99,8 @@ impl<F: 'static + Field> Clone for InnerOracle<F> {
 pub struct TrackedOracle<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     id_or_const: Either<TrackerID, F>,
     tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
@@ -110,8 +110,8 @@ where
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     /// Returns the number of variables in the tracked oracle
     pub fn log_size(&self) -> usize {
@@ -127,8 +127,8 @@ where
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackedOracle")
@@ -140,8 +140,8 @@ where
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS> PartialEq for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
@@ -151,8 +151,8 @@ where
 impl<F, MvPCS, UvPCS> AddAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[inline]
     fn add_assign(&mut self, rhs: &Self) {
@@ -163,8 +163,8 @@ where
 impl<F, MvPCS, UvPCS> SubAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[inline]
     fn sub_assign(&mut self, rhs: &Self) {
@@ -175,8 +175,8 @@ where
 impl<F, MvPCS, UvPCS> MulAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[inline]
     fn mul_assign(&mut self, rhs: &Self) {
@@ -187,8 +187,8 @@ where
 impl<F, MvPCS, UvPCS> AddAssign<F> for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[inline]
     fn add_assign(&mut self, rhs: F) {
@@ -199,8 +199,8 @@ where
 impl<F, MvPCS, UvPCS> MulAssign<F> for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[inline]
     fn mul_assign(&mut self, rhs: F) {
@@ -212,8 +212,8 @@ impl<'a, F, MvPCS, UvPCS> Add<&'a TrackedOracle<F, MvPCS, UvPCS>>
     for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -245,8 +245,8 @@ impl<'a, F, MvPCS, UvPCS> Sub<&'a TrackedOracle<F, MvPCS, UvPCS>>
     for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -278,8 +278,8 @@ impl<'a, F, MvPCS, UvPCS> Mul<&'a TrackedOracle<F, MvPCS, UvPCS>>
     for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -310,8 +310,8 @@ where
 impl<'a, F, MvPCS, UvPCS> Add<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -325,8 +325,8 @@ where
 impl<'a, F, MvPCS, UvPCS> Sub<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -340,8 +340,8 @@ where
 impl<'a, F, MvPCS, UvPCS> Mul<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
 
@@ -355,8 +355,8 @@ where
 impl<F, MvPCS, UvPCS> Neg for TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     type Output = TrackedOracle<F, MvPCS, UvPCS>;
     #[inline]
@@ -376,8 +376,8 @@ where
 impl<F, MvPCS, UvPCS> TrackedOracle<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     pub fn new(
         id_or_const: Either<TrackerID, F>,

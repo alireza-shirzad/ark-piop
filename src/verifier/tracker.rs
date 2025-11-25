@@ -47,8 +47,8 @@ use super::{
 #[derivative(Clone(bound = "UvPCS: PCS<F>"))]
 pub struct VerifierTracker<
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 > where
     F: PrimeField,
 {
@@ -60,8 +60,8 @@ pub struct VerifierTracker<
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> VerifierTracker<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     // Create new verifier tracker with clean state given a verifying key
     pub(crate) fn new_from_vk(vk: SNARKVk<F, MvPCS, UvPCS>) -> Self {

@@ -154,8 +154,8 @@ pub fn init_tracing_for_tests() {
 #[instrument(level = "debug")]
 pub fn prelude_with_vars<
     F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 >(
     num_mv_vars: usize,
 ) -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
@@ -174,8 +174,8 @@ pub fn prelude_with_vars<
 #[instrument(level = "debug", skip_all)]
 pub fn test_prelude<
     F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 >() -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
     init_tracing_for_tests();
     prelude_with_vars::<F, MvPCS, UvPCS>(16)
@@ -188,8 +188,8 @@ pub fn test_prelude<
 #[allow(clippy::type_complexity)]
 pub fn bench_prelude<
     F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 >() -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
     init_tracing_for_tests();
     prelude_with_vars::<F, MvPCS, UvPCS>(20)

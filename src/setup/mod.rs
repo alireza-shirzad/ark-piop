@@ -21,7 +21,8 @@ use tracing::instrument;
 /// A key generator struct
 /// It uses the static information about the table, like the maximum size, etc
 /// and generates the proving and verifying keys
-pub struct KeyGenerator<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> {
+pub struct KeyGenerator<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,> {
     log_size: usize,
     srs_path: PathBuf,
     _field: std::marker::PhantomData<F>,
@@ -29,7 +30,8 @@ pub struct KeyGenerator<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<
     _uv_pcs: std::marker::PhantomData<UvPCS>,
 }
 
-impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> Default
+impl<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,> Default
     for KeyGenerator<F, MvPCS, UvPCS>
 {
     fn default() -> Self {
@@ -43,7 +45,8 @@ impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>> 
     }
 }
 
-impl<F: PrimeField, MvPCS: PCS<F, Poly = MLE<F>>, UvPCS: PCS<F, Poly = LDE<F>>>
+impl<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,>
     KeyGenerator<F, MvPCS, UvPCS>
 {
     /// Creates a new `KeyGenerator` instance.

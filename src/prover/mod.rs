@@ -34,8 +34,8 @@ use tracker::ProverTracker;
 pub struct ArgProver<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     tracker_rc: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
 }
@@ -45,8 +45,8 @@ where
 impl<F: Pairing, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgProver<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker_rc, &other.tracker_rc)
@@ -57,8 +57,8 @@ where
 impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgProver<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     #[instrument(level = "debug", skip_all)]
     /// Create a prover from the proving key
@@ -303,6 +303,16 @@ where
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id)
+    }
+
+    /// Add a multivariate sumcheck claim to the proof
+    #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_lookup_claim(
+        &mut self,
+        included_id: TrackerID,
+        super_id: TrackerID,
+    ) -> SnarkResult<()> {
+        todo!()
     }
 
     /// Get the next TrackerID to be used

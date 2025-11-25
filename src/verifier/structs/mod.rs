@@ -23,8 +23,8 @@ pub type VerifierEvalClaimMap<F, PC> = HashSet<(
 pub struct ProcessedSNARKVk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     pub log_size: usize,
     pub mv_pcs_param: MvPCS::VerifierParam,
@@ -35,8 +35,8 @@ where
 impl<F, MvPCS, UvPCS> ProcessedSNARKVk<F, MvPCS, UvPCS>
 where
     F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>>,
-    UvPCS: PCS<F, Poly = LDE<F>>,
+    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
+    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
 {
     pub fn new_from_vk(vk: &SNARKVk<F, MvPCS, UvPCS>) -> Self {
         Self {
