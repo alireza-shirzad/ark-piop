@@ -6,6 +6,7 @@ pub mod structs;
 mod tracker;
 ///////// Imports /////////
 use crate::{
+    SnarkBackend,
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
@@ -30,23 +31,17 @@ use tracker::ProverTracker;
 
 /// A prover for the ZKSQL protocol.
 #[derive(Derivative)]
-#[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
-pub struct ArgProver<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    tracker_rc: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
+#[derivative(Clone(bound = "B::MvPCS: Clone, B::UvPCS: Clone"))]
+pub struct ArgProver<B: SnarkBackend> {
+    tracker_rc: Rc<RefCell<ProverTracker<B>>>,
 }
 
 /// Implement PartialEq for Prover
 /// Two provers are equal if they point to the same tracker
-impl<F: Pairing, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgProver<F, MvPCS, UvPCS>
+impl<B> PartialEq for ArgProver<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
+    B::F: Pairing + PrimeField,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker_rc, &other.tracker_rc)
@@ -54,17 +49,15 @@ where
 }
 
 /// Prover implementation
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgProver<F, MvPCS, UvPCS>
+impl<B> ArgProver<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     #[instrument(level = "debug", skip_all)]
     /// Create a prover from the proving key
-    pub fn new_from_pk(pk: SNARKPk<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         let mut prover = Self::new_from_tracker(ProverTracker::new_from_pk(pk.clone()));
-        let indexed_polys: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>> = pk
+        let indexed_polys: BTreeMap<String, TrackedPoly<B>> = pk
             .indexed_mles
             .iter()
             .map(|(label, mle)| {
@@ -81,15 +74,13 @@ where
     }
     /// Create a prover from the tracker
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_tracker(prover_tracker: ProverTracker<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_tracker(prover_tracker: ProverTracker<B>) -> Self {
         Self::new_from_tracker_rc(Rc::new(RefCell::new(prover_tracker)))
     }
 
     /// Create a prover from the tracker rc
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_tracker_rc(
-        prover_tracker: Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>>,
-    ) -> Self {
+    pub fn new_from_tracker_rc(prover_tracker: Rc<RefCell<ProverTracker<B>>>) -> Self {
         Self {
             tracker_rc: prover_tracker,
         }
@@ -97,17 +88,17 @@ where
 
     #[instrument(level = "debug", skip_all)]
     /// Return a shared handle to the multilinear PCS prover parameters.
-    pub fn mv_pcs_prover_param(&self) -> Arc<MvPCS::ProverParam> {
+    pub fn mv_pcs_prover_param(&self) -> Arc<<B::MvPCS as PCS<B::F>>::ProverParam> {
         Arc::clone(&self.tracker_rc.borrow().pk.mv_pcs_param)
     }
 
     /// Get the range tracked polynomial given the data type
     #[instrument(level = "debug", skip(self))]
-    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label.clone())
     }
 
-    pub fn tracker(&self) -> Rc<RefCell<ProverTracker<F, MvPCS, UvPCS>>> {
+    pub fn tracker(&self) -> Rc<RefCell<ProverTracker<B>>> {
         Rc::clone(&self.tracker_rc)
     }
 
@@ -115,7 +106,7 @@ where
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
-    pub fn track_mat_mv_poly(&mut self, polynomial: MLE<F>) -> TrackedPoly<F, MvPCS, UvPCS> {
+    pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackedPoly<B> {
         let num_vars = polynomial.num_vars();
         Span::current().record("num_vars", num_vars);
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -132,7 +123,7 @@ where
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn track_mat_mv_cnst_poly(&mut self, nv: usize, cnst: F) -> TrackedPoly<F, MvPCS, UvPCS> {
+    pub fn track_mat_mv_cnst_poly(&mut self, nv: usize, cnst: B::F) -> TrackedPoly<B> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
             Span::current().record("cnst", debug(&cnst));
         }
@@ -147,8 +138,8 @@ where
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_mv_poly(
         &mut self,
-        polynomial: &MLE<F>,
-    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+        polynomial: &MLE<B::F>,
+    ) -> SnarkResult<TrackedPoly<B>> {
         let num_vars = polynomial.num_vars();
         Span::current().record("num_vars", num_vars);
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -171,9 +162,9 @@ where
     /// Track a materialized polynomial using a pre-computed commitment.
     pub fn track_mat_mv_poly_with_commitment(
         &mut self,
-        polynomial: &MLE<F>,
-        commitment: MvPCS::Commitment,
-    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+        polynomial: &MLE<B::F>,
+        commitment: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedPoly<B>> {
         let num_vars = polynomial.num_vars();
         Span::current().record("num_vars", num_vars);
         let tracked_poly = TrackedPoly::new(
@@ -193,7 +184,7 @@ where
     /// moves the univariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
-    pub fn track_mat_uv_poly(&mut self, polynomial: LDE<F>) -> TrackedPoly<F, MvPCS, UvPCS> {
+    pub fn track_mat_uv_poly(&mut self, polynomial: LDE<B::F>) -> TrackedPoly<B> {
         let degree = polynomial.degree();
         Span::current().record("degree", degree);
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -213,8 +204,8 @@ where
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_uv_poly(
         &mut self,
-        polynomial: LDE<F>,
-    ) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+        polynomial: LDE<B::F>,
+    ) -> SnarkResult<TrackedPoly<B>> {
         let degree = polynomial.degree();
         Span::current().record("degree", degree);
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -234,7 +225,7 @@ where
     /// Get a shared to the materialized multivariate polynomial given its
     /// TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<F>> {
+    pub fn mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
             .mat_mv_poly(id)
             .unwrap()
@@ -244,7 +235,7 @@ where
     /// Get a shared to the materialized univariate polynomial given its
     /// TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<F>> {
+    pub fn mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
             .mat_uv_poly(id)
             .unwrap()
@@ -253,7 +244,7 @@ where
 
     /// Get a virtual polynomial given its TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn virt_poly(&self, id: TrackerID) -> VirtualPoly<F> {
+    pub fn virt_poly(&self, id: TrackerID) -> VirtualPoly<B::F> {
         RefCell::borrow(&self.tracker_rc)
             .virt_poly(id)
             .unwrap()
@@ -262,13 +253,13 @@ where
 
     /// Sample a fiat-shamir challenge and append it to the transcript
     #[instrument(level = "debug", skip(self))]
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
         trace!(?res, "challenge");
         res
     }
 
-    pub fn add_miscellaneous_field_element(&mut self, key: String, field: F) -> SnarkResult<()> {
+    pub fn add_miscellaneous_field_element(&mut self, key: String, field: B::F) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .insert_miscellaneous_field(key, field);
@@ -277,7 +268,7 @@ where
 
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
-    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<()> {
+    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_uv_eval_claim(poly_id, point)
@@ -285,7 +276,7 @@ where
 
     /// Add a claim about the evaluation of a multivariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
-    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> SnarkResult<()> {
+    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_mv_eval_claim(poly_id, point)
@@ -293,7 +284,11 @@ where
 
     /// Add a multivariate sumcheck claim to the proof
     #[instrument(level = "debug", skip(self))]
-    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> SnarkResult<()> {
+    pub fn add_mv_sumcheck_claim(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
         self.tracker_rc
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum)
@@ -328,19 +323,19 @@ where
 
     /// Build the zkSQL proof from the claims and comitments
     #[instrument(level = "debug", skip_all)]
-    pub fn build_proof(&mut self) -> SnarkResult<Proof<F, MvPCS, UvPCS>> {
+    pub fn build_proof(&mut self) -> SnarkResult<Proof<B>> {
         self.tracker_rc.borrow_mut().compile_proof()
     }
 
     #[cfg(feature = "test-utils")]
     #[instrument(level = "debug", skip_all)]
-    pub fn clone_underlying_tracker(&self) -> ProverTracker<F, MvPCS, UvPCS> {
+    pub fn clone_underlying_tracker(&self) -> ProverTracker<B> {
         RefCell::borrow(&self.tracker_rc).clone()
     }
 
     #[cfg(any(feature = "test-utils", feature = "honest-prover"))]
     #[instrument(level = "debug", skip_all)]
-    pub fn deep_copy(&self) -> ArgProver<F, MvPCS, UvPCS> {
+    pub fn deep_copy(&self) -> ArgProver<B> {
         ArgProver::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }
 }

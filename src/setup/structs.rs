@@ -1,5 +1,4 @@
-use crate::{arithmetic::mat_poly::mle::MLE, pcs::PCS};
-use ark_ff::PrimeField;
+use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE, pcs::PCS};
 use ark_serialize::{
     CanonicalDeserialize, CanonicalSerialize, Compress, SerializationError, Valid, Validate,
 };
@@ -14,40 +13,37 @@ use std::{
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-// #[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
-pub struct SNARKPk<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
+pub struct SNARKPk<B>
 where
-    F: PrimeField,
+    B: SnarkBackend,
 {
     pub log_size: usize,
-    pub mv_pcs_param: Arc<MvPCS::ProverParam>,
-    pub uv_pcs_param: Arc<UvPCS::ProverParam>,
-    pub indexed_mles: BTreeMap<String, MLE<F>>,
-    pub vk: SNARKVk<F, MvPCS, UvPCS>,
+    pub mv_pcs_param: Arc<<B::MvPCS as PCS<B::F>>::ProverParam>,
+    pub uv_pcs_param: Arc<<B::UvPCS as PCS<B::F>>::ProverParam>,
+    pub indexed_mles: BTreeMap<String, MLE<B::F>>,
+    pub vk: SNARKVk<B>,
 }
 
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(Clone(bound = ""))]
-pub struct SNARKVk<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
+pub struct SNARKVk<B>
 where
-    F: PrimeField,
+    B: SnarkBackend,
 {
     pub log_size: usize,
-    pub mv_pcs_vk: MvPCS::VerifierParam,
-    pub uv_pcs_vk: UvPCS::VerifierParam,
-    pub indexed_coms: BTreeMap<String, MvPCS::Commitment>,
+    pub mv_pcs_vk: <B::MvPCS as PCS<B::F>>::VerifierParam,
+    pub uv_pcs_vk: <B::UvPCS as PCS<B::F>>::VerifierParam,
+    pub indexed_coms: BTreeMap<String, <B::MvPCS as PCS<B::F>>::Commitment>,
 }
 
-impl<F, MvPCS, UvPCS> CanonicalSerialize for SNARKPk<F, MvPCS, UvPCS>
+impl<B> CanonicalSerialize for SNARKPk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F>,
-    UvPCS: PCS<F>,
-    MvPCS::ProverParam: CanonicalSerialize,
-    UvPCS::ProverParam: CanonicalSerialize,
-    MvPCS::Commitment: CanonicalSerialize,
-    MLE<F>: CanonicalSerialize,
-    SNARKVk<F, MvPCS, UvPCS>: CanonicalSerialize,
+    B: SnarkBackend,
+    <B::MvPCS as PCS<B::F>>::ProverParam: CanonicalSerialize,
+    <B::UvPCS as PCS<B::F>>::ProverParam: CanonicalSerialize,
+    <B::MvPCS as PCS<B::F>>::Commitment: CanonicalSerialize,
+    MLE<B::F>: CanonicalSerialize,
+    SNARKVk<B>: CanonicalSerialize,
 {
     fn serialize_with_mode<W: Write>(
         &self,
@@ -76,16 +72,14 @@ where
     }
 }
 
-impl<F, MvPCS, UvPCS> CanonicalDeserialize for SNARKPk<F, MvPCS, UvPCS>
+impl<B> CanonicalDeserialize for SNARKPk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F>,
-    UvPCS: PCS<F>,
-    MvPCS::ProverParam: CanonicalDeserialize,
-    UvPCS::ProverParam: CanonicalDeserialize,
-    MvPCS::Commitment: CanonicalDeserialize,
-    MLE<F>: CanonicalDeserialize,
-    SNARKVk<F, MvPCS, UvPCS>: CanonicalDeserialize,
+    B: SnarkBackend,
+    <B::MvPCS as PCS<B::F>>::ProverParam: CanonicalDeserialize,
+    <B::UvPCS as PCS<B::F>>::ProverParam: CanonicalDeserialize,
+    <B::MvPCS as PCS<B::F>>::Commitment: CanonicalDeserialize,
+    MLE<B::F>: CanonicalDeserialize,
+    SNARKVk<B>: CanonicalDeserialize,
 {
     fn deserialize_with_mode<R: Read>(
         mut reader: R,
@@ -93,11 +87,19 @@ where
         validate: Validate,
     ) -> Result<Self, SerializationError> {
         let log_size = usize::deserialize_with_mode(&mut reader, compress, validate)?;
-        let mv_param = MvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
-        let uv_param = UvPCS::ProverParam::deserialize_with_mode(&mut reader, compress, validate)?;
+        let mv_param = <B::MvPCS as PCS<B::F>>::ProverParam::deserialize_with_mode(
+            &mut reader,
+            compress,
+            validate,
+        )?;
+        let uv_param = <B::UvPCS as PCS<B::F>>::ProverParam::deserialize_with_mode(
+            &mut reader,
+            compress,
+            validate,
+        )?;
         let indexed_mles =
-            BTreeMap::<String, MLE<F>>::deserialize_with_mode(&mut reader, compress, validate)?;
-        let vk = SNARKVk::<F, MvPCS, UvPCS>::deserialize_with_mode(reader, compress, validate)?;
+            BTreeMap::<String, MLE<B::F>>::deserialize_with_mode(&mut reader, compress, validate)?;
+        let vk = SNARKVk::<B>::deserialize_with_mode(reader, compress, validate)?;
 
         Ok(Self {
             log_size,
@@ -109,11 +111,9 @@ where
     }
 }
 
-impl<F, MvPCS, UvPCS> Valid for SNARKPk<F, MvPCS, UvPCS>
+impl<B> Valid for SNARKPk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F>,
-    UvPCS: PCS<F>,
+    B: SnarkBackend,
 {
     fn check(&self) -> Result<(), SerializationError> {
         Ok(())

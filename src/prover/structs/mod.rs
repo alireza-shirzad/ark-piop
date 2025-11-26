@@ -6,6 +6,7 @@ pub mod proof;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
+    SnarkBackend,
     arithmetic::{
         mat_poly::{lde::LDE, mle::MLE},
         virt_poly::VirtualPoly,
@@ -54,14 +55,12 @@ impl<F: PrimeField, PC: PCS<F>> TrackerEvalClaim<F, PC> {
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
-pub struct ProverState<F, MvPCS, UvPCS>
+pub struct ProverState<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     /// The transcript for the PIOP
-    pub transcript: Tr<F>,
+    pub transcript: Tr<B::F>,
 
     /// number of the tracked polynomials (Univariate and Multivariate)
     // TODO: See if we should split this into two fields
@@ -70,11 +69,11 @@ where
     /// A map from TrackerID to a virtual polynomials, i.e. polynomials of the
     /// form `sum_i c_i * prod_j p_ij` where `p_ij` points to another
     /// materialized or virtual polynomials
-    pub virtual_polys: BTreeMap<TrackerID, VirtualPoly<F>>,
+    pub virtual_polys: BTreeMap<TrackerID, VirtualPoly<B::F>>,
 
-    pub mv_pcs_substate: ProverPCSubstate<F, MvPCS>,
-    pub uv_pcs_substate: ProverPCSubstate<F, UvPCS>,
-    pub miscellaneous_field_elements: BTreeMap<String, F>,
+    pub mv_pcs_substate: ProverPCSubstate<B::F, B::MvPCS>,
+    pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
+    pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub num_vars: BTreeMap<TrackerID, usize>,
 }
 
@@ -95,25 +94,21 @@ where
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct ProcessedSNARKPk<F, MvPCS, UvPCS>
+pub struct ProcessedSNARKPk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     pub log_size: usize,
-    pub mv_pcs_param: Arc<MvPCS::ProverParam>,
-    pub uv_pcs_param: Arc<UvPCS::ProverParam>,
-    pub indexed_mles: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>>,
+    pub mv_pcs_param: Arc<<B::MvPCS as PCS<B::F>>::ProverParam>,
+    pub uv_pcs_param: Arc<<B::UvPCS as PCS<B::F>>::ProverParam>,
+    pub indexed_mles: BTreeMap<String, TrackedPoly<B>>,
 }
 
-impl<F, MvPCS, UvPCS> ProcessedSNARKPk<F, MvPCS, UvPCS>
+impl<B> ProcessedSNARKPk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    pub fn new_from_pk(pk: &SNARKPk<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: &SNARKPk<B>) -> Self {
         Self {
             log_size: pk.log_size,
             mv_pcs_param: Arc::clone(&pk.mv_pcs_param),

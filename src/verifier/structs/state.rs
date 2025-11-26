@@ -1,4 +1,5 @@
 use crate::{
+    SnarkBackend,
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     prover::structs::proof::PCSSubproof,
     structs::PCSOpeningProof,
@@ -25,17 +26,15 @@ use indexmap::IndexMap;
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
-pub struct VerifierState<F, MvPCS, UvPCS>
+pub struct VerifierState<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    pub transcript: Tr<F>,
+    pub transcript: Tr<B::F>,
     pub num_tracked_polys: usize,
-    pub virtual_oracles: IndexMap<TrackerID, Oracle<F>>,
-    pub mv_pcs_substate: VerifierPCSubstate<F, MvPCS>,
-    pub uv_pcs_substate: VerifierPCSubstate<F, UvPCS>,
+    pub virtual_oracles: IndexMap<TrackerID, Oracle<B::F>>,
+    pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,
+    pub uv_pcs_substate: VerifierPCSubstate<B::F, B::UvPCS>,
 }
 
 #[derive(Derivative)]
@@ -54,33 +53,26 @@ where
 
 /// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative)]
-#[derivative(
-    Clone(bound = "MvPCS: PCS<F>"),
-    Default(bound = "MvPCS: PCS<F>"),
-    Debug(bound = "MvPCS: PCS<F>"),
-    Clone(bound = "UvPCS: PCS<F>"),
-    Default(bound = "UvPCS: PCS<F>"),
-    Debug(bound = "UvPCS: PCS<F>")
-)]
-pub struct ProcessedProof<F, MvPCS: PCS<F>, UvPCS: PCS<F>>
+#[derivative(Clone(bound = ""), Default(bound = ""), Debug(bound = ""))]
+pub struct ProcessedProof<B>
 where
-    F: PrimeField,
+    B: SnarkBackend,
 {
-    pub sc_subproof: Option<SumcheckSubproof<F>>,
-    pub mv_pcs_subproof: ProcessedPCSSubproof<F, MvPCS>,
-    pub uv_pcs_subproof: ProcessedPCSSubproof<F, UvPCS>,
-    pub miscellaneous_field_elements: BTreeMap<String, F>,
+    pub sc_subproof: Option<SumcheckSubproof<B::F>>,
+    pub mv_pcs_subproof: ProcessedPCSSubproof<B::F, B::MvPCS>,
+    pub uv_pcs_subproof: ProcessedPCSSubproof<B::F, B::UvPCS>,
+    pub miscellaneous_field_elements: BTreeMap<String, B::F>,
 }
 
-impl<F, MvPCS, UvPCS> ProcessedProof<F, MvPCS, UvPCS>
+impl<B> ProcessedProof<B>
 where
-    F: PrimeField,
-    <MvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
-    <UvPCS::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
-    MvPCS: PCS<F>,
-    UvPCS: PCS<F>,
+    B: SnarkBackend,
+    <<B::MvPCS as PCS<B::F>>::Poly as Polynomial<B::F>>::Point:
+        CanonicalSerialize + CanonicalDeserialize,
+    <<B::UvPCS as PCS<B::F>>::Poly as Polynomial<B::F>>::Point:
+        CanonicalSerialize + CanonicalDeserialize,
 {
-    pub fn new_from_proof(proof: &Proof<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_proof(proof: &Proof<B>) -> Self {
         Self {
             sc_subproof: proof.sc_subproof.clone(),
             mv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.mv_pcs_subproof),

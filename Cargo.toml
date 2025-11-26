@@ -29,6 +29,9 @@ indexmap = "2.11.4"
 tracing-tree = "0.4.*"
 either = "1.8.0"
 serde = { version = "1.0", features = ["derive"] }
+ark-test-curves = { version = "0.5.0", default-features = false, features = [
+    "bls12_381_curve",
+], optional = true }
 [dev-dependencies]
 ark-test-curves = { version = "0.5.0", default-features = false, features = [
     "bls12_381_curve",
@@ -40,7 +43,7 @@ ark-test-curves = { version = "0.5.0", default-features = false, features = [
 default = ["std", "parallel"]
 std = ["ark-ff/std", "ark-poly/std", "ark-std/std", "ark-serialize/std"]
 print-trace = ["ark-std/print-trace"]
-test-utils = []
+test-utils = ["ark-test-curves"]
 parallel = [
     "std",
     "ark-ff/parallel",

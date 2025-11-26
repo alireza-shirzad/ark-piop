@@ -2,6 +2,7 @@ pub mod oracle;
 pub mod state;
 ////////////////// Imports ////////////////
 use crate::{
+    SnarkBackend,
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     pcs::PCS,
     setup::structs::SNARKVk,
@@ -20,25 +21,21 @@ pub type VerifierEvalClaimMap<F, PC> = HashSet<(
 )>;
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-pub struct ProcessedSNARKVk<F, MvPCS, UvPCS>
+pub struct ProcessedSNARKVk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     pub log_size: usize,
-    pub mv_pcs_param: MvPCS::VerifierParam,
-    pub uv_pcs_param: UvPCS::VerifierParam,
-    pub range_comms: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>>,
+    pub mv_pcs_param: <B::MvPCS as PCS<B::F>>::VerifierParam,
+    pub uv_pcs_param: <B::UvPCS as PCS<B::F>>::VerifierParam,
+    pub range_comms: BTreeMap<String, TrackedOracle<B>>,
 }
 
-impl<F, MvPCS, UvPCS> ProcessedSNARKVk<F, MvPCS, UvPCS>
+impl<B> ProcessedSNARKVk<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    pub fn new_from_vk(vk: &SNARKVk<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_vk(vk: &SNARKVk<B>) -> Self {
         Self {
             log_size: vk.log_size,
             mv_pcs_param: vk.mv_pcs_vk.clone(),

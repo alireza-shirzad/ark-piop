@@ -2,6 +2,7 @@ use super::structs::{
     ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, Proof},
 };
+use crate::SnarkBackend;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
 use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
 use crate::{
@@ -9,11 +10,7 @@ use crate::{
 };
 use crate::{
     arithmetic::{
-        mat_poly::{
-            lde::LDE,
-            mle::MLE,
-            utils::{build_eq_x_r, evaluate_opt},
-        },
+        mat_poly::{lde::LDE, mle::MLE, utils::build_eq_x_r},
         virt_poly::{
             VirtualPoly,
             hp_interface::{HPVirtualPolynomial, VPAuxInfo},
@@ -31,8 +28,10 @@ use crate::{
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
-use ark_ff::PrimeField;
+use ark_ec::AdditiveGroup;
 use ark_poly::{MultilinearExtension, Polynomial};
+use ark_std::One;
+use ark_std::Zero;
 use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
 
@@ -61,23 +60,19 @@ use tracing::{debug, instrument};
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 // #[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
-pub struct ProverTracker<F, MvPCS, UvPCS>
+pub struct ProverTracker<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    pub pk: ProcessedSNARKPk<F, MvPCS, UvPCS>,
-    pub state: ProverState<F, MvPCS, UvPCS>,
+    pub pk: ProcessedSNARKPk<B>,
+    pub state: ProverState<B>,
 }
 
-impl<F, MvPCS, UvPCS> ProverTracker<F, MvPCS, UvPCS>
+impl<B> ProverTracker<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    pub fn new_from_pk(pk: SNARKPk<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         let mut tracker = Self {
             pk: ProcessedSNARKPk::new_from_pk(&pk),
             state: ProverState::default(),
@@ -86,7 +81,7 @@ where
         tracker
     }
 
-    fn add_vk_to_transcript(&mut self, vk: SNARKVk<F, MvPCS, UvPCS>) {
+    fn add_vk_to_transcript(&mut self, vk: SNARKVk<B>) {
         self.state
             .transcript
             .append_serializable_element(b"vk", &vk)
@@ -99,15 +94,12 @@ where
         });
     }
 
-    pub fn set_indexed_tracked_polys(
-        &mut self,
-        range_tr_polys: BTreeMap<String, TrackedPoly<F, MvPCS, UvPCS>>,
-    ) {
+    pub fn set_indexed_tracked_polys(&mut self, range_tr_polys: BTreeMap<String, TrackedPoly<B>>) {
         self.pk.indexed_mles = range_tr_polys;
     }
 
     /// Get the range tracked polynomial given the data type
-    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<F, MvPCS, UvPCS>> {
+    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         match self.pk.indexed_mles.get(&label) {
             Some(poly) => Ok(poly.clone()),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
@@ -139,7 +131,7 @@ where
     ///
     /// moves the polynomial to heap, assigns a TracckerID to it in map and
     /// returns the TrackerID
-    pub fn track_mat_mv_poly(&mut self, polynomial: MLE<F>) -> TrackerID {
+    pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackerID {
         let polynomial = Arc::new(polynomial);
         self.track_mat_arc_mv_poly(polynomial)
     }
@@ -148,7 +140,7 @@ where
     ///
     /// moves the polynomial to heap, assigns a TracckerID to it in map and
     /// returns the TrackerID
-    pub fn track_mat_uv_poly(&mut self, polynomial: LDE<F>) -> TrackerID {
+    pub fn track_mat_uv_poly(&mut self, polynomial: LDE<B::F>) -> TrackerID {
         let polynomial = Arc::new(polynomial);
         self.track_mat_arc_uv_poly(polynomial)
     }
@@ -156,7 +148,7 @@ where
     ///
     /// Assumes the input polynomial is already on the heap and assigns a
     /// TrackerID to it in the map
-    fn track_mat_arc_mv_poly(&mut self, polynomial: Arc<MLE<F>>) -> TrackerID {
+    fn track_mat_arc_mv_poly(&mut self, polynomial: Arc<MLE<B::F>>) -> TrackerID {
         // Create the new TrackerID
         let poly_id = self.gen_id();
 
@@ -170,7 +162,7 @@ where
         poly_id
     }
 
-    fn track_mat_arc_uv_poly(&mut self, polynomial: Arc<LDE<F>>) -> TrackerID {
+    fn track_mat_arc_uv_poly(&mut self, polynomial: Arc<LDE<B::F>>) -> TrackerID {
         // Create the new TrackerID
         let poly_id = self.gen_id();
 
@@ -185,17 +177,17 @@ where
     }
 
     /// Tracks a materialized polynomial and sends a commitment to the verifier.
-    pub fn track_and_commit_mat_mv_p(&mut self, polynomial: &MLE<F>) -> SnarkResult<TrackerID> {
+    pub fn track_and_commit_mat_mv_p(&mut self, polynomial: &MLE<B::F>) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial.clone());
         // commit to the polynomial
-        let commitment = MvPCS::commit(self.pk.mv_pcs_param.as_ref(), &polynomial)?;
+        let commitment = B::MvPCS::commit(self.pk.mv_pcs_param.as_ref(), &polynomial)?;
         Self::track_mat_mv_p_and_commitment(self, &polynomial, commitment)
     }
 
     pub fn track_mat_mv_p_and_commitment(
         &mut self,
-        polynomial: &MLE<F>,
-        commitment: MvPCS::Commitment,
+        polynomial: &MLE<B::F>,
+        commitment: <B::MvPCS as PCS<B::F>>::Commitment,
     ) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial.clone());
         // commit to the polynomial
@@ -217,17 +209,20 @@ where
         Ok(poly_id)
     }
 
-    pub fn track_and_commit_mat_uv_poly(&mut self, polynomial: LDE<F>) -> SnarkResult<TrackerID> {
+    pub fn track_and_commit_mat_uv_poly(
+        &mut self,
+        polynomial: LDE<B::F>,
+    ) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial);
         // commit to the polynomial
-        let commitment = UvPCS::commit(self.pk.uv_pcs_param.as_ref(), &polynomial)?;
+        let commitment = B::UvPCS::commit(self.pk.uv_pcs_param.as_ref(), &polynomial)?;
         Self::track_mat_uv_p_and_commitment(self, &polynomial, commitment)
     }
 
     fn track_mat_uv_p_and_commitment(
         &mut self,
-        polynomial: &LDE<F>,
-        commitment: UvPCS::Commitment,
+        polynomial: &LDE<B::F>,
+        commitment: <B::UvPCS as PCS<B::F>>::Commitment,
     ) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial.clone());
 
@@ -251,7 +246,7 @@ where
     /// Tracks a virtual polynomial
     ///
     /// generates a new TrackerID and adds the virtual polynomial to the map
-    fn track_virt_poly(&mut self, p: VirtualPoly<F>) -> TrackerID {
+    fn track_virt_poly(&mut self, p: VirtualPoly<B::F>) -> TrackerID {
         let poly_id = self.gen_id();
 
         let nv = p
@@ -267,18 +262,18 @@ where
 
     /// Get a reference to a materialized multivariate polynomial on the heap,
     /// from the map, by its TrackerID
-    pub fn mat_mv_poly(&self, id: TrackerID) -> Option<&Arc<MLE<F>>> {
+    pub fn mat_mv_poly(&self, id: TrackerID) -> Option<&Arc<MLE<B::F>>> {
         self.state.mv_pcs_substate.materialized_polys.get(&id)
     }
 
     /// Get a reference to a materialized univariate polynomial on the heap,
     /// from the map, by its TrackerID
-    pub fn mat_uv_poly(&self, id: TrackerID) -> Option<&Arc<LDE<F>>> {
+    pub fn mat_uv_poly(&self, id: TrackerID) -> Option<&Arc<LDE<B::F>>> {
         self.state.uv_pcs_substate.materialized_polys.get(&id)
     }
 
     /// Get a virtual polynomial, from the map, by its TrackerID
-    pub fn virt_poly(&self, id: TrackerID) -> Option<&VirtualPoly<F>> {
+    pub fn virt_poly(&self, id: TrackerID) -> Option<&VirtualPoly<B::F>> {
         self.state.virtual_polys.get(&id)
     }
     fn extract_mv_openable_ids(&self, id: TrackerID) -> BTreeSet<TrackerID> {
@@ -387,7 +382,7 @@ where
     /// either materialized or virtual
     /// The output is a tracker to a new virtual polynomial
     pub fn add_sub_polys(&mut self, p1: TrackerID, p2: TrackerID, do_sub: bool) -> TrackerID {
-        let sign_coeff: F = if do_sub { -F::one() } else { F::one() };
+        let sign_coeff: B::F = if do_sub { -B::F::one() } else { B::F::one() };
 
         let p1_mat = self.mat_mv_poly(p1);
         let p1_virt = self.virt_poly(p1);
@@ -397,13 +392,13 @@ where
         let mut new = VirtualPoly::new(); // Invariant: contains only material TrackerIDs
         match (p1_mat, p1_virt, p2_mat, p2_virt) {
             (Some(_), None, Some(_), None) => {
-                new.push((F::one(), vec![p1]));
+                new.push((B::F::one(), vec![p1]));
                 new.push((sign_coeff, vec![p2]));
             }
 
             // p1: materialized, p2: virtual
             (Some(_), None, None, Some(p2)) => {
-                new.push((F::one(), vec![p1]));
+                new.push((B::F::one(), vec![p1]));
                 new.extend(
                     p2.iter()
                         .map(|(coeff, prod)| (*coeff * sign_coeff, prod.clone())),
@@ -461,7 +456,7 @@ where
             // Bad Case: p2 not found
             (_, _, None, None) => panic!("Unknown p1 TrackerID {p2:?}"),
             // Case 1: both p1 and p2 are materialized
-            (Some(_), None, Some(_), None) => new.push((F::one(), vec![p1, p2])),
+            (Some(_), None, Some(_), None) => new.push((B::F::one(), vec![p1, p2])),
             // Case 2: p1 is materialized and p2 is virtual
             (Some(_), None, None, Some(p)) => {
                 p.iter().cloned().for_each(|(coeff, mut prod)| {
@@ -492,7 +487,7 @@ where
 
     /// Adds a scalar to a polynomial, returns a new virtual polynomial
     // TODO: Can we do it more efficiently?
-    pub fn add_scalar(&mut self, poly_id: TrackerID, c: F) -> TrackerID {
+    pub fn add_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
         let nv = self.poly_nv(poly_id);
         let scalar_mle = MLE::from_evaluations_vec(nv, vec![c; 2_usize.pow(nv as u32)]);
         let scalar_id = self.track_mat_mv_poly(scalar_mle);
@@ -500,7 +495,7 @@ where
     }
 
     /// Multiplies a polynomial by a scalar, returns a new virtual polynomial
-    pub fn mul_scalar(&mut self, poly_id: TrackerID, c: F) -> TrackerID {
+    pub fn mul_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
         let mut new = VirtualPoly::new();
         match self.mat_mv_poly(poly_id) {
             Some(_) => new.push((c, vec![poly_id])),
@@ -514,7 +509,7 @@ where
         self.track_virt_poly(new)
     }
 
-    fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<F>> {
+    fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<B::F>> {
         match self.mat_mv_poly(id) {
             Some(mat_poly) => return mat_poly.clone(), // already materialized
             None => {
@@ -536,32 +531,32 @@ where
                 // );
                 let nv = self.poly_nv(id);
 
-                let evals =
-                    virt_poly
-                        .iter()
-                        .fold(vec![F::ZERO; 1 << nv], |mut acc, (coeff, products)| {
-                            let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
-                                cfg_iter_mut!(acc)
-                                    .zip(self.mat_mv_poly(*id).unwrap().evaluations())
-                                    .for_each(|(a, b)| *a *= b);
-                                acc
-                            });
-                            cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);
+                let evals = virt_poly.iter().fold(
+                    vec![B::F::ZERO; 1 << nv],
+                    |mut acc, (coeff, products)| {
+                        let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
+                            cfg_iter_mut!(acc)
+                                .zip(self.mat_mv_poly(*id).unwrap().evaluations())
+                                .for_each(|(a, b)| *a *= b);
                             acc
                         });
+                        cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);
+                        acc
+                    },
+                );
                 Arc::new(MLE::from_evaluations_vec(nv, evals))
             }
         }
     }
 
-    pub fn evaluate_uv(&self, id: TrackerID, pt: &F) -> Option<F> {
+    pub fn evaluate_uv(&self, id: TrackerID, pt: &B::F) -> Option<B::F> {
         let mat_poly = self.state.uv_pcs_substate.materialized_polys.get(&id);
         // TODO: Change this to_vec
         mat_poly.map(|poly| poly.evaluate(pt))
     }
 
     /// Evaluates a polynomial at a point
-    pub fn evaluate_mv(&self, id: TrackerID, pt: &[F]) -> Option<F> {
+    pub fn evaluate_mv(&self, id: TrackerID, pt: &[B::F]) -> Option<B::F> {
         match self.state.mv_pcs_substate.materialized_polys.get(&id) {
             Some(poly) => {
                 let nv = poly.mat_mle().num_vars;
@@ -578,9 +573,9 @@ where
                             * prod
                                 .iter()
                                 .map(|poly| self.evaluate_mv(*poly, pt).unwrap())
-                                .product::<F>()
+                                .product::<B::F>()
                     })
-                    .sum::<F>();
+                    .sum::<B::F>();
                 Some(result)
             }
         }
@@ -592,8 +587,8 @@ where
     pub fn evaluate_mv_with_eq_evals(
         &self,
         id: TrackerID,
-        eq_evals: &BTreeMap<usize, MLE<F>>,
-    ) -> Option<F> {
+        eq_evals: &BTreeMap<usize, MLE<B::F>>,
+    ) -> Option<B::F> {
         match self.state.mv_pcs_substate.materialized_polys.get(&id) {
             Some(poly) => {
                 let nv = poly.mat_mle().num_vars;
@@ -610,16 +605,16 @@ where
                                 .map(|poly| {
                                     self.evaluate_mv_with_eq_evals(*poly, eq_evals).unwrap()
                                 })
-                                .product::<F>()
+                                .product::<B::F>()
                     })
-                    .sum::<F>();
+                    .sum::<B::F>();
                 Some(result)
             }
         }
     }
 
     /// Returns the evaluations of a polynomial on the boolean hypercube
-    pub fn evaluations(&mut self, id: TrackerID) -> Vec<F> {
+    pub fn evaluations(&mut self, id: TrackerID) -> Vec<B::F> {
         // Ensure the polynomial is materialized before getting evaluations
         let mat_poly = self.materialize_poly(id);
 
@@ -628,7 +623,7 @@ where
 
     /// Generate the challenge from the current transcript
     /// and append it to the transcript.
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         self.state
             .transcript
             .get_and_append_challenge(label)
@@ -640,11 +635,15 @@ where
     /// the prover claims that the sum of the evaluations of the polynomial with
     /// poly_id is claimed_sum
     // TODO: Remove the claimed_sum
-    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) -> SnarkResult<()> {
+    pub fn add_mv_sumcheck_claim(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
-            if cfg_iter!(evals).sum::<F>() != claimed_sum {
+            if cfg_iter!(evals).sum::<B::F>() != claimed_sum {
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -663,7 +662,7 @@ where
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
-            if cfg_iter!(evals).any(|eval| *eval != F::zero()) {
+            if cfg_iter!(evals).any(|eval| *eval != B::F::zero()) {
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -678,7 +677,7 @@ where
     /// prover a zerocheck claim is of the form (poly_id) which means that
     /// the prover claims that the polynomial with poly_id evaluates to zero
     /// all over the boolean hypercube
-    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<()> {
+    pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
         self.state
             .uv_pcs_substate
             .eval_claims
@@ -686,11 +685,11 @@ where
         Ok(())
     }
 
-    pub fn insert_miscellaneous_field(&mut self, key: String, field: F) {
+    pub fn insert_miscellaneous_field(&mut self, key: String, field: B::F) {
         self.state.miscellaneous_field_elements.insert(key, field);
     }
 
-    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[F]) -> SnarkResult<()> {
+    pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate
             .eval_claims
@@ -700,10 +699,10 @@ where
 
     // TODO: Is this only used to be compatible with the hyperplonk code?
     #[instrument(level = "debug", skip_all)]
-    pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<F> {
+    pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<B::F> {
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
-            return HPVirtualPolynomial::new_from_mle(poly, F::one());
+            return HPVirtualPolynomial::new_from_mle(poly, B::F::one());
         }
 
         let poly = self.state.virtual_polys.get(&id);
@@ -717,12 +716,12 @@ where
         let first_id = poly[0].1[0];
         let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
 
-        let mut arith_virt_poly: HPVirtualPolynomial<F> = HPVirtualPolynomial::new(nv);
+        let mut arith_virt_poly: HPVirtualPolynomial<B::F> = HPVirtualPolynomial::new(nv);
         for (prod_coef, prod) in poly.iter() {
             let prod_mle_list = prod
                 .iter()
                 .map(|poly_id| self.mat_mv_poly(*poly_id).unwrap().clone())
-                .collect::<Vec<Arc<MLE<F>>>>();
+                .collect::<Vec<Arc<MLE<B::F>>>>();
             arith_virt_poly
                 .add_mle_list(prod_mle_list, *prod_coef)
                 .unwrap();
@@ -751,12 +750,12 @@ where
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             let nv = self.state.num_vars[&claim.id()];
-            claim.set_claim(claim.claim() * F::from(1 << (max_nv - nv)))
+            claim.set_claim(claim.claim() * B::F::from(1 << (max_nv - nv)))
         }
 
         for claim in self.state.mv_pcs_substate.eval_claims.iter_mut() {
             let mut point = claim.point().clone();
-            point.resize(max_nv, F::zero());
+            point.resize(max_nv, B::F::zero());
             claim.set_point(point);
         }
         max_nv
@@ -801,7 +800,7 @@ where
     // p_n = s_n, we prove c_1 * p_1 + c_2 * p_2 + ... + c_n * p_n = c_1 *
     // s_1 + c_2 * s_2 + ... + c_n * s_n where c_i-s are random challenges
     #[instrument(level = "debug", skip(self))]
-    fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, F>> {
+    fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, B::F>> {
         let num_claims = self.state.mv_pcs_substate.sum_check_claims.len();
 
         if num_claims == 0 {
@@ -810,11 +809,11 @@ where
         }
 
         let mut agg = self.track_virt_poly(Vec::new());
-        let mut sc_sum = F::zero();
+        let mut sc_sum = B::F::zero();
 
         // Record the individual sumcheck claims to send to the verifier
         //TODO: This is only recorded for a specific protocol that uses this library and needs these, i.e. multiplicity-check. This should be removed from the library and added to the user-defined optional proof elements.
-        let individual_sumcheck_claims: BTreeMap<TrackerID, F> = self
+        let individual_sumcheck_claims: BTreeMap<TrackerID, B::F> = self
             .state
             .mv_pcs_substate
             .sum_check_claims
@@ -879,13 +878,13 @@ where
         let new_sc_claim_poly = self.mul_polys(z_check_aggr_id, eq_x_r_id);
 
         // Add this new sumcheck claim to other sumcheck claims
-        self.add_mv_sumcheck_claim(new_sc_claim_poly, F::zero())?;
+        self.add_mv_sumcheck_claim(new_sc_claim_poly, B::F::zero())?;
         debug!("The only zerocheck claim was converted to a sumcheck claim",);
         Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<F>, VPAuxInfo<F>)> {
+    fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
         debug_assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
         // Get the sumcheck claim polynomial id
         let sumcheck_aggr_id = self
@@ -907,7 +906,10 @@ where
     /// the prover state, into a list of evaluation claims. These evaluation
     /// claims will be proved using a PCS
     #[instrument(level = "debug", skip(self))]
-    fn compile_sc_subproof(&mut self, max_nv: usize) -> SnarkResult<Option<SumcheckSubproof<F>>> {
+    fn compile_sc_subproof(
+        &mut self,
+        max_nv: usize,
+    ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
@@ -934,8 +936,8 @@ where
     /// map, which is the list of all the possible verifier queries to these
     /// comitments (c) a batch opening proof corresponding to the query map
     #[instrument(level = "debug", skip(self))]
-    pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, MvPCS>> {
-        let mut query_map: BTreeMap<(TrackerID, Vec<F>), F> = BTreeMap::new();
+    pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<B::F, B::MvPCS>> {
+        let mut query_map: BTreeMap<(TrackerID, Vec<B::F>), B::F> = BTreeMap::new();
         let mut mat_polys = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
@@ -952,9 +954,9 @@ where
             }
         }
 
-        let opening_proof: PCSOpeningProof<F, MvPCS>;
+        let opening_proof: PCSOpeningProof<B::F, B::MvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = MvPCS::open(
+            let single_proof = B::MvPCS::open(
                 self.pk.mv_pcs_param.as_ref(),
                 &mat_polys[0],
                 &points[0],
@@ -963,7 +965,7 @@ where
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
-            let batch_proof = MvPCS::multi_open(
+            let batch_proof = B::MvPCS::multi_open(
                 self.pk.mv_pcs_param.as_ref(),
                 &mat_polys,
                 &points,
@@ -989,8 +991,8 @@ where
     /// map, which is the list of all the possible verifier queries to these
     /// comitments (c) a batch opening proof corresponding to the query map
     #[instrument(level = "debug", skip(self))]
-    pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<F, UvPCS>> {
-        let mut query_map: BTreeMap<(TrackerID, F), F> = BTreeMap::new();
+    pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<B::F, B::UvPCS>> {
+        let mut query_map: BTreeMap<(TrackerID, B::F), B::F> = BTreeMap::new();
         let mut mat_polys = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
@@ -1007,9 +1009,9 @@ where
             }
         }
 
-        let opening_proof: PCSOpeningProof<F, UvPCS>;
+        let opening_proof: PCSOpeningProof<B::F, B::UvPCS>;
         if mat_polys.len() == 1 {
-            let single_proof = UvPCS::open(
+            let single_proof = B::UvPCS::open(
                 self.pk.uv_pcs_param.as_ref(),
                 &mat_polys[0],
                 &points[0],
@@ -1018,7 +1020,7 @@ where
             opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
             assert!(single_proof.1 == evals[0]);
         } else if mat_polys.len() > 1 {
-            let batch_proof = UvPCS::multi_open(
+            let batch_proof = B::UvPCS::multi_open(
                 self.pk.uv_pcs_param.as_ref(),
                 &mat_polys,
                 &points,
@@ -1044,10 +1046,9 @@ where
     /// 2. The multivariate PCS subproof
     /// 3. The univariate PCS subproof
     #[instrument(level = "debug", skip(self))]
-    pub fn compile_proof(&mut self) -> SnarkResult<Proof<F, MvPCS, UvPCS>>
+    pub fn compile_proof(&mut self) -> SnarkResult<Proof<B>>
     where
-        MvPCS: PCS<F, Poly = MLE<F>>,
-        UvPCS: PCS<F, Poly = LDE<F>>,
+        B: SnarkBackend,
     {
         // Transform all the materialized polynomials to polynomials with the maximum
         // number of variables needed

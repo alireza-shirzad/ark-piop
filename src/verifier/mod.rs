@@ -8,14 +8,9 @@ use structs::oracle::{Oracle, TrackedOracle};
 use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
-    arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::SnarkResult,
-    pcs::PolynomialCommitment,
-    prover::structs::proof::Proof,
-    setup::structs::SNARKVk,
-    structs::TrackerID,
+    SnarkBackend, errors::SnarkResult, pcs::PolynomialCommitment, prover::structs::proof::Proof,
+    setup::structs::SNARKVk, structs::TrackerID,
 };
-use ark_ff::PrimeField;
 
 use crate::pcs::PCS;
 use derivative::Derivative;
@@ -23,38 +18,31 @@ use derivative::Derivative;
 use tracker::VerifierTracker;
 
 #[derive(Derivative)]
-#[derivative(Clone(bound = "MvPCS: PCS<F>"))]
-#[derivative(Clone(bound = "UvPCS: PCS<F>"))]
-pub struct ArgVerifier<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
+#[derivative(Clone(bound = ""))]
+pub struct ArgVerifier<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    tracker_rc: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+    tracker_rc: Rc<RefCell<VerifierTracker<B>>>,
 }
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> PartialEq for ArgVerifier<F, MvPCS, UvPCS>
+impl<B> PartialEq for ArgVerifier<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker_rc, &other.tracker_rc)
     }
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> ArgVerifier<F, MvPCS, UvPCS>
+impl<B> ArgVerifier<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     // TODO: See if you can shorten this function
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_vk(vk: SNARKVk<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
         let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
-        let range_tr_polys: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>> = vk
+        let range_tr_polys: BTreeMap<String, TrackedOracle<B>> = vk
             .indexed_coms
             .iter()
             .map(|(data_type, mle)| {
@@ -62,8 +50,7 @@ where
                 (data_type.clone(), tr_poly)
             })
             .collect();
-        let tracker_ref_cell: &RefCell<VerifierTracker<F, MvPCS, UvPCS>> =
-            verifier.tracker_rc.borrow();
+        let tracker_ref_cell: &RefCell<VerifierTracker<B>> = verifier.tracker_rc.borrow();
         tracker_ref_cell
             .borrow_mut()
             .set_indexed_oracles(range_tr_polys);
@@ -71,26 +58,26 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_tracker_rc(tracker_rc: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>) -> Self {
+    pub fn new_from_tracker_rc(tracker_rc: Rc<RefCell<VerifierTracker<B>>>) -> Self {
         Self { tracker_rc }
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_tracker(tracker: VerifierTracker<F, MvPCS, UvPCS>) -> Self {
+    pub fn new_from_tracker(tracker: VerifierTracker<B>) -> Self {
         Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
     }
 
     /// Get the range tracked polynomial given the data type
     #[instrument(level = "debug", skip_all)]
-    pub fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    pub fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<B>> {
         RefCell::borrow(&self.tracker_rc).indexed_oracle(data_type)
     }
 
     #[instrument(level = "debug", skip_all)]
     pub fn track_mat_mv_com(
         &self,
-        comm: MvPCS::Commitment,
-    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedOracle<B>> {
         let nv = comm.log_size();
         let tracked_oracle = TrackedOracle::new(
             Either::Left(self.tracker_rc.borrow_mut().track_mat_mv_com(comm)?),
@@ -105,11 +92,7 @@ where
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
     #[instrument(level = "debug", skip(self))]
-    pub fn track_mat_mv_cnst_oracle(
-        &mut self,
-        nv: usize,
-        cnst: F,
-    ) -> TrackedOracle<F, MvPCS, UvPCS> {
+    pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: B::F) -> TrackedOracle<B> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
             Span::current().record("cnst", debug(&cnst));
         }
@@ -118,7 +101,7 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn track_oracle(&self, oracle: Oracle<F>) -> TrackedOracle<F, MvPCS, UvPCS> {
+    pub fn track_oracle(&self, oracle: Oracle<B::F>) -> TrackedOracle<B> {
         let log_size = oracle.log_size();
         TrackedOracle::new(
             Either::Left(self.tracker_rc.borrow_mut().track_oracle(oracle)),
@@ -138,23 +121,23 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn set_proof(&mut self, proof: Proof<F, MvPCS, UvPCS>) {
+    pub fn set_proof(&mut self, proof: Proof<B>) {
         self.tracker_rc.borrow_mut().set_proof(proof);
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
         trace!("challenge {:?}", res);
         res
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<F> {
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
         RefCell::borrow(&self.tracker_rc).miscellaneous_field_element(label)
     }
 
-    pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
+    pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.tracker_rc
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum);
@@ -165,19 +148,19 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
+    pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<B::F>) -> SnarkResult<B::F> {
         self.tracker_rc.borrow_mut().query_mv(poly_id, point)
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn query_uv(&mut self, poly_id: TrackerID, point: F) -> SnarkResult<F> {
+    pub fn query_uv(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
         self.tracker_rc.borrow_mut().query_uv(poly_id, point)
     }
 
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
     #[instrument(level = "debug", skip(self))]
-    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
-        let tracker_ref_cell: &RefCell<VerifierTracker<F, MvPCS, UvPCS>> = self.tracker_rc.borrow();
+    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
+        let tracker_ref_cell: &RefCell<VerifierTracker<B>> = self.tracker_rc.borrow();
         tracker_ref_cell.borrow().prover_claimed_sum(id)
     }
 
@@ -188,10 +171,7 @@ where
 
     // TODO: Rename to get oracle
     #[instrument(level = "debug", skip(self))]
-    pub fn track_mv_com_by_id(
-        &mut self,
-        id: TrackerID,
-    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
         let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?;
         Ok(TrackedOracle::new(
             Either::Left(tracker_id),
@@ -201,10 +181,7 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub fn track_uv_com_by_id(
-        &mut self,
-        id: TrackerID,
-    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
         let (degree, tracker_id) = self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?;
         Ok(TrackedOracle::new(
             Either::Left(tracker_id),
@@ -220,12 +197,12 @@ where
 
     #[instrument(level = "debug", skip_all)]
     #[cfg(feature = "test-utils")]
-    pub fn clone_underlying_tracker(&self) -> VerifierTracker<F, MvPCS, UvPCS> {
+    pub fn clone_underlying_tracker(&self) -> VerifierTracker<B> {
         RefCell::borrow(&self.tracker_rc).clone()
     }
     #[instrument(level = "debug", skip_all)]
     #[cfg(feature = "test-utils")]
-    pub fn deep_copy(&self) -> ArgVerifier<F, MvPCS, UvPCS> {
+    pub fn deep_copy(&self) -> ArgVerifier<B> {
         ArgVerifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }
 }

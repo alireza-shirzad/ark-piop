@@ -1,15 +1,12 @@
 use crate::{
-    arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::SnarkResult,
-    pcs::PCS,
-    structs::TrackerID,
+    SnarkBackend, errors::SnarkResult, pcs::PCS, structs::TrackerID,
     verifier::tracker::VerifierTracker,
 };
-use ark_ff::{Field, PrimeField};
+use ark_ff::Field;
+use ark_std::One;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 use either::Either;
-use serde::de;
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
@@ -17,7 +14,6 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
-////////////////////////////// Structs & Enums //////////////////////////////
 
 pub trait CloneableFn<F: 'static, In>: Fn(In) -> SnarkResult<F> + Send + Sync {
     fn clone_box(&self) -> Box<dyn CloneableFn<F, In>>;
@@ -94,41 +90,34 @@ impl<F: 'static + Field> Clone for InnerOracle<F> {
 ////////////////////////////////////////////
 
 #[derive(Derivative)]
-#[derivative(Clone(bound = "MvPCS: PCS<F>"))]
-#[derivative(Clone(bound = "UvPCS: PCS<F>"))]
-pub struct TrackedOracle<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>>
+#[derivative(Clone(bound = ""))]
+pub struct TrackedOracle<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
-    id_or_const: Either<TrackerID, F>,
-    tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+    id_or_const: Either<TrackerID, B::F>,
+    tracker: Rc<RefCell<VerifierTracker<B>>>,
     log_size: usize,
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> TrackedOracle<F, MvPCS, UvPCS>
+impl<B> TrackedOracle<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     /// Returns the number of variables in the tracked oracle
     pub fn log_size(&self) -> usize {
         self.log_size
     }
 
-    pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>> {
+    pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
         self.tracker.clone()
     }
 }
 
 // Serialization for tracked oracle
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> Debug for TrackedOracle<F, MvPCS, UvPCS>
+impl<B> Debug for TrackedOracle<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TrackedOracle")
@@ -137,251 +126,22 @@ where
     }
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS> PartialEq for TrackedOracle<F, MvPCS, UvPCS>
+impl<B> PartialEq for TrackedOracle<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     fn eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 }
 
-impl<F, MvPCS, UvPCS> AddAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
+impl<B> TrackedOracle<B>
 where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    #[inline]
-    fn add_assign(&mut self, rhs: &Self) {
-        self.id_or_const = self.compute_add(rhs);
-    }
-}
-
-impl<F, MvPCS, UvPCS> SubAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    #[inline]
-    fn sub_assign(&mut self, rhs: &Self) {
-        self.id_or_const = self.compute_sub(rhs);
-    }
-}
-
-impl<F, MvPCS, UvPCS> MulAssign<&Self> for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    #[inline]
-    fn mul_assign(&mut self, rhs: &Self) {
-        self.id_or_const = self.compute_mul(rhs);
-    }
-}
-
-impl<F, MvPCS, UvPCS> AddAssign<F> for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    #[inline]
-    fn add_assign(&mut self, rhs: F) {
-        self.id_or_const = self.compute_add_scalar(rhs);
-    }
-}
-
-impl<F, MvPCS, UvPCS> MulAssign<F> for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    #[inline]
-    fn mul_assign(&mut self, rhs: F) {
-        self.id_or_const = self.compute_mul_scalar(rhs);
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Add<&'a TrackedOracle<F, MvPCS, UvPCS>>
-    for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn add(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        #[cfg(debug_assertions)]
-        {
-            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
-                assert!(
-                    self.same_tracker(rhs),
-                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
-                    self.tracker.as_ptr(),
-                    rhs.tracker.as_ptr()
-                );
-                assert!(
-                    self.log_size() == rhs.log_size(),
-                    "Cannot add TrackedOracles with different log_size: {} and {}",
-                    self.log_size(),
-                    rhs.log_size()
-                );
-            }
-        }
-        let id_or_const = self.compute_add(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Sub<&'a TrackedOracle<F, MvPCS, UvPCS>>
-    for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn sub(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        #[cfg(debug_assertions)]
-        {
-            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
-                assert!(
-                    self.same_tracker(rhs),
-                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
-                    self.tracker.as_ptr(),
-                    rhs.tracker.as_ptr()
-                );
-                assert!(
-                    self.log_size() == rhs.log_size(),
-                    "Cannot add TrackedOracles with different log_size: {} and {}",
-                    self.log_size(),
-                    rhs.log_size()
-                );
-            }
-        }
-        let id_or_const = self.compute_sub(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Mul<&'a TrackedOracle<F, MvPCS, UvPCS>>
-    for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn mul(self, rhs: &'a TrackedOracle<F, MvPCS, UvPCS>) -> Self::Output {
-        #[cfg(debug_assertions)]
-        {
-            if let (Either::Left(_), Either::Left(_)) = (self.id_or_const, &rhs.id_or_const) {
-                assert!(
-                    self.same_tracker(rhs),
-                    "Cannot add TrackedOracles from different trackers: {:?} and {:?}",
-                    self.tracker.as_ptr(),
-                    rhs.tracker.as_ptr()
-                );
-                assert!(
-                    self.log_size() == rhs.log_size(),
-                    "Cannot add TrackedOracles with different log_size: {} and {}",
-                    self.log_size(),
-                    rhs.log_size()
-                );
-            }
-        }
-        let id_or_const = self.compute_mul(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Add<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn add(self, rhs: F) -> Self::Output {
-        let id_or_const = self.compute_add_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Sub<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn sub(self, rhs: F) -> Self::Output {
-        let id_or_const = self.compute_sub_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<'a, F, MvPCS, UvPCS> Mul<F> for &'a TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-
-    #[inline]
-    fn mul(self, rhs: F) -> Self::Output {
-        let id_or_const = self.compute_mul_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
-    }
-}
-
-impl<F, MvPCS, UvPCS> Neg for TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
-    type Output = TrackedOracle<F, MvPCS, UvPCS>;
-    #[inline]
-    fn neg(self) -> Self::Output {
-        let tracker = self.tracker.clone();
-        let id_or_const = match self.id_or_const {
-            Either::Left(id) => {
-                let new_id = tracker.borrow_mut().mul_scalar(id, -F::one());
-                Either::Left(new_id)
-            }
-            Either::Right(c) => Either::Right(-c),
-        };
-        TrackedOracle::new(id_or_const, tracker, self.log_size)
-    }
-}
-
-impl<F, MvPCS, UvPCS> TrackedOracle<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
+    B: SnarkBackend,
 {
     pub fn new(
-        id_or_const: Either<TrackerID, F>,
-        tracker: Rc<RefCell<VerifierTracker<F, MvPCS, UvPCS>>>,
+        id_or_const: Either<TrackerID, B::F>,
+        tracker: Rc<RefCell<VerifierTracker<B>>>,
         log_size: usize,
     ) -> Self {
         Self {
@@ -398,20 +158,20 @@ where
         }
     }
 
-    pub fn same_tracker(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) -> bool {
+    pub fn same_tracker(&self, other: &TrackedOracle<B>) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }
 
-    pub fn assert_same_tracker(&self, other: &TrackedOracle<F, MvPCS, UvPCS>) {
+    pub fn assert_same_tracker(&self, other: &TrackedOracle<B>) {
         assert!(
             self.same_tracker(other),
             "TrackedOracles are not from the same tracker"
         );
     }
 
-    pub fn commitment(&self) -> MvPCS::Commitment
+    pub fn commitment(&self) -> <B::MvPCS as PCS<B::F>>::Commitment
     where
-        MvPCS::Commitment: Clone,
+        <B::MvPCS as PCS<B::F>>::Commitment: Clone,
     {
         match &self.id_or_const {
             Either::Left(id) => self
@@ -423,7 +183,7 @@ where
         }
     }
 
-    fn compute_add(&self, rhs: &TrackedOracle<F, MvPCS, UvPCS>) -> Either<TrackerID, F> {
+    fn compute_add(&self, rhs: &TrackedOracle<B>) -> Either<TrackerID, B::F> {
         self.assert_same_tracker(rhs);
         match (&self.id_or_const, &rhs.id_or_const) {
             (Either::Left(id1), Either::Left(id2)) => {
@@ -442,7 +202,7 @@ where
         }
     }
 
-    fn compute_sub(&self, rhs: &TrackedOracle<F, MvPCS, UvPCS>) -> Either<TrackerID, F> {
+    fn compute_sub(&self, rhs: &TrackedOracle<B>) -> Either<TrackerID, B::F> {
         self.assert_same_tracker(rhs);
         match (&self.id_or_const, &rhs.id_or_const) {
             (Either::Left(id1), Either::Left(id2)) => {
@@ -456,7 +216,7 @@ where
             (Either::Right(c1), Either::Left(id2)) => {
                 let new_id = {
                     let mut tracker = self.tracker.borrow_mut();
-                    let neg_id = tracker.mul_scalar(*id2, -F::one());
+                    let neg_id = tracker.mul_scalar(*id2, -B::F::one());
                     tracker.add_scalar(neg_id, *c1)
                 };
                 Either::Left(new_id)
@@ -465,7 +225,7 @@ where
         }
     }
 
-    fn compute_mul(&self, rhs: &TrackedOracle<F, MvPCS, UvPCS>) -> Either<TrackerID, F> {
+    fn compute_mul(&self, rhs: &TrackedOracle<B>) -> Either<TrackerID, B::F> {
         self.assert_same_tracker(rhs);
         match (&self.id_or_const, &rhs.id_or_const) {
             (Either::Left(id1), Either::Left(id2)) => {
@@ -484,7 +244,7 @@ where
         }
     }
 
-    fn compute_add_scalar(&self, scalar: F) -> Either<TrackerID, F> {
+    fn compute_add_scalar(&self, scalar: B::F) -> Either<TrackerID, B::F> {
         match &self.id_or_const {
             Either::Left(id) => {
                 let new_id = self.tracker.borrow_mut().add_scalar(*id, scalar);
@@ -494,7 +254,7 @@ where
         }
     }
 
-    fn compute_sub_scalar(&self, scalar: F) -> Either<TrackerID, F> {
+    fn compute_sub_scalar(&self, scalar: B::F) -> Either<TrackerID, B::F> {
         match &self.id_or_const {
             Either::Left(id) => {
                 let new_id = self.tracker.borrow_mut().sub_scalar(*id, scalar);
@@ -504,7 +264,7 @@ where
         }
     }
 
-    fn compute_mul_scalar(&self, scalar: F) -> Either<TrackerID, F> {
+    fn compute_mul_scalar(&self, scalar: B::F) -> Either<TrackerID, B::F> {
         match &self.id_or_const {
             Either::Left(id) => {
                 let new_id = self.tracker.borrow_mut().mul_scalar(*id, scalar);
@@ -512,5 +272,138 @@ where
             }
             Either::Right(c) => Either::Right(*c * scalar),
         }
+    }
+
+    fn compute_add_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
+        match rhs {
+            OracleOperand::Oracle(oracle) => self.compute_add(oracle),
+        }
+    }
+
+    fn compute_sub_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
+        match rhs {
+            OracleOperand::Oracle(oracle) => self.compute_sub(oracle),
+        }
+    }
+
+    fn compute_mul_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
+        match rhs {
+            OracleOperand::Oracle(oracle) => self.compute_mul(oracle),
+        }
+    }
+}
+
+/// Helper that lets us unify operator implementations for either another
+/// oracle or a scalar field element.
+enum OracleOperand<'a, B: SnarkBackend> {
+    Oracle(&'a TrackedOracle<B>),
+}
+
+trait IntoOracleOperand<B: SnarkBackend> {
+    fn into_operand<'a>(self) -> OracleOperand<'a, B>
+    where
+        Self: 'a;
+}
+
+impl<'a, B: SnarkBackend> IntoOracleOperand<B> for &'a TrackedOracle<B> {
+    fn into_operand<'b>(self) -> OracleOperand<'b, B>
+    where
+        Self: 'b,
+    {
+        OracleOperand::Oracle(self)
+    }
+}
+
+impl<B, Rhs> AddAssign<Rhs> for TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    #[inline]
+    fn add_assign(&mut self, rhs: Rhs) {
+        self.id_or_const = self.compute_add_operand(rhs.into_operand());
+    }
+}
+
+impl<B, Rhs> SubAssign<Rhs> for TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    #[inline]
+    fn sub_assign(&mut self, rhs: Rhs) {
+        self.id_or_const = self.compute_sub_operand(rhs.into_operand());
+    }
+}
+
+impl<B, Rhs> MulAssign<Rhs> for TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    #[inline]
+    fn mul_assign(&mut self, rhs: Rhs) {
+        self.id_or_const = self.compute_mul_operand(rhs.into_operand());
+    }
+}
+
+impl<'a, B, Rhs> Add<Rhs> for &'a TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn add(self, rhs: Rhs) -> Self::Output {
+        let id_or_const = self.compute_add_operand(rhs.into_operand());
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<'a, B, Rhs> Sub<Rhs> for &'a TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn sub(self, rhs: Rhs) -> Self::Output {
+        let id_or_const = self.compute_sub_operand(rhs.into_operand());
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<'a, B, Rhs> Mul<Rhs> for &'a TrackedOracle<B>
+where
+    B: SnarkBackend,
+    Rhs: IntoOracleOperand<B>,
+{
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn mul(self, rhs: Rhs) -> Self::Output {
+        let id_or_const = self.compute_mul_operand(rhs.into_operand());
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<B> Neg for TrackedOracle<B>
+where
+    B: SnarkBackend,
+{
+    type Output = TrackedOracle<B>;
+    #[inline]
+    fn neg(self) -> Self::Output {
+        let tracker = self.tracker.clone();
+        let id_or_const = match self.id_or_const {
+            Either::Left(id) => {
+                let new_id = tracker.borrow_mut().mul_scalar(id, -B::F::one());
+                Either::Left(new_id)
+            }
+            Either::Right(c) => Either::Right(-c),
+        };
+        TrackedOracle::new(id_or_const, tracker, self.log_size)
     }
 }

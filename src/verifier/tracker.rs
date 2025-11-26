@@ -1,8 +1,6 @@
 use crate::{
-    arithmetic::{
-        f_vec_short_str,
-        mat_poly::{lde::LDE, mle::MLE, utils::eq_eval},
-    },
+    SnarkBackend,
+    arithmetic::{f_vec_short_str, mat_poly::utils::eq_eval},
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
     piop::{errors::PolyIOPErrors, sum_check::SumCheck},
@@ -14,11 +12,10 @@ use crate::{
     },
     verifier::structs::oracle::InnerOracle,
 };
-use ark_ff::PrimeField;
+use ark_std::Zero;
 use itertools::MultiUnzip;
+use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
 use tracing::{debug, instrument};
-
-use std::{borrow::BorrowMut, collections::BTreeMap, mem::take, sync::Arc};
 
 use derivative::Derivative;
 
@@ -43,28 +40,16 @@ use super::{
 ///                      4) Providing methods for adding virtual commnomials
 ///                         together
 #[derive(Derivative)]
-#[derivative(Clone(bound = "MvPCS: PCS<F>"))]
-#[derivative(Clone(bound = "UvPCS: PCS<F>"))]
-pub struct VerifierTracker<
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-> where
-    F: PrimeField,
-{
-    vk: ProcessedSNARKVk<F, MvPCS, UvPCS>,
-    state: VerifierState<F, MvPCS, UvPCS>,
-    proof: Option<ProcessedProof<F, MvPCS, UvPCS>>,
+#[derivative(Clone(bound = ""))]
+pub struct VerifierTracker<B: SnarkBackend> {
+    vk: ProcessedSNARKVk<B>,
+    state: VerifierState<B>,
+    proof: Option<ProcessedProof<B>>,
 }
 
-impl<F: PrimeField, MvPCS: PCS<F>, UvPCS: PCS<F>> VerifierTracker<F, MvPCS, UvPCS>
-where
-    F: PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
-{
+impl<B: SnarkBackend> VerifierTracker<B> {
     // Create new verifier tracker with clean state given a verifying key
-    pub(crate) fn new_from_vk(vk: SNARKVk<F, MvPCS, UvPCS>) -> Self {
+    pub(crate) fn new_from_vk(vk: SNARKVk<B>) -> Self {
         let mut tracker = Self {
             vk: ProcessedSNARKVk::new_from_vk(&vk),
             state: VerifierState::default(),
@@ -74,7 +59,7 @@ where
         tracker
     }
 
-    fn add_vk_to_transcript(&mut self, vk: SNARKVk<F, MvPCS, UvPCS>) {
+    fn add_vk_to_transcript(&mut self, vk: SNARKVk<B>) {
         self.state
             .transcript
             .append_serializable_element(b"vk", &vk)
@@ -82,7 +67,7 @@ where
     }
 
     // Set the proof for the tracker
-    pub fn set_proof(&mut self, proof: Proof<F, MvPCS, UvPCS>) {
+    pub fn set_proof(&mut self, proof: Proof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(&proof));
     }
 
@@ -99,10 +84,10 @@ where
     }
 
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
-        let comm: MvPCS::Commitment;
+        let comm: <B::MvPCS as PCS<B::F>>::Commitment;
         {
             // Scope the immutable borrow
-            let comm_opt: Option<&MvPCS::Commitment> = self
+            let comm_opt: Option<&<B::MvPCS as PCS<B::F>>::Commitment> = self
                 .proof
                 .as_ref()
                 .unwrap()
@@ -135,7 +120,7 @@ where
         Ok((nv as usize, new_id))
     }
 
-    pub fn mv_commitment(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
+    pub fn mv_commitment(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {
         self.state
             .mv_pcs_substate
             .materialized_comms
@@ -144,11 +129,12 @@ where
     }
 
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
-        let comm: UvPCS::Commitment;
+        let comm: <B::UvPCS as PCS<B::F>>::Commitment;
         {
             // Scope the immutable borrow
             let proof = self.proof.as_ref().unwrap();
-            let comm_opt: Option<&UvPCS::Commitment> = proof.uv_pcs_subproof.comitments.get(&id);
+            let comm_opt: Option<&<B::UvPCS as PCS<B::F>>::Commitment> =
+                proof.uv_pcs_subproof.comitments.get(&id);
             match comm_opt {
                 Some(value) => {
                     comm = value.clone();
@@ -176,7 +162,10 @@ where
     }
 
     /// Track a materiazlied multivariate commitment
-    pub(crate) fn track_mat_mv_com(&mut self, comm: MvPCS::Commitment) -> SnarkResult<TrackerID> {
+    pub(crate) fn track_mat_mv_com(
+        &mut self,
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackerID> {
         // Create the new TrackerID
         let id = self.gen_id();
 
@@ -186,7 +175,7 @@ where
 
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<F>| {
+                    Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
                         let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
                             SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
                                 id.0,
@@ -215,7 +204,10 @@ where
     }
 
     // Track a materiazlied univariate commitment
-    pub fn track_mat_uv_com(&mut self, comm: UvPCS::Commitment) -> SnarkResult<TrackerID> {
+    pub fn track_mat_uv_com(
+        &mut self,
+        comm: <B::UvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackerID> {
         // Create the new TrackerID
         let id = self.gen_id();
 
@@ -224,7 +216,7 @@ where
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
                 self.state.virtual_oracles.insert(
                     id,
-                    Oracle::new_univariate(comm.log_size() as usize, move |point: F| {
+                    Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
                         let query_res = uv_queries_clone.get(&(id, point)).unwrap();
                         Ok(*query_res)
                     }),
@@ -248,7 +240,7 @@ where
     }
 
     /// Track an oracle
-    pub fn track_oracle(&mut self, oracle: Oracle<F>) -> TrackerID {
+    pub fn track_oracle(&mut self, oracle: Oracle<B::F>) -> TrackerID {
         let id = self.gen_id();
         self.state.virtual_oracles.borrow_mut().insert(id, oracle);
         id
@@ -265,40 +257,40 @@ where
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| {
+                Oracle::new_univariate(log_size, move |point: B::F| {
                     Ok(o1_cloned(point)? + o2_cloned(point)?)
                 })
             }
             (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? + c2)
                 })
             }
             (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(c1 + o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? + c2))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? + c2))
             }
             (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| Ok(c1 + o2_cloned(point)?))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 + o2_cloned(point)?))
             }
             (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
                 Oracle::new_constant(log_size, *c1 + *c2)
@@ -320,40 +312,40 @@ where
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? - o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| {
+                Oracle::new_univariate(log_size, move |point: B::F| {
                     Ok(o1_cloned(point)? - o2_cloned(point)?)
                 })
             }
             (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? - c2)
                 })
             }
             (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(c1 - o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? - c2))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? - c2))
             }
             (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| Ok(c1 - o2_cloned(point)?))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 - o2_cloned(point)?))
             }
             (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
                 Oracle::new_constant(log_size, *c1 - *c2)
@@ -375,40 +367,40 @@ where
             (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? * o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
                 let o1_cloned = o1.clone();
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| {
+                Oracle::new_univariate(log_size, move |point: B::F| {
                     Ok(o1_cloned(point)? * o2_cloned(point)?)
                 })
             }
             (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? * c2)
                 })
             }
             (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(c1 * o2_cloned(point.clone())?)
                 })
             }
             (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
                 let o1_cloned = o1.clone();
                 let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? * c2))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? * c2))
             }
             (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
                 let c1 = *c1;
                 let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: F| Ok(c1 * o2_cloned(point)?))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 * o2_cloned(point)?))
             }
             (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
                 Oracle::new_constant(log_size, *c1 * *c2)
@@ -420,7 +412,7 @@ where
         res_id
     }
 
-    pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
+    pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         let _ = self.gen_id(); // burn a tracker id to match how prover::add_scalar works
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
@@ -430,13 +422,13 @@ where
         let res_oracle = match o1_eval_box.inner() {
             InnerOracle::Multivariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? + scalar)
                 })
             }
             InnerOracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? + scalar))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? + scalar))
             }
             InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c + scalar),
         };
@@ -447,11 +439,11 @@ where
         res_id
     }
 
-    pub fn sub_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
+    pub fn sub_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         self.add_scalar(o1_id, -scalar)
     }
 
-    pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: F) -> TrackerID {
+    pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let log_size = o1_eval_box.log_size();
@@ -459,13 +451,13 @@ where
         let res_oracle = match o1_eval_box.inner() {
             InnerOracle::Multivariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<F>| {
+                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
                     Ok(o1_cloned(point.clone())? * scalar)
                 })
             }
             InnerOracle::Univariate(o1) => {
                 let o1_cloned = o1.clone();
-                Oracle::new_univariate(log_size, move |point: F| Ok(o1_cloned(point)? * scalar))
+                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? * scalar))
             }
             InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c * scalar),
         };
@@ -476,7 +468,7 @@ where
         res_id
     }
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
-    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<F> {
+    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
         self.proof
             .as_ref()
             .unwrap()
@@ -488,7 +480,7 @@ where
             .cloned()
             .ok_or(SnarkError::DummyError)
     }
-    pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<F>) -> SnarkResult<F> {
+    pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<B::F>) -> SnarkResult<B::F> {
         let mut equalized_point = point.clone();
         equalized_point.resize(
             self.proof
@@ -499,7 +491,7 @@ where
                 .expect("No sumcheck subproof in the proof")
                 .sc_aux_info()
                 .num_variables,
-            F::zero(),
+            B::F::zero(),
         );
         let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
         match oracle.inner() {
@@ -507,28 +499,28 @@ where
             _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn query_uv(&self, oracle_id: TrackerID, point: F) -> SnarkResult<F> {
+    pub fn query_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
         let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
         match oracle.inner() {
             InnerOracle::Univariate(f) => f(point),
             _ => Err(SnarkError::DummyError),
         }
     }
-    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<F> {
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         self.state
             .transcript
             .get_and_append_challenge(label)
             .map_err(SnarkError::from)
     }
 
-    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<F> {
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
         self.proof
             .as_ref()
             .and_then(|proof| proof.miscellaneous_field_elements.get(label).cloned())
             .ok_or(SnarkError::DummyError)
     }
 
-    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: F) {
+    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.state
             .mv_pcs_substate
             .sum_check_claims
@@ -545,8 +537,8 @@ where
     pub fn add_mv_eval_claim(
         &mut self,
         poly_id: TrackerID,
-        point: &[F],
-        eval: F,
+        point: &[B::F],
+        eval: B::F,
     ) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate
@@ -558,15 +550,12 @@ where
     // Set range comitments for the tracker
     pub(crate) fn set_indexed_oracles(
         &mut self,
-        range_tr_comms: BTreeMap<String, TrackedOracle<F, MvPCS, UvPCS>>,
+        range_tr_comms: BTreeMap<String, TrackedOracle<B>>,
     ) {
         self.vk.range_comms = range_tr_comms;
     }
     // Get a range commitment for the given data type
-    pub(crate) fn indexed_oracle(
-        &self,
-        data_type: String,
-    ) -> SnarkResult<TrackedOracle<F, MvPCS, UvPCS>> {
+    pub(crate) fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<B>> {
         match self.vk.range_comms.get(&data_type) {
             Some(poly) => Ok(poly.clone()),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!(
@@ -576,7 +565,7 @@ where
         }
     }
 
-    pub fn prover_comm(&self, id: TrackerID) -> Option<MvPCS::Commitment> {
+    pub fn prover_comm(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {
         self.proof
             .as_ref()
             .unwrap()
@@ -613,7 +602,7 @@ where
             return Ok(());
         }
 
-        let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
+        let zero_closure = |_: Vec<B::F>| -> SnarkResult<B::F> { Ok(B::F::zero()) };
         let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
         let mut agg = self.track_oracle(zero_oracle);
 
@@ -659,13 +648,13 @@ where
             .unwrap()
             .id();
         // create the succint eq(x, r) closure and virtual comm
-        let eq_x_r_closure = move |pt: Vec<F>| -> SnarkResult<F> { eq_eval(&pt, r.as_ref()) };
+        let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> { eq_eval(&pt, r.as_ref()) };
         let eq_x_r_oracle = Oracle::new_multivariate(max_nv, eq_x_r_closure);
         let eq_x_r_comm = self.track_oracle(eq_x_r_oracle);
         // create the relevant sumcheck claim, reduce the zero check claim to a sumcheck claim
         let new_sc_claim_comm = self.mul_oracles(z_check_aggr_id, eq_x_r_comm);
         // Add this new sumcheck claim to other sumcheck claims
-        self.add_mv_sumcheck_claim(new_sc_claim_comm, F::zero());
+        self.add_mv_sumcheck_claim(new_sc_claim_comm, B::F::zero());
         debug!("The only zerocheck claim was converted to a sumcheck claim",);
         Ok(())
     }
@@ -683,10 +672,10 @@ where
         }
 
         // Aggreage te the sumcheck claims
-        let zero_closure = |_: Vec<F>| -> SnarkResult<F> { Ok(F::zero()) };
+        let zero_closure = |_: Vec<B::F>| -> SnarkResult<B::F> { Ok(B::F::zero()) };
         let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
         let mut agg = self.track_oracle(zero_oracle);
-        let mut sc_sum = F::zero();
+        let mut sc_sum = B::F::zero();
         // Iterate over the sumcheck claims and aggregate them
         // Order matters here, DO NOT PARALLELIZE
 
@@ -799,7 +788,7 @@ where
                     return Err(SnarkError::DummyError);
                 }
             };
-            pcs_res = MvPCS::verify(
+            pcs_res = <B::MvPCS as PCS<B::F>>::verify(
                 &self.vk.mv_pcs_param,
                 &mat_coms[0],
                 &points[0],
@@ -821,7 +810,7 @@ where
                 }
             };
 
-            pcs_res = MvPCS::batch_verify(
+            pcs_res = <B::MvPCS as PCS<B::F>>::batch_verify(
                 &self.vk.mv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
@@ -833,7 +822,7 @@ where
                     .query_map
                     .values()
                     .cloned()
-                    .collect::<Vec<F>>(),
+                    .collect::<Vec<B::F>>(),
                 opening_proof,
                 &mut self.state.transcript,
             )?;
@@ -864,7 +853,7 @@ where
                     return Err(SnarkError::DummyError);
                 }
             };
-            pcs_res = UvPCS::verify(
+            pcs_res = <B::UvPCS as PCS<B::F>>::verify(
                 &self.vk.uv_pcs_param,
                 &mat_coms[0],
                 &points[0],
@@ -879,7 +868,7 @@ where
                 }
             };
 
-            pcs_res = UvPCS::batch_verify(
+            pcs_res = <B::UvPCS as PCS<B::F>>::batch_verify(
                 &self.vk.uv_pcs_param,
                 &mat_coms,
                 points.as_slice(),

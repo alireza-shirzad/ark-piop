@@ -1,4 +1,5 @@
 use crate::{
+    SnarkBackend,
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkError,
     pcs::PCS,
@@ -152,14 +153,10 @@ pub fn init_tracing_for_tests() {
 /// verifier
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug")]
-pub fn prelude_with_vars<
-    F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
->(
+pub fn prelude_with_vars<B: SnarkBackend>(
     num_mv_vars: usize,
-) -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
-    let key_generator = KeyGenerator::<F, MvPCS, UvPCS>::new().with_num_mv_vars(num_mv_vars);
+) -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
+    let key_generator = KeyGenerator::<B>::new().with_num_mv_vars(num_mv_vars);
     let (pk, vk) = key_generator.gen_keys().unwrap();
     let prover = ArgProver::new_from_pk(pk);
     let verifier = ArgVerifier::new_from_vk(vk);
@@ -172,13 +169,9 @@ pub fn prelude_with_vars<
 /// of the prover and verifier
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug", skip_all)]
-pub fn test_prelude<
-    F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
->() -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
+pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
     init_tracing_for_tests();
-    prelude_with_vars::<F, MvPCS, UvPCS>(16)
+    prelude_with_vars::<B>(16)
 }
 
 /// A prelude for benchmarking, with a larger number of variables, suitable for
@@ -186,13 +179,9 @@ pub fn test_prelude<
 /// This function sets up the proof system and gives you a ready-to-use instance
 /// of the prover and verifier
 #[allow(clippy::type_complexity)]
-pub fn bench_prelude<
-    F: Field + PrimeField,
-    MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,
->() -> Result<(ArgProver<F, MvPCS, UvPCS>, ArgVerifier<F, MvPCS, UvPCS>), SnarkError> {
+pub fn bench_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
     init_tracing_for_tests();
-    prelude_with_vars::<F, MvPCS, UvPCS>(20)
+    prelude_with_vars::<B>(20)
 }
 
 #[derive(Default)]

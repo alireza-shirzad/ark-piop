@@ -4,6 +4,7 @@ use ark_ff::PrimeField;
 use tracing::{Level, span};
 
 use crate::{
+    SnarkBackend,
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkResult,
     pcs::PCS,
@@ -24,11 +25,8 @@ pub(crate) fn type_name_without_generics<T>() -> &'static str {
     }
 }
 /// Any PIOP must implement this trait.
-pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,>:
-    Sized
-{
-    type ProverInput: DeepClone<F, MvPCS, UvPCS> + std::fmt::Debug;
+pub trait PIOP<B: SnarkBackend>: Sized {
+    type ProverInput: DeepClone<B> + std::fmt::Debug;
     type ProverOutput;
     type VerifierOutput;
     type VerifierInput;
@@ -36,7 +34,7 @@ pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send 
     ///
     /// This is a default wrapper that adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove(
-        prover: &mut ArgProver<F, MvPCS, UvPCS>,
+        prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
         let struct_name = type_name_without_generics::<Self>();
@@ -78,7 +76,7 @@ pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send 
     ///
     /// This is a default wrapper that adds automatic tracing instrumentation for any PIOP.
     fn verify(
-        verifier: &mut ArgVerifier<F, MvPCS, UvPCS>,
+        verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
         let struct_name = type_name_without_generics::<Self>();
@@ -101,7 +99,7 @@ pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send 
     ///
     /// This will be wrapped by `prove`, which adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
     fn prove_inner(
-        prover: &mut ArgProver<F, MvPCS, UvPCS>,
+        prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
 
@@ -109,7 +107,7 @@ pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send 
     ///
     /// This will be wrapped by `verify`, which adds automatic tracing instrumentation for any PIOP.
     fn verify_inner(
-        verifier: &mut ArgVerifier<F, MvPCS, UvPCS>,
+        verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput>;
 
@@ -126,7 +124,6 @@ pub trait PIOP<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send 
 /// This trait only used for deep cloning PIOP prover inputs.
 ///
 /// Simply cloning the prover input interferes with the actual state of the prover in the protocol. Hence for honest prover checks we need to create a new prover instance and deep clone the input with this new prover instance.
-pub trait DeepClone<F: PrimeField,     MvPCS: PCS<F, Poly = MLE<F>> + 'static + Send + Sync,
-    UvPCS: PCS<F, Poly = LDE<F>> + 'static + Send + Sync,> {
-    fn deep_clone(&self, new_prover: ArgProver<F, MvPCS, UvPCS>) -> Self;
+pub trait DeepClone<B: SnarkBackend> {
+    fn deep_clone(&self, new_prover: ArgProver<B>) -> Self;
 }
