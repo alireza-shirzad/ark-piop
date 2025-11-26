@@ -412,6 +412,58 @@ where
     }
 }
 
+// Convenience overloads for scalar RHS to keep ergonomic operators.
+impl<'a, B: SnarkBackend> Mul<B::F> for &'a TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn mul(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_mul_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<'a, B: SnarkBackend> Add<B::F> for &'a TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn add(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_add_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<'a, B: SnarkBackend> Sub<B::F> for &'a TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn sub(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_sub_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<B: SnarkBackend> AddAssign<B::F> for TrackedOracle<B> {
+    #[inline]
+    fn add_assign(&mut self, rhs: B::F) {
+        self.id_or_const = self.compute_add_scalar(rhs);
+    }
+}
+
+impl<B: SnarkBackend> SubAssign<B::F> for TrackedOracle<B> {
+    #[inline]
+    fn sub_assign(&mut self, rhs: B::F) {
+        self.id_or_const = self.compute_sub_scalar(rhs);
+    }
+}
+
+impl<B: SnarkBackend> MulAssign<B::F> for TrackedOracle<B> {
+    #[inline]
+    fn mul_assign(&mut self, rhs: B::F) {
+        self.id_or_const = self.compute_mul_scalar(rhs);
+    }
+}
+
 impl<B> Neg for TrackedOracle<B>
 where
     B: SnarkBackend,

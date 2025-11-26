@@ -395,3 +395,61 @@ where
         TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
     }
 }
+
+impl<B: SnarkBackend> std::ops::MulAssign<B::F> for TrackedPoly<B> {
+    #[inline]
+    fn mul_assign(&mut self, rhs: B::F) {
+        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
+}
+
+impl<B: SnarkBackend> std::ops::AddAssign<B::F> for TrackedPoly<B> {
+    #[inline]
+    fn add_assign(&mut self, rhs: B::F) {
+        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
+}
+
+impl<B: SnarkBackend> std::ops::SubAssign<B::F> for TrackedPoly<B> {
+    #[inline]
+    fn sub_assign(&mut self, rhs: B::F) {
+        let (id_or_const, log_size) = self.compute_sub_scalar(rhs);
+        self.id_or_const = id_or_const;
+        self.log_size = log_size;
+    }
+}
+
+// Convenience overloads for scalar RHS to keep ergonomic operators.
+impl<'a, B: SnarkBackend> std::ops::Mul<B::F> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn mul(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, B: SnarkBackend> std::ops::Add<B::F> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn add(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, B: SnarkBackend> std::ops::Sub<B::F> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn sub(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_sub_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
