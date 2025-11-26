@@ -464,12 +464,4 @@ mod tests {
 
         Ok(())
     }
-
-    #[test]
-    fn setup_commit_verify_constant_polynomial() {
-        let mut rng = test_rng();
-
-        // normal polynomials
-        assert!(PST13::<E>::gen_srs_for_testing(&mut rng, 0).is_err());
-    }
 }

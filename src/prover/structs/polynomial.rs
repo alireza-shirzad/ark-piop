@@ -274,6 +274,26 @@ impl<B: SnarkBackend> DeepClone<B> for TrackedPoly<B> {
     }
 }
 
+impl<B: SnarkBackend> TrackedPoly<B> {
+    /// Return a new tracked polynomial equal to `self * scalar`.
+    pub fn mul_scalar_poly(&self, scalar: B::F) -> Self {
+        let (id_or_const, log_size) = self.compute_mul_scalar(scalar);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+
+    /// Return a new tracked polynomial equal to `self + scalar`.
+    pub fn add_scalar_poly(&self, scalar: B::F) -> Self {
+        let (id_or_const, log_size) = self.compute_add_scalar(scalar);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+
+    /// Return a new tracked polynomial equal to `self - scalar`.
+    pub fn sub_scalar_poly(&self, scalar: B::F) -> Self {
+        let (id_or_const, log_size) = self.compute_sub_scalar(scalar);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
 // ====================== Operator Trait Implementations ======================
 /// Helper that lets us unify operator implementations for either another
 /// polynomial or a scalar.

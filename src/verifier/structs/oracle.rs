@@ -139,6 +139,29 @@ impl<B> TrackedOracle<B>
 where
     B: SnarkBackend,
 {
+    /// Return a new tracked oracle equal to `self * scalar`.
+    pub fn mul_scalar_oracle(&self, scalar: B::F) -> Self {
+        let id_or_const = self.compute_mul_scalar(scalar);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+
+    /// Return a new tracked oracle equal to `self + scalar`.
+    pub fn add_scalar_oracle(&self, scalar: B::F) -> Self {
+        let id_or_const = self.compute_add_scalar(scalar);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+
+    /// Return a new tracked oracle equal to `self - scalar`.
+    pub fn sub_scalar_oracle(&self, scalar: B::F) -> Self {
+        let id_or_const = self.compute_sub_scalar(scalar);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<B> TrackedOracle<B>
+where
+    B: SnarkBackend,
+{
     pub fn new(
         id_or_const: Either<TrackerID, B::F>,
         tracker: Rc<RefCell<VerifierTracker<B>>>,
