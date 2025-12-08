@@ -13,7 +13,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{VerifierEvalClaimMap, oracle::Oracle};
 use crate::{
     pcs::PCS,
-    prover::structs::proof::Proof,
+    prover::structs::proof::SNARKProof,
     structs::{
         QueryMap, SumcheckSubproof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
@@ -72,7 +72,7 @@ where
     <<B::UvPCS as PCS<B::F>>::Poly as Polynomial<B::F>>::Point:
         CanonicalSerialize + CanonicalDeserialize,
 {
-    pub fn new_from_proof(proof: &Proof<B>) -> Self {
+    pub fn new_from_proof(proof: &SNARKProof<B>) -> Self {
         Self {
             sc_subproof: proof.sc_subproof.clone(),
             mv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.mv_pcs_subproof),

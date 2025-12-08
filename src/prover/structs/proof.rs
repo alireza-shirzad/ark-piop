@@ -13,7 +13,7 @@ use derivative::Derivative;
 /// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(Clone(bound = ""), Default(bound = ""), Debug(bound = ""))]
-pub struct Proof<B>
+pub struct SNARKProof<B>
 where
     B: SnarkBackend,
 {

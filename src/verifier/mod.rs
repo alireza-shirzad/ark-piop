@@ -8,7 +8,7 @@ use structs::oracle::{Oracle, TrackedOracle};
 use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
-    SnarkBackend, errors::SnarkResult, pcs::PolynomialCommitment, prover::structs::proof::Proof,
+    SnarkBackend, errors::SnarkResult, pcs::PolynomialCommitment, prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk, structs::TrackerID,
 };
 
@@ -121,7 +121,7 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    pub fn set_proof(&mut self, proof: Proof<B>) {
+    pub fn set_proof(&mut self, proof: SNARKProof<B>) {
         self.tracker_rc.borrow_mut().set_proof(proof);
     }
 

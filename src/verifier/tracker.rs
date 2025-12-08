@@ -4,7 +4,7 @@ use crate::{
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
     piop::{errors::PolyIOPErrors, sum_check::SumCheck},
-    prover::structs::proof::Proof,
+    prover::structs::proof::SNARKProof,
     setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     structs::{
         PCSOpeningProof, TrackerID,
@@ -67,7 +67,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     // Set the proof for the tracker
-    pub fn set_proof(&mut self, proof: Proof<B>) {
+    pub fn set_proof(&mut self, proof: SNARKProof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(&proof));
     }
 

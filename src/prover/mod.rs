@@ -25,7 +25,7 @@ use either::Either;
 use tracing::{Span, field::debug, instrument, trace};
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
-use structs::proof::Proof;
+use structs::proof::SNARKProof;
 use tracker::ProverTracker;
 ///////////// Body /////////////
 
@@ -323,7 +323,7 @@ where
 
     /// Build the zkSQL proof from the claims and comitments
     #[instrument(level = "debug", skip_all)]
-    pub fn build_proof(&mut self) -> SnarkResult<Proof<B>> {
+    pub fn build_proof(&mut self) -> SnarkResult<SNARKProof<B>> {
         self.tracker_rc.borrow_mut().compile_proof()
     }
 

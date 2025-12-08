@@ -1,6 +1,6 @@
 use super::structs::{
     ProcessedSNARKPk, ProverState,
-    proof::{PCSSubproof, Proof},
+    proof::{PCSSubproof, SNARKProof},
 };
 use crate::SnarkBackend;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
@@ -1046,7 +1046,7 @@ where
     /// 2. The multivariate PCS subproof
     /// 3. The univariate PCS subproof
     #[instrument(level = "debug", skip(self))]
-    pub fn compile_proof(&mut self) -> SnarkResult<Proof<B>>
+    pub fn compile_proof(&mut self) -> SnarkResult<SNARKProof<B>>
     where
         B: SnarkBackend,
     {
@@ -1054,7 +1054,7 @@ where
         // number of variables needed
         let max_nv = self.equalize_mat_poly_nv();
         // Assemble and output the final proof
-        let proof = Proof {
+        let proof = SNARKProof {
             sc_subproof: self.compile_sc_subproof(max_nv)?,
             mv_pcs_subproof: self.compile_mv_pcs_subproof()?,
             uv_pcs_subproof: self.compile_uv_pcs_subproof()?,

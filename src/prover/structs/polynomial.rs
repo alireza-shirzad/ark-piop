@@ -245,26 +245,6 @@ where
         (id_or_const, self.log_size)
     }
 
-    fn compute_add_operand<'a>(&self, rhs: PolyOperand<'a, B>) -> (Either<TrackerID, B::F>, usize) {
-        match rhs {
-            PolyOperand::Poly(poly) => self.compute_add(poly),
-            PolyOperand::Scalar(s) => self.compute_add_scalar(s),
-        }
-    }
-
-    fn compute_sub_operand<'a>(&self, rhs: PolyOperand<'a, B>) -> (Either<TrackerID, B::F>, usize) {
-        match rhs {
-            PolyOperand::Poly(poly) => self.compute_sub(poly),
-            PolyOperand::Scalar(s) => self.compute_sub_scalar(s),
-        }
-    }
-
-    fn compute_mul_operand<'a>(&self, rhs: PolyOperand<'a, B>) -> (Either<TrackerID, B::F>, usize) {
-        match rhs {
-            PolyOperand::Poly(poly) => self.compute_mul(poly),
-            PolyOperand::Scalar(s) => self.compute_mul_scalar(s),
-        }
-    }
 }
 
 impl<B: SnarkBackend> DeepClone<B> for TrackedPoly<B> {
@@ -298,112 +278,90 @@ impl<B: SnarkBackend> TrackedPoly<B> {
 }
 
 // ====================== Operator Trait Implementations ======================
-/// Helper that lets us unify operator implementations for either another
-/// polynomial or a scalar.
-enum PolyOperand<'a, B: SnarkBackend> {
-    Poly(&'a TrackedPoly<B>),
-    Scalar(B::F),
-}
+impl<'a, 'b, B: SnarkBackend> std::ops::Add<&'b TrackedPoly<B>> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
 
-trait IntoPolyOperand<B: SnarkBackend> {
-    fn into_operand<'a>(self) -> PolyOperand<'a, B>
-    where
-        Self: 'a;
-}
-
-impl<'a, B: SnarkBackend> IntoPolyOperand<B> for &'a TrackedPoly<B> {
-    fn into_operand<'b>(self) -> PolyOperand<'b, B>
-    where
-        Self: 'b,
-    {
-        PolyOperand::Poly(self)
-    }
-}
-
-impl<B: SnarkBackend> IntoPolyOperand<B> for B::F {
-    fn into_operand<'a>(self) -> PolyOperand<'a, B> {
-        PolyOperand::Scalar(self)
-    }
-}
-impl<B, Rhs> std::ops::AddAssign<Rhs> for TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
     #[inline]
-    fn add_assign(&mut self, rhs: Rhs) {
-        let (id_or_const, log_size) = self.compute_add_operand(rhs.into_operand());
+    fn add(self, rhs: &'b TrackedPoly<B>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_add(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, 'b, B: SnarkBackend> std::ops::Sub<&'b TrackedPoly<B>> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn sub(self, rhs: &'b TrackedPoly<B>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_sub(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, 'b, B: SnarkBackend> std::ops::Mul<&'b TrackedPoly<B>> for &'a TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn mul(self, rhs: &'b TrackedPoly<B>) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_mul(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+
+impl<B: SnarkBackend> std::ops::Add<B::F> for TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn add(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<B: SnarkBackend> std::ops::Sub<B::F> for TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn sub(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_sub_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<B: SnarkBackend> std::ops::Mul<B::F> for TrackedPoly<B> {
+    type Output = TrackedPoly<B>;
+
+    #[inline]
+    fn mul(self, rhs: B::F) -> Self::Output {
+        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
+        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+    }
+}
+
+impl<'a, B: SnarkBackend> std::ops::AddAssign<&'a TrackedPoly<B>> for TrackedPoly<B> {
+    #[inline]
+    fn add_assign(&mut self, rhs: &'a TrackedPoly<B>) {
+        let (id_or_const, log_size) = self.compute_add(rhs);
         self.id_or_const = id_or_const;
         self.log_size = log_size;
     }
 }
 
-impl<B, Rhs> std::ops::SubAssign<Rhs> for TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
+impl<'a, B: SnarkBackend> std::ops::SubAssign<&'a TrackedPoly<B>> for TrackedPoly<B> {
     #[inline]
-    fn sub_assign(&mut self, rhs: Rhs) {
-        let (id_or_const, log_size) = self.compute_sub_operand(rhs.into_operand());
+    fn sub_assign(&mut self, rhs: &'a TrackedPoly<B>) {
+        let (id_or_const, log_size) = self.compute_sub(rhs);
         self.id_or_const = id_or_const;
         self.log_size = log_size;
     }
 }
 
-impl<B, Rhs> std::ops::MulAssign<Rhs> for TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
+impl<'a, B: SnarkBackend> std::ops::MulAssign<&'a TrackedPoly<B>> for TrackedPoly<B> {
     #[inline]
-    fn mul_assign(&mut self, rhs: Rhs) {
-        let (id_or_const, log_size) = self.compute_mul_operand(rhs.into_operand());
+    fn mul_assign(&mut self, rhs: &'a TrackedPoly<B>) {
+        let (id_or_const, log_size) = self.compute_mul(rhs);
         self.id_or_const = id_or_const;
         self.log_size = log_size;
     }
 }
-
-impl<'a, B, Rhs> std::ops::Add<Rhs> for &'a TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
-    type Output = TrackedPoly<B>;
-
-    #[inline]
-    fn add(self, rhs: Rhs) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_add_operand(rhs.into_operand());
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
-    }
-}
-
-impl<'a, B, Rhs> std::ops::Sub<Rhs> for &'a TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
-    type Output = TrackedPoly<B>;
-
-    #[inline]
-    fn sub(self, rhs: Rhs) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_sub_operand(rhs.into_operand());
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
-    }
-}
-
-impl<'a, B, Rhs> std::ops::Mul<Rhs> for &'a TrackedPoly<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoPolyOperand<B>,
-{
-    type Output = TrackedPoly<B>;
-
-    #[inline]
-    fn mul(self, rhs: Rhs) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_mul_operand(rhs.into_operand());
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
-    }
-}
-
-// Scalar overloads are handled via the IntoPolyOperand machinery above.

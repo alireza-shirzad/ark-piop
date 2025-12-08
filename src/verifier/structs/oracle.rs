@@ -297,122 +297,90 @@ where
         }
     }
 
-    fn compute_add_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
-        match rhs {
-            OracleOperand::Oracle(oracle) => self.compute_add(oracle),
-        }
-    }
-
-    fn compute_sub_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
-        match rhs {
-            OracleOperand::Oracle(oracle) => self.compute_sub(oracle),
-        }
-    }
-
-    fn compute_mul_operand<'a>(&self, rhs: OracleOperand<'a, B>) -> Either<TrackerID, B::F> {
-        match rhs {
-            OracleOperand::Oracle(oracle) => self.compute_mul(oracle),
-        }
-    }
 }
 
-/// Helper that lets us unify operator implementations for either another
-/// oracle or a scalar field element.
-enum OracleOperand<'a, B: SnarkBackend> {
-    Oracle(&'a TrackedOracle<B>),
-}
-
-trait IntoOracleOperand<B: SnarkBackend> {
-    fn into_operand<'a>(self) -> OracleOperand<'a, B>
-    where
-        Self: 'a;
-}
-
-impl<'a, B: SnarkBackend> IntoOracleOperand<B> for &'a TrackedOracle<B> {
-    fn into_operand<'b>(self) -> OracleOperand<'b, B>
-    where
-        Self: 'b,
-    {
-        OracleOperand::Oracle(self)
-    }
-}
-
-impl<B, Rhs> AddAssign<Rhs> for TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
-    #[inline]
-    fn add_assign(&mut self, rhs: Rhs) {
-        self.id_or_const = self.compute_add_operand(rhs.into_operand());
-    }
-}
-
-impl<B, Rhs> SubAssign<Rhs> for TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
-    #[inline]
-    fn sub_assign(&mut self, rhs: Rhs) {
-        self.id_or_const = self.compute_sub_operand(rhs.into_operand());
-    }
-}
-
-impl<B, Rhs> MulAssign<Rhs> for TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
-    #[inline]
-    fn mul_assign(&mut self, rhs: Rhs) {
-        self.id_or_const = self.compute_mul_operand(rhs.into_operand());
-    }
-}
-
-impl<'a, B, Rhs> Add<Rhs> for &'a TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
+// ====================== Operator Trait Implementations ======================
+impl<'a, 'b, B: SnarkBackend> Add<&'b TrackedOracle<B>> for &'a TrackedOracle<B> {
     type Output = TrackedOracle<B>;
 
     #[inline]
-    fn add(self, rhs: Rhs) -> Self::Output {
-        let id_or_const = self.compute_add_operand(rhs.into_operand());
+    fn add(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
+        let id_or_const = self.compute_add(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
-impl<'a, B, Rhs> Sub<Rhs> for &'a TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
+impl<'a, 'b, B: SnarkBackend> Sub<&'b TrackedOracle<B>> for &'a TrackedOracle<B> {
     type Output = TrackedOracle<B>;
 
     #[inline]
-    fn sub(self, rhs: Rhs) -> Self::Output {
-        let id_or_const = self.compute_sub_operand(rhs.into_operand());
+    fn sub(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
+        let id_or_const = self.compute_sub(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
-impl<'a, B, Rhs> Mul<Rhs> for &'a TrackedOracle<B>
-where
-    B: SnarkBackend,
-    Rhs: IntoOracleOperand<B>,
-{
+impl<'a, 'b, B: SnarkBackend> Mul<&'b TrackedOracle<B>> for &'a TrackedOracle<B> {
     type Output = TrackedOracle<B>;
 
     #[inline]
-    fn mul(self, rhs: Rhs) -> Self::Output {
-        let id_or_const = self.compute_mul_operand(rhs.into_operand());
+    fn mul(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
+        let id_or_const = self.compute_mul(rhs);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
 
-// Scalar overloads are handled via the IntoOracleOperand machinery above.
+
+impl<B: SnarkBackend> Add<B::F> for TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn add(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_add_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<B: SnarkBackend> Sub<B::F> for TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn sub(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_sub_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<B: SnarkBackend> Mul<B::F> for TrackedOracle<B> {
+    type Output = TrackedOracle<B>;
+
+    #[inline]
+    fn mul(self, rhs: B::F) -> Self::Output {
+        let id_or_const = self.compute_mul_scalar(rhs);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+    }
+}
+
+impl<'a, B: SnarkBackend> AddAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
+    #[inline]
+    fn add_assign(&mut self, rhs: &'a TrackedOracle<B>) {
+        self.id_or_const = self.compute_add(rhs);
+    }
+}
+
+impl<'a, B: SnarkBackend> SubAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
+    #[inline]
+    fn sub_assign(&mut self, rhs: &'a TrackedOracle<B>) {
+        self.id_or_const = self.compute_sub(rhs);
+    }
+}
+
+impl<'a, B: SnarkBackend> MulAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
+    #[inline]
+    fn mul_assign(&mut self, rhs: &'a TrackedOracle<B>) {
+        self.id_or_const = self.compute_mul(rhs);
+    }
+}
 
 impl<B> Neg for TrackedOracle<B>
 where

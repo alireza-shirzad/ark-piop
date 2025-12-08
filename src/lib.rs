@@ -15,8 +15,8 @@ pub mod verifier;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-pub trait SnarkBackend {
-    type F: ark_ff::PrimeField;
+pub trait SnarkBackend: 'static + Send + Sync {
+    type F: ark_ff::PrimeField + Default;
     type MvPCS: pcs::PCS<Self::F, Poly = arithmetic::mat_poly::mle::MLE<Self::F>>
         + 'static
         + Send
