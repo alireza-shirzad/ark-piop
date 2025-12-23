@@ -67,10 +67,10 @@ where
         Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
     }
 
-    /// Get the range tracked polynomial given the data type
+    /// Get the range tracked oracle given the label
     #[instrument(level = "debug", skip_all)]
-    pub fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<B>> {
-        RefCell::borrow(&self.tracker_rc).indexed_oracle(data_type)
+    pub fn indexed_oracle(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
+        RefCell::borrow(&self.tracker_rc).indexed_oracle(label)
     }
 
     #[instrument(level = "debug", skip_all)]

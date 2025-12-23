@@ -14,6 +14,8 @@ use crate::{
 pub mod errors;
 pub mod structs;
 pub mod sum_check;
+pub mod multiplicity_check;
+pub mod lookup_check;
 /// Any PIOP must implement this trait.
 /// Helper to get a type name without generic parameters.
 #[inline]

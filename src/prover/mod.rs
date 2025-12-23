@@ -58,7 +58,7 @@ where
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         let mut prover = Self::new_from_tracker(ProverTracker::new_from_pk(pk.clone()));
         let indexed_polys: BTreeMap<String, TrackedPoly<B>> = pk
-            .indexed_mles
+            .indexed_tracked_polys
             .iter()
             .map(|(label, mle)| {
                 let tr_poly = prover.track_mat_mv_poly(mle.clone());
@@ -300,15 +300,16 @@ where
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id)
     }
 
-    /// Add a multivariate sumcheck claim to the proof
+    /// Add a multivariate lookup claim to the proof
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(
         &mut self,
-        included_id: TrackerID,
         super_id: TrackerID,
+        sub_id: TrackerID,
     ) -> SnarkResult<()> {
-        todo!()
+        self.tracker_rc.borrow_mut().add_mv_lookup_claim(super_id, sub_id)
     }
+
 
     /// Get the next TrackerID to be used
     #[instrument(level = "debug", skip_all)]

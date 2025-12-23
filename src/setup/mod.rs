@@ -87,11 +87,11 @@ where
         let uv_pcs_param = Arc::new(uv_pcs_param_raw);
 
         // Assembling the indexed MLEs
-        // let indexed_mles: BTreeMap<String, MLE<F>> = Self::gen_indexed_mles();
-        let indexed_mles: BTreeMap<String, MLE<B::F>> = BTreeMap::new();
+        // let indexed_tracked_polys: BTreeMap<String, MLE<F>> = Self::gen_indexed_tracked_polys();
+        let indexed_tracked_polys: BTreeMap<String, MLE<B::F>> = BTreeMap::new();
         // Assemble the indexed comitments
         let indexed_coms: BTreeMap<String, <B::MvPCS as PCS<B::F>>::Commitment> =
-            Self::gen_indexed_coms(&indexed_mles, mv_pcs_param.as_ref());
+            Self::gen_indexed_coms(&indexed_tracked_polys, mv_pcs_param.as_ref());
 
         // Assemble the verifying key
         let vk = SNARKVk {
@@ -105,7 +105,7 @@ where
             log_size: self.log_size,
             mv_pcs_param,
             uv_pcs_param,
-            indexed_mles,
+            indexed_tracked_polys,
             vk: vk.clone(),
         };
 
@@ -115,20 +115,20 @@ where
     /// Generate the indexed MLEs, these MLEs are produced in the setup and sent
     /// as a part of the pk to the prover
     // ]
-    // fn gen_indexed_mles() -> BTreeMap<String, MLE<F>> {
+    // fn gen_indexed_tracked_polys() -> BTreeMap<String, MLE<F>> {
     //     let range_mles: BTreeMap<DataType, MLE<F>> = DataType::gen_range_polys();
-    //     let indexed_mles: BTreeMap<String, MLE<F>> = cfg_iter!(range_mles)
+    //     let indexed_tracked_polys: BTreeMap<String, MLE<F>> = cfg_iter!(range_mles)
     //         .map(|(key, mle)| (key.to_string(), mle.clone()))
     //         .collect();
-    //     indexed_mles
+    //     indexed_tracked_polys
     // }
     /// Generate the indexed comitments, these comitments are produced in the
     /// setup and sent as a part of the vk to the verifier
     fn gen_indexed_coms(
-        indexed_mles: &BTreeMap<String, MLE<B::F>>,
+        indexed_tracked_polys: &BTreeMap<String, MLE<B::F>>,
         mv_pcs_param: &<B::MvPCS as PCS<B::F>>::ProverParam,
     ) -> BTreeMap<String, <B::MvPCS as PCS<B::F>>::Commitment> {
-        cfg_iter!(indexed_mles)
+        cfg_iter!(indexed_tracked_polys)
             .map(|(data_type, poly)| {
                 let comm = <B::MvPCS as PCS<B::F>>::commit(
                     mv_pcs_param,

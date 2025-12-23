@@ -59,3 +59,25 @@ impl TrackerZerocheckClaim {
         self.id
     }
 }
+
+/// A claim that a super polynomial contains all the entries of a sub polynomial.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrackerLookupClaim {
+    super_poly: TrackerID,
+    sub_poly: TrackerID,
+}
+
+impl TrackerLookupClaim {
+    pub(crate) fn new(super_poly: TrackerID, sub_poly: TrackerID) -> Self {
+        Self {
+            super_poly,
+            sub_poly,
+        }
+    }
+    pub(crate) fn super_poly(&self) -> TrackerID {
+        self.super_poly
+    }
+    pub(crate) fn sub_poly(&self) -> TrackerID {
+        self.sub_poly
+    }
+}

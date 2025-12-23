@@ -2,7 +2,7 @@ use crate::{
     SnarkBackend,
     arithmetic::mat_poly::{lde::LDE, mle::MLE},
     prover::structs::proof::PCSSubproof,
-    structs::PCSOpeningProof,
+    structs::{PCSOpeningProof, claim::TrackerLookupClaim},
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
@@ -10,7 +10,10 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{VerifierEvalClaimMap, oracle::Oracle};
+use super::{
+    VerifierEvalClaimMap,
+    oracle::{Oracle, TrackedOracle},
+};
 use crate::{
     pcs::PCS,
     prover::structs::proof::SNARKProof,
@@ -33,6 +36,8 @@ where
     pub transcript: Tr<B::F>,
     pub num_tracked_polys: usize,
     pub virtual_oracles: IndexMap<TrackerID, Oracle<B::F>>,
+    /// Mutable indexed tracked oracles for protocol-time updates.
+    pub indexed_tracked_oracles: BTreeMap<String, TrackedOracle<B>>,
     pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: VerifierPCSubstate<B::F, B::UvPCS>,
 }
@@ -49,6 +54,7 @@ where
     pub eval_claims: VerifierEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
+    pub lookup_claims: Vec<TrackerLookupClaim>,
 }
 
 /// The proof of a SNARK for the ZKSQL protocol.

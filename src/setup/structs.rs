@@ -20,7 +20,7 @@ where
     pub log_size: usize,
     pub mv_pcs_param: Arc<<B::MvPCS as PCS<B::F>>::ProverParam>,
     pub uv_pcs_param: Arc<<B::UvPCS as PCS<B::F>>::ProverParam>,
-    pub indexed_mles: BTreeMap<String, MLE<B::F>>,
+    pub indexed_tracked_polys: BTreeMap<String, MLE<B::F>>,
     pub vk: SNARKVk<B>,
 }
 
@@ -57,7 +57,7 @@ where
         self.uv_pcs_param
             .as_ref()
             .serialize_with_mode(&mut writer, compress)?;
-        self.indexed_mles
+        self.indexed_tracked_polys
             .serialize_with_mode(&mut writer, compress)?;
         self.vk.serialize_with_mode(writer, compress)
     }
@@ -66,7 +66,7 @@ where
         let mut size = self.log_size.serialized_size(compress);
         size += self.mv_pcs_param.as_ref().serialized_size(compress);
         size += self.uv_pcs_param.as_ref().serialized_size(compress);
-        size += self.indexed_mles.serialized_size(compress);
+        size += self.indexed_tracked_polys.serialized_size(compress);
         size += self.vk.serialized_size(compress);
         size
     }
@@ -97,7 +97,7 @@ where
             compress,
             validate,
         )?;
-        let indexed_mles =
+        let indexed_tracked_polys =
             BTreeMap::<String, MLE<B::F>>::deserialize_with_mode(&mut reader, compress, validate)?;
         let vk = SNARKVk::<B>::deserialize_with_mode(reader, compress, validate)?;
 
@@ -105,7 +105,7 @@ where
             log_size,
             mv_pcs_param: Arc::new(mv_param),
             uv_pcs_param: Arc::new(uv_param),
-            indexed_mles,
+            indexed_tracked_polys,
             vk,
         })
     }

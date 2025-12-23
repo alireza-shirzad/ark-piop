@@ -2,9 +2,9 @@ use super::structs::{
     ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, SNARKProof},
 };
-use crate::SnarkBackend;
 use crate::prover::{errors::HonestProverError::FalseClaim, structs::TrackerEvalClaim};
 use crate::prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly};
+use crate::{SnarkBackend, structs::claim::TrackerLookupClaim};
 use crate::{
     arithmetic::mat_poly::utils::evaluate_with_eq, prover::tracker::SnarkError::ProverError,
 };
@@ -43,6 +43,7 @@ use std::{
     panic,
     sync::Arc,
 };
+use indexmap::IndexMap;
 use tracing::{debug, instrument};
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
@@ -94,16 +95,27 @@ where
         });
     }
 
-    pub fn set_indexed_tracked_polys(&mut self, range_tr_polys: BTreeMap<String, TrackedPoly<B>>) {
-        self.pk.indexed_mles = range_tr_polys;
+    pub(crate) fn set_indexed_tracked_polys(
+        &mut self,
+        range_tr_polys: BTreeMap<String, TrackedPoly<B>>,
+    ) {
+        self.state.indexed_tracked_polys = range_tr_polys;
     }
 
     /// Get the range tracked polynomial given the data type
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
-        match self.pk.indexed_mles.get(&label) {
+        match self.state.indexed_tracked_polys.get(&label) {
             Some(poly) => Ok(poly.clone()),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
         }
+    }
+
+    pub fn add_indexed_tracked_poly(
+        &mut self,
+        label: String,
+        poly: TrackedPoly<B>,
+    ) -> Option<TrackedPoly<B>> {
+        self.state.indexed_tracked_polys.insert(label, poly)
     }
 
     /// Generates a new `TrackerID`.
@@ -673,6 +685,29 @@ where
         Ok(())
     }
 
+    /// Add a multivariate lookup claim to the proof
+    #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_lookup_claim(
+        &mut self,
+        super_id: TrackerID,
+        sub_id: TrackerID,
+    ) -> SnarkResult<()> {
+        #[cfg(feature = "honest-prover")]
+        {
+            let super_evals = self.evaluations(super_id);
+            let sub_evals = self.evaluations(sub_id);
+            let sub_eval_set: HashSet<B::F> = sub_evals.into_iter().collect();
+            if cfg_iter!(super_evals).any(|eval| !sub_eval_set.contains(eval)) {
+                return Err(ProverError(HonestProverError(FalseClaim)));
+            }
+        }
+        self.state
+            .mv_pcs_substate
+            .lookup_claims
+            .push(TrackerLookupClaim::new(super_id, sub_id));
+        Ok(())
+    }
+
     /// Adds an evaluation claim to the list of the zerocheck claims of the
     /// prover a zerocheck claim is of the form (poly_id) which means that
     /// the prover claims that the polynomial with poly_id evaluates to zero
@@ -759,6 +794,19 @@ where
             claim.set_point(point);
         }
         max_nv
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+        for claim in &self.state.mv_pcs_substate.lookup_claims {
+            by_super
+                .entry(claim.super_poly())
+                .or_default()
+                .push(claim.sub_poly());
+        }
+        let _lookup_claims_by_super = by_super;
+        Ok(())
     }
 
     /// converts all the zerocheck claims into a single zero claim
@@ -910,6 +958,7 @@ where
         &mut self,
         max_nv: usize,
     ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        self.reduce_lookup_claims()?;
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim

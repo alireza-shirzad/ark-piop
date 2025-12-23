@@ -8,13 +8,14 @@ use crate::{
     setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     structs::{
         PCSOpeningProof, TrackerID,
-        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
+        claim::{TrackerLookupClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     verifier::structs::oracle::InnerOracle,
 };
 use ark_std::Zero;
 use itertools::MultiUnzip;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
+use indexmap::IndexMap;
 use tracing::{debug, instrument};
 
 use derivative::Derivative;
@@ -532,6 +533,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .zero_check_claims
             .push(TrackerZerocheckClaim::new(poly_id));
     }
+    pub fn add_mv_lookup_claim(
+        &mut self,
+        super_id: TrackerID,
+        sub_id: TrackerID,
+    ) -> SnarkResult<()> {
+        self.state
+            .mv_pcs_substate
+            .lookup_claims
+            .push(TrackerLookupClaim::new(super_id, sub_id));
+        Ok(())
+    }
 
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_eval_claim(
@@ -552,16 +564,22 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         &mut self,
         range_tr_comms: BTreeMap<String, TrackedOracle<B>>,
     ) {
-        self.vk.range_comms = range_tr_comms;
+        self.state.indexed_tracked_oracles = range_tr_comms;
     }
-    // Get a range commitment for the given data type
-    pub(crate) fn indexed_oracle(&self, data_type: String) -> SnarkResult<TrackedOracle<B>> {
-        match self.vk.range_comms.get(&data_type) {
+
+    pub fn add_indexed_tracked_oracle(
+        &mut self,
+        label: String,
+        oracle: TrackedOracle<B>,
+    ) -> Option<TrackedOracle<B>> {
+        self.state.indexed_tracked_oracles.insert(label, oracle)
+    }
+
+    // Get a range commitment for the given label
+    pub(crate) fn indexed_oracle(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
+        match self.state.indexed_tracked_oracles.get(&label) {
             Some(poly) => Ok(poly.clone()),
-            _ => Err(SnarkError::SetupError(NoRangePoly(format!(
-                "{:?}",
-                data_type
-            )))),
+            _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
         }
     }
 
@@ -591,6 +609,20 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 "Commitment not found".to_string(),
             ))),
         }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn reduce_lookup_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
+        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+        for claim in &self.state.mv_pcs_substate.lookup_claims {
+            by_super
+                .entry(claim.super_poly())
+                .or_default()
+                .push(claim.sub_poly());
+        }
+        let _lookup_claims_by_super = by_super;
+        let _ = max_nv;
+        Ok(())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -753,6 +785,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
+        self.reduce_lookup_claims(max_nv)?;
         // Batch all the zero check claims into one
         self.batch_z_check_claims(max_nv)?;
         // Convert the only zero check claim to a sumcheck claim

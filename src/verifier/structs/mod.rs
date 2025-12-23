@@ -11,8 +11,7 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use derivative::Derivative;
-use oracle::TrackedOracle;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 ///////////// Structs & Enums ///////////
 
 pub type VerifierEvalClaimMap<F, PC> = HashSet<(
@@ -28,7 +27,6 @@ where
     pub log_size: usize,
     pub mv_pcs_param: <B::MvPCS as PCS<B::F>>::VerifierParam,
     pub uv_pcs_param: <B::UvPCS as PCS<B::F>>::VerifierParam,
-    pub range_comms: BTreeMap<String, TrackedOracle<B>>,
 }
 
 impl<B> ProcessedSNARKVk<B>
@@ -40,7 +38,6 @@ where
             log_size: vk.log_size,
             mv_pcs_param: vk.mv_pcs_vk.clone(),
             uv_pcs_param: vk.uv_pcs_vk.clone(),
-            range_comms: BTreeMap::new(),
         }
     }
 }

@@ -16,7 +16,7 @@ use crate::{
     setup::structs::SNARKPk,
     structs::{
         TrackerID,
-        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
+        claim::{TrackerLookupClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     transcript::Tr,
 };
@@ -71,6 +71,9 @@ where
     /// materialized or virtual polynomials
     pub virtual_polys: BTreeMap<TrackerID, VirtualPoly<B::F>>,
 
+    /// Mutable indexed tracked polynomials for protocol-time updates.
+    pub indexed_tracked_polys: BTreeMap<String, TrackedPoly<B>>,
+
     pub mv_pcs_substate: ProverPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
@@ -90,6 +93,7 @@ where
     pub eval_claims: Vec<TrackerEvalClaim<F, PC>>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
+    pub lookup_claims: Vec<TrackerLookupClaim>,
 }
 
 #[derive(Derivative)]
@@ -101,7 +105,6 @@ where
     pub log_size: usize,
     pub mv_pcs_param: Arc<<B::MvPCS as PCS<B::F>>::ProverParam>,
     pub uv_pcs_param: Arc<<B::UvPCS as PCS<B::F>>::ProverParam>,
-    pub indexed_mles: BTreeMap<String, TrackedPoly<B>>,
 }
 
 impl<B> ProcessedSNARKPk<B>
@@ -113,7 +116,6 @@ where
             log_size: pk.log_size,
             mv_pcs_param: Arc::clone(&pk.mv_pcs_param),
             uv_pcs_param: Arc::clone(&pk.uv_pcs_param),
-            indexed_mles: BTreeMap::new(),
         }
     }
 }
