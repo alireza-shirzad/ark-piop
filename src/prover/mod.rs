@@ -13,6 +13,7 @@ use crate::{
     },
     errors::SnarkResult,
     pcs::PCS,
+    piop::{PIOP, lookup_check},
     prover::structs::polynomial::TrackedPoly,
     setup::structs::SNARKPk,
     structs::TrackerID,
@@ -22,6 +23,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use derivative::Derivative;
 use either::Either;
+use indexmap::IndexMap;
 use tracing::{Span, field::debug, instrument, trace};
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
@@ -307,9 +309,10 @@ where
         super_id: TrackerID,
         sub_id: TrackerID,
     ) -> SnarkResult<()> {
-        self.tracker_rc.borrow_mut().add_mv_lookup_claim(super_id, sub_id)
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_lookup_claim(super_id, sub_id)
     }
-
 
     /// Get the next TrackerID to be used
     #[instrument(level = "debug", skip_all)]
@@ -322,9 +325,48 @@ where
         self.tracker_rc.borrow_mut().peek_next_id()
     }
 
+    #[instrument(level = "debug", skip_all)]
+    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
+        if lookup_claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+        for claim in lookup_claims {
+            by_super
+                .entry(claim.super_poly())
+                .or_default()
+                .push(claim.sub_poly());
+        }
+
+        for (super_id, sub_ids) in by_super {
+            let super_nv = self.tracker_rc.borrow().poly_nv(super_id);
+            let super_col =
+                TrackedPoly::new(Either::Left(super_id), super_nv, self.tracker_rc.clone());
+
+            let included_cols = sub_ids
+                .into_iter()
+                .map(|sub_id| {
+                    let nv = self.tracker_rc.borrow().poly_nv(sub_id);
+                    TrackedPoly::new(Either::Left(sub_id), nv, self.tracker_rc.clone())
+                })
+                .collect::<Vec<_>>();
+
+            let lookup_prover_input = lookup_check::LookupCheckProverInput {
+                included_cols,
+                super_col,
+            };
+            lookup_check::LookupCheckPIOP::prove(self, lookup_prover_input)?;
+        }
+
+        Ok(())
+    }
+
     /// Build the zkSQL proof from the claims and comitments
     #[instrument(level = "debug", skip_all)]
     pub fn build_proof(&mut self) -> SnarkResult<SNARKProof<B>> {
+        self.reduce_lookup_claims()?;
         self.tracker_rc.borrow_mut().compile_proof()
     }
 

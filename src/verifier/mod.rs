@@ -1,14 +1,16 @@
 pub mod errors;
 pub mod structs;
 mod tracker;
-use std::{borrow::Borrow, cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use either::Either;
+use indexmap::IndexMap;
 use structs::oracle::{Oracle, TrackedOracle};
 use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
     SnarkBackend, errors::SnarkResult, pcs::PolynomialCommitment, prover::structs::proof::SNARKProof,
+    piop::{PIOP, lookup_check},
     setup::structs::SNARKVk, structs::TrackerID,
 };
 
@@ -50,8 +52,8 @@ where
                 (data_type.clone(), tr_poly)
             })
             .collect();
-        let tracker_ref_cell: &RefCell<VerifierTracker<B>> = verifier.tracker_rc.borrow();
-        tracker_ref_cell
+        verifier
+            .tracker_rc
             .borrow_mut()
             .set_indexed_oracles(range_tr_polys);
         verifier
@@ -148,6 +150,15 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_lookup_claim(
+        &mut self,
+        super_id: TrackerID,
+        sub_id: TrackerID,
+    ) -> SnarkResult<()> {
+        self.tracker_rc.borrow_mut().add_mv_lookup_claim(super_id, sub_id)
+    }
+
+    #[instrument(level = "debug", skip(self))]
     pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<B::F>) -> SnarkResult<B::F> {
         self.tracker_rc.borrow_mut().query_mv(poly_id, point)
     }
@@ -160,8 +171,7 @@ where
     //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
     #[instrument(level = "debug", skip(self))]
     pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
-        let tracker_ref_cell: &RefCell<VerifierTracker<B>> = self.tracker_rc.borrow();
-        tracker_ref_cell.borrow().prover_claimed_sum(id)
+        self.tracker_rc.borrow().prover_claimed_sum(id)
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -191,7 +201,53 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
+    fn tracked_oracle_from_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
+        if let Some(log_size) = self.tracker_rc.borrow().oracle_log_size(id) {
+            Ok(TrackedOracle::new(
+                Either::Left(id),
+                self.tracker_rc.clone(),
+                log_size,
+            ))
+        } else {
+            self.track_mv_com_by_id(id)
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
+        if lookup_claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+        for claim in lookup_claims {
+            by_super
+                .entry(claim.super_poly())
+                .or_default()
+                .push(claim.sub_poly());
+        }
+
+        for (super_id, sub_ids) in by_super {
+            let super_col = self.tracked_oracle_from_id(super_id)?;
+            let included_cols = sub_ids
+                .into_iter()
+                .map(|sub_id| self.tracked_oracle_from_id(sub_id))
+                .collect::<SnarkResult<Vec<_>>>()?;
+            let lookup_verifier_input = lookup_check::LookupCheckVerifierInput {
+                included_tracked_col_oracles: included_cols,
+                super_tracked_col_oracle: super_col,
+            };
+            lookup_check::LookupCheckPIOP::verify(self, lookup_verifier_input)?;
+        }
+
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
     pub fn verify(&self) -> SnarkResult<()> {
+        let mut verifier = self.clone();
+        verifier.reduce_lookup_claims()?;
         self.tracker_rc.borrow_mut().verify()
     }
 

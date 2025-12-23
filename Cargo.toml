@@ -36,8 +36,11 @@ ark-test-curves = { version = "0.5.0", default-features = false, features = [
 ark-test-curves = { version = "0.5.0", default-features = false, features = [
     "bls12_381_curve",
 ] }
-
-
+ 
+[[test]]
+name = "pipeline"
+path = "tests/pipeline.rs"
+required-features = ["test-utils"]
 
 [features]
 default = ["std", "parallel"]

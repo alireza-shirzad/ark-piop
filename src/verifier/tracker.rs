@@ -15,7 +15,6 @@ use crate::{
 use ark_std::Zero;
 use itertools::MultiUnzip;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
-use indexmap::IndexMap;
 use tracing::{debug, instrument};
 
 use derivative::Derivative;
@@ -545,6 +544,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
+    pub(crate) fn take_lookup_claims(&mut self) -> Vec<TrackerLookupClaim> {
+        take(&mut self.state.mv_pcs_substate.lookup_claims)
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_eval_claim(
         &mut self,
@@ -611,18 +614,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
     }
 
-    #[instrument(level = "debug", skip_all)]
-    fn reduce_lookup_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
-        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
-        for claim in &self.state.mv_pcs_substate.lookup_claims {
-            by_super
-                .entry(claim.super_poly())
-                .or_default()
-                .push(claim.sub_poly());
-        }
-        let _lookup_claims_by_super = by_super;
-        let _ = max_nv;
-        Ok(())
+    pub(crate) fn oracle_log_size(&self, id: TrackerID) -> Option<usize> {
+        self.state
+            .virtual_oracles
+            .get(&id)
+            .map(|oracle| oracle.log_size())
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -785,7 +781,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
-        self.reduce_lookup_claims(max_nv)?;
         // Batch all the zero check claims into one
         self.batch_z_check_claims(max_nv)?;
         // Convert the only zero check claim to a sumcheck claim
