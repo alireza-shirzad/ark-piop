@@ -136,9 +136,12 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
             })
             .collect::<Vec<_>>();
 
+        let super_cols = std::iter::repeat(input.super_col.clone())
+            .take(input.super_col_multiplicities.len())
+            .collect::<Vec<_>>();
         let multiplicity_check_prover_input = MultiplicityCheckProverInput {
             fxs: input.included_cols.clone(),
-            gxs: vec![input.super_col.clone()],
+            gxs: super_cols,
             mfxs: included_col_ms,
             mgxs: input
                 .super_col_multiplicities
@@ -172,9 +175,12 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
             })
             .collect::<Vec<_>>();
 
+        let super_cols = std::iter::repeat(input.super_tracked_col_oracle.clone())
+            .take(input.super_col_multiplicities.len())
+            .collect::<Vec<_>>();
         let multiplicity_check_verifier_input = MultiplicityCheckVerifierInput {
             fxs: input.included_tracked_col_oracles.clone(),
-            gxs: vec![input.super_tracked_col_oracle.clone()],
+            gxs: super_cols,
             mfxs: included_col_ms,
             mgxs: input
                 .super_col_multiplicities
