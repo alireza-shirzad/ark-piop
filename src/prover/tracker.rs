@@ -697,8 +697,8 @@ where
         {
             let super_evals = self.evaluations(super_id);
             let sub_evals = self.evaluations(sub_id);
-            let sub_eval_set: HashSet<B::F> = sub_evals.into_iter().collect();
-            if cfg_iter!(super_evals).any(|eval| !sub_eval_set.contains(eval)) {
+            let super_eval_set: HashSet<B::F> = super_evals.into_iter().collect();
+            if cfg_iter!(sub_evals).any(|eval| !super_eval_set.contains(eval)) {
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
