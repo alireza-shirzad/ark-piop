@@ -62,3 +62,25 @@ pub enum InputShapeError {
     #[error("Expected an input number of variables of {expected} but got {actual}")]
     InputNumberOfVariablesMismatch { expected: usize, actual: usize },
 }
+
+pub fn assert_soundness_error(err: SnarkError) {
+    #[cfg(feature = "honest-prover")]
+    {
+        assert!(matches!(
+            err,
+            SnarkError::ProverError(crate::prover::errors::ProverError::HonestProverError(
+                crate::prover::errors::HonestProverError::FalseClaim
+            ))
+        ));
+    }
+
+    #[cfg(not(feature = "honest-prover"))]
+    {
+        assert!(matches!(
+            err,
+            SnarkError::VerifierError(crate::verifier::errors::VerifierError::VerifierCheckFailed(
+                _
+            ))
+        ));
+    }
+}
