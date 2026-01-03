@@ -243,12 +243,12 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
             .map(|mle| prover.track_and_commit_mat_mv_poly(mle))
             .collect::<SnarkResult<Vec<_>>>()?;
 
-        let hinted_inclusion_check_prover_input = HintedLookupCheckProverInput {
+        let hinted_lookup_prover_input = HintedLookupCheckProverInput {
             included_cols: input.included_cols,
             super_col: input.super_col,
             super_col_multiplicities: super_col_ms.clone(),
         };
-        HintedLookupCheckPIOP::<B>::prove(prover, hinted_inclusion_check_prover_input)?;
+        HintedLookupCheckPIOP::<B>::prove(prover, hinted_lookup_prover_input)?;
         Ok(LookupCheckProverOutput { super_col_ms })
     }
 
@@ -265,12 +265,12 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
             })
             .collect::<SnarkResult<Vec<_>>>()?;
 
-        let hinted_inclusion_check_verifier_input = HintedLookupCheckVerifierInput {
+        let hinted_lookup_verifier_input = HintedLookupCheckVerifierInput {
             included_tracked_col_oracles: input.included_tracked_col_oracles,
             super_tracked_col_oracle: input.super_tracked_col_oracle,
             super_col_multiplicities: super_col_m_comms.clone(),
         };
-        HintedLookupCheckPIOP::<B>::verify(verifier, hinted_inclusion_check_verifier_input)?;
+        HintedLookupCheckPIOP::<B>::verify(verifier, hinted_lookup_verifier_input)?;
         Ok(LookupCheckVerifierOutput { super_col_m_comms })
     }
 }
