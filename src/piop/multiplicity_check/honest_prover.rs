@@ -1,11 +1,11 @@
-use super::MultiplicityCheck;
-use super::MultiplicityCheckProverInput;
+use super::KeyedSumcheck;
+use super::KeyedSumcheckProverInput;
 #[cfg(feature = "honest-prover")]
 use crate::errors::SnarkResult;
 use crate::{SnarkBackend, piop::DeepClone, prover::ArgProver};
 use ark_ff::One;
 use ark_ff::Zero;
-impl<B: SnarkBackend> DeepClone<B> for MultiplicityCheckProverInput<B> {
+impl<B: SnarkBackend> DeepClone<B> for KeyedSumcheckProverInput<B> {
     fn deep_clone(&self, prover: ArgProver<B>) -> Self {
         Self {
             fxs: self
@@ -33,7 +33,7 @@ impl<B: SnarkBackend> DeepClone<B> for MultiplicityCheckProverInput<B> {
 }
 
 #[cfg(feature = "honest-prover")]
-impl<B> MultiplicityCheck<B>
+impl<B> KeyedSumcheck<B>
 where
     B: SnarkBackend,
 {
@@ -42,7 +42,7 @@ where
     // TODO: Although the performance does not matter for release, we should
     // parallelize this
     pub(crate) fn honest_prover_check_helper(
-        input: &MultiplicityCheckProverInput<B>,
+        input: &KeyedSumcheckProverInput<B>,
     ) -> SnarkResult<()> {
         // Check that we do actually have some polynomial on the left hand side
 
