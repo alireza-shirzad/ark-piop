@@ -17,8 +17,6 @@ use itertools::MultiUnzip;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
 use tracing::{debug, instrument};
 
-use derivative::Derivative;
-
 use super::{
     TrackedOracle,
     errors::VerifierError,
@@ -28,6 +26,8 @@ use super::{
         state::{ProcessedProof, VerifierState},
     },
 };
+use derivative::Derivative;
+use indexmap::IndexMap;
 
 /// The Tracker is a data structure for creating and managing virtual
 /// commnomials and their comitments. It is in charge of  
@@ -780,11 +780,44 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
+    fn equalize_sumcheck_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
+        let oracle_log_sizes: IndexMap<TrackerID, usize> = self
+            .state
+            .virtual_oracles
+            .iter()
+            .map(|(id, oracle)| (*id, oracle.log_size()))
+            .collect();
+        let proof_claims = self
+            .proof
+            .as_ref()
+            .and_then(|proof| proof.sc_subproof.as_ref())
+            .map(|subproof| subproof.sumcheck_claims().clone());
+
+        for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
+            if let Some(proof_claims) = proof_claims.as_ref() {
+                if let Some(proof_claim) = proof_claims.get(&claim.id()) {
+                    if claim.claim() == *proof_claim {
+                        continue;
+                    }
+                }
+            }
+
+            let nv = oracle_log_sizes.get(&claim.id()).copied().unwrap_or(max_nv);
+            if nv < max_nv {
+                claim.set_claim(claim.claim() * B::F::from(1 << (max_nv - nv)));
+            }
+        }
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
         // Batch all the zero check claims into one
         self.batch_z_check_claims(max_nv)?;
         // Convert the only zero check claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
+        // Ensure sumcheck claims are consistent with the max nv used in the protocol
+        self.equalize_sumcheck_claims(max_nv)?;
         // aggregate the sumcheck claims
         self.batch_s_check_claims(max_nv)?;
         // verify the sumcheck proof
