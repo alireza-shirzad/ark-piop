@@ -171,7 +171,7 @@ pub fn prelude_with_vars<B: SnarkBackend>(
 #[instrument(level = "debug", skip_all)]
 pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
     init_tracing_for_tests();
-    prelude_with_vars::<B>(16)
+    prelude_with_vars::<B>(19)
 }
 
 /// A prelude for benchmarking, with a larger number of variables, suitable for
