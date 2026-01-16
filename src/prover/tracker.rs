@@ -573,6 +573,10 @@ where
         match self.state.mv_pcs_substate.materialized_polys.get(&id) {
             Some(poly) => {
                 let nv = poly.mat_mle().num_vars;
+                if nv == 0 {
+                    // Avoid build_eq_x_r([]) for constant polynomials.
+                    return poly.mat_mle().evaluations.get(0).copied();
+                }
                 let eq_eval = build_eq_x_r(&pt[..nv]).unwrap();
                 Some(evaluate_with_eq(poly, &eq_eval))
             }
