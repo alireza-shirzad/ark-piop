@@ -156,7 +156,7 @@ where
             num_vars,
             self.tracker_rc.clone(),
         );
-        tracing::debug!("assigned id {}", tracked_poly.id());
+        trace!("assigned id {}", tracked_poly.id());
         Ok(tracked_poly)
     }
 
