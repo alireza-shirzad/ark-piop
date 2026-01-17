@@ -119,11 +119,10 @@ fn compute_flame_path(level_suffix: &str) -> String {
 /// - Respects `RUST_LOG` via `EnvFilter` (e.g., `RUST_LOG=debug`).
 /// - Emits span enter/exit for `#[instrument]` wrappers so you can see
 ///   `piop.prove`/`piop.verify` boundaries.
-pub fn init_tracing_for_tests() {
+pub fn init_subscriber() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
-        use tracing_subscriber::fmt::format::FmtSpan;
-        use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+        use tracing_subscriber::{EnvFilter, prelude::*};
 
         // Build a shared EnvFilter once (honors RUST_LOG)
         let env_filter = EnvFilter::from_default_env();
@@ -137,7 +136,7 @@ pub fn init_tracing_for_tests() {
             .with_verbose_exit(true)
             .with_span_modes(true); // labels like `open`/`close`
 
-        let span_timing_layer = SpanTimingLayer::default();
+        let span_timing_layer = SpanTimingLayer;
 
         let subscriber = tracing_subscriber::registry()
             .with(env_filter)
@@ -170,7 +169,7 @@ pub fn prelude_with_vars<B: SnarkBackend>(
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug", skip_all)]
 pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
-    init_tracing_for_tests();
+    init_subscriber();
     prelude_with_vars::<B>(19)
 }
 
@@ -180,7 +179,7 @@ pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>),
 /// of the prover and verifier
 #[allow(clippy::type_complexity)]
 pub fn bench_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
-    init_tracing_for_tests();
+    init_subscriber();
     prelude_with_vars::<B>(20)
 }
 
