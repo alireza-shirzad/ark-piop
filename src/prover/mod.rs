@@ -160,7 +160,7 @@ where
         Ok(tracked_poly)
     }
 
-    #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
+    #[instrument(level = "trace", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     /// Track a materialized polynomial using a pre-computed commitment.
     pub fn track_mat_mv_poly_with_commitment(
         &mut self,

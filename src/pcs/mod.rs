@@ -147,14 +147,14 @@ pub trait PCS<F: PrimeField>: Clone {
     }
 
     #[inline(always)]
-    #[tracing::instrument(level = "debug", skip(rng), fields(supported_size))]
+    #[tracing::instrument(level = "trace", skip(rng), fields(supported_size))]
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self::SRS> {
         Self::gen_srs_for_testing_inner(rng, supported_size)
     }
 
     #[inline(always)]
     #[tracing::instrument(
-        level = "debug",
+        level = "trace",
         skip(srs),
         fields(supported_degree, supported_num_vars)
     )]
@@ -171,11 +171,7 @@ pub trait PCS<F: PrimeField>: Clone {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         use tracing::Level;
-        let span = if tracing::level_enabled!(Level::TRACE) {
-            tracing::span!(Level::TRACE, "pcs.commit", poly = ?poly)
-        } else {
-            tracing::span!(Level::DEBUG, "pcs.commit",)
-        };
+        let span = tracing::span!(Level::TRACE, "pcs.commit", poly = ?poly);
         let enter_guard = span.enter();
         let res = Self::commit_impl_inner(prover_param, poly);
         drop(enter_guard);
@@ -189,12 +185,8 @@ pub trait PCS<F: PrimeField>: Clone {
         commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, F)> {
         use tracing::Level;
-        let span = if tracing::level_enabled!(Level::TRACE) {
-            tracing::span!(Level::TRACE, "pcs.open", poly = ?polynomial,
-                point = ?point,)
-        } else {
-            tracing::span!(Level::DEBUG, "pcs.open")
-        };
+        let span = tracing::span!(Level::TRACE, "pcs.open", poly = ?polynomial,
+                point = ?point,);
         let enter_guard = span.enter();
         let res = Self::open_impl_inner(prover_param, polynomial, point, commitment);
         drop(enter_guard);
@@ -209,22 +201,14 @@ pub trait PCS<F: PrimeField>: Clone {
         _transcript: &mut Tr<F>,
     ) -> SnarkResult<Self::BatchProof> {
         use tracing::Level;
-        let span = if tracing::level_enabled!(Level::TRACE) {
-            tracing::span!(
-                Level::TRACE,
-                "pcs.multi_open",
-                num_polys = _polynomials.len(),
-                polys = ?_polynomials,
-                points = ?_points,
-                evals = ?_evals
-            )
-        } else {
-            tracing::span!(
-                Level::DEBUG,
-                "pcs.multi_open",
-                num_polys = _polynomials.len()
-            )
-        };
+        let span = tracing::span!(
+            Level::TRACE,
+            "pcs.multi_open",
+            num_polys = _polynomials.len(),
+            polys = ?_polynomials,
+            points = ?_points,
+            evals = ?_evals
+        );
 
         let enter_guard = span.enter();
         let res = Self::multi_open_inner(_prover_param, _polynomials, _points, _evals, _transcript);
@@ -240,16 +224,12 @@ pub trait PCS<F: PrimeField>: Clone {
         value: &F,
         proof: &Self::Proof,
     ) -> SnarkResult<bool> {
-        let span = if tracing::level_enabled!(Level::TRACE) {
-            tracing::span!(
-                Level::TRACE,
-                "pcs.verify",
-                point = ?point,
-                evals = ?value
-            )
-        } else {
-            tracing::span!(Level::DEBUG, "pcs.verify")
-        };
+        let span = tracing::span!(
+            Level::TRACE,
+            "pcs.verify",
+            point = ?point,
+            evals = ?value
+        );
         let enter_guard = span.enter();
         let res = Self::verify_inner(verifier_param, commitment, point, value, proof);
         if let Err(ref e) = res {
@@ -268,18 +248,14 @@ pub trait PCS<F: PrimeField>: Clone {
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<F>,
     ) -> SnarkResult<bool> {
-        let span = if tracing::level_enabled!(Level::TRACE) {
-            tracing::span!(
-                Level::TRACE,
-                "pcs.batch_verify",
-                num_comitments = _comitments.len(),
-                size = _comitments.len(),
-                points = ?_points,
-                evals = ?_evals
-            )
-        } else {
-            tracing::span!(Level::DEBUG, "pcs.batch_verify", size = _comitments.len())
-        };
+        let span = tracing::span!(
+            Level::TRACE,
+            "pcs.batch_verify",
+            num_comitments = _comitments.len(),
+            size = _comitments.len(),
+            points = ?_points,
+            evals = ?_evals
+        );
         let enter_guard = span.enter();
         let res = Self::batch_verify_inner(
             _verifier_param,
