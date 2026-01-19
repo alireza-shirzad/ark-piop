@@ -5,6 +5,7 @@ use crate::{
     transcript::Tr,
 };
 use ark_ff::PrimeField;
+use tracing::instrument;
 
 use std::{fmt::Debug, marker::PhantomData};
 
@@ -45,10 +46,12 @@ pub struct SumCheckSubClaim<F: PrimeField> {
 }
 
 impl<F: PrimeField> SumCheck<F> {
+    #[instrument(level = "debug", skip_all)]
     pub(crate) fn prove(
         poly: &HPVirtualPolynomial<F>,
         transcript: &mut Tr<F>,
     ) -> SnarkResult<SumcheckProof<F>> {
+        dbg!(&poly.aux_info);
         transcript.append_serializable_element(b"aux info", &poly.aux_info)?;
 
         let mut prover_state = SumcheckProverState::prover_init(poly)?;
