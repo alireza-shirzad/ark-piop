@@ -942,7 +942,6 @@ where
         // Generate a sumcheck proof
 
         let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id);
-        dbg!(&sc_avp.products.len());
         let sc_aux_info = sc_avp.aux_info.clone();
         let sc_proof = SumCheck::prove(&sc_avp, &mut self.state.transcript)?;
         let _ = self.add_mv_eval_claim(sumcheck_aggr_id, &sc_proof.point);

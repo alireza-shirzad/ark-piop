@@ -51,7 +51,6 @@ impl<F: PrimeField> SumCheck<F> {
         poly: &HPVirtualPolynomial<F>,
         transcript: &mut Tr<F>,
     ) -> SnarkResult<SumcheckProof<F>> {
-        dbg!(&poly.aux_info);
         transcript.append_serializable_element(b"aux info", &poly.aux_info)?;
 
         let mut prover_state = SumcheckProverState::prover_init(poly)?;
