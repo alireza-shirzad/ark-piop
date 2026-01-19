@@ -124,8 +124,29 @@ pub fn init_subscriber() {
     INIT.call_once(|| {
         use tracing_subscriber::{EnvFilter, prelude::*};
 
-        // Build a shared EnvFilter once (honors RUST_LOG)
-        let env_filter = EnvFilter::from_default_env();
+        // Build a shared EnvFilter once (honors RUST_LOG).
+        let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
+        let mut env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
+        if !rust_log.contains("datafusion") {
+            env_filter = env_filter.add_directive(
+                "datafusion=off"
+                    .parse()
+                    .expect("parse datafusion directive"),
+            );
+            env_filter = env_filter.add_directive(
+                "datafusion_=off"
+                    .parse()
+                    .expect("parse datafusion directive"),
+            );
+        }
+        if !rust_log.contains("sqlparser") {
+            env_filter = env_filter.add_directive(
+                "sqlparser=off"
+                    .parse()
+                    .expect("parse sqlparser directive"),
+            );
+        }
 
         // Layer 1: tree test output to stdout (test writer)
         let stdout_layer = tracing_tree::HierarchicalLayer::new(2)
