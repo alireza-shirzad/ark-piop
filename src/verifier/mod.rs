@@ -75,6 +75,18 @@ where
         RefCell::borrow(&self.tracker_rc).indexed_oracle(label)
     }
 
+    /// Insert or update an indexed tracked oracle.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_indexed_tracked_oracle(
+        &mut self,
+        label: String,
+        oracle: TrackedOracle<B>,
+    ) -> Option<TrackedOracle<B>> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_indexed_tracked_oracle(label, oracle)
+    }
+
     #[instrument(level = "debug", skip_all)]
     pub fn track_mat_mv_com(
         &self,

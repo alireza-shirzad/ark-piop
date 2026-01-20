@@ -24,7 +24,7 @@ use ark_poly::Polynomial;
 use derivative::Derivative;
 use either::Either;
 use indexmap::IndexMap;
-use tracing::{Span, field::debug, instrument, trace};
+use tracing::{Span, field::debug, info, instrument, trace};
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 use structs::proof::SNARKProof;
@@ -98,6 +98,18 @@ where
     #[instrument(level = "debug", skip(self))]
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label.clone())
+    }
+
+    /// Insert or update an indexed tracked polynomial.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_indexed_tracked_poly(
+        &mut self,
+        label: String,
+        poly: TrackedPoly<B>,
+    ) -> Option<TrackedPoly<B>> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_indexed_tracked_poly(label, poly)
     }
 
     pub fn tracker(&self) -> Rc<RefCell<ProverTracker<B>>> {
@@ -339,6 +351,7 @@ where
                 .or_default()
                 .push(claim.sub_poly());
         }
+        info!("reducing {} lookup claims",  by_super.len());
 
         for (super_id, sub_ids) in by_super {
             let super_nv = self.tracker_rc.borrow().poly_nv(super_id);

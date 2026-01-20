@@ -16,9 +16,7 @@ use derivative::Derivative;
 use std::marker::PhantomData;
 use utils::calc_inclusion_multiplicity;
 
-use super::keyed_sumcheck::{
-    KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput,
-};
+use super::keyed_sumcheck::{KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput};
 
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
@@ -61,7 +59,7 @@ pub struct LookupCheckProverInput<B: SnarkBackend> {
     pub super_col: TrackedPoly<B>,
 }
 
-impl <B:SnarkBackend> DeepClone<B> for LookupCheckProverInput<B> {
+impl<B: SnarkBackend> DeepClone<B> for LookupCheckProverInput<B> {
     fn deep_clone(&self, prover: ArgProver<B>) -> Self {
         Self {
             included_cols: self
@@ -136,9 +134,11 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
             })
             .collect::<Vec<_>>();
 
-        let super_cols = std::iter::repeat(input.super_col.clone())
-            .take(input.super_col_multiplicities.len())
-            .collect::<Vec<_>>();
+        let super_cols = std::iter::repeat_n(
+            input.super_col.clone(),
+            input.super_col_multiplicities.len(),
+        )
+        .collect::<Vec<_>>();
         let keyed_sumcheck_prover_input = KeyedSumcheckProverInput {
             fxs: input.included_cols.clone(),
             gxs: super_cols,
@@ -214,11 +214,7 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
 
         let super_col_hash_set: HashSet<B::F> =
             HashSet::from_iter(input.super_col.evaluations().iter().cloned());
-        for elem in input
-            .included_cols
-            .iter()
-            .flat_map(|c| c.evaluations())
-        {
+        for elem in input.included_cols.iter().flat_map(|c| c.evaluations()) {
             if !super_col_hash_set.contains(&elem) {
                 return Err(SnarkError::ProverError(ProverError::HonestProverError(
                     HonestProverError::FalseClaim,
