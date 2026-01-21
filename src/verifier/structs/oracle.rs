@@ -109,6 +109,14 @@ where
         self.log_size
     }
 
+    /// Return the max multiplicative degree of the tracked oracle.
+    pub fn degree(&self) -> usize {
+        match &self.id_or_const {
+            Either::Left(id) => self.tracker.borrow().virt_oracle_degree(*id),
+            Either::Right(_) => 0,
+        }
+    }
+
     pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
         self.tracker.clone()
     }

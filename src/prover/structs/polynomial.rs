@@ -90,6 +90,14 @@ where
         self.log_size
     }
 
+    /// Return the max multiplicative degree of the tracked polynomial.
+    pub fn degree(&self) -> usize {
+        match &self.id_or_const {
+            Either::Left(id) => self.tracker.borrow().virt_poly_degree(*id),
+            Either::Right(_) => 0,
+        }
+    }
+
     /// Checks if two tracked polynomials are from the same tracker
     pub fn same_tracker(&self, other: &TrackedPoly<B>) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
