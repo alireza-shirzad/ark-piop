@@ -1,9 +1,9 @@
 use crate::{
     SnarkBackend, errors::SnarkResult, pcs::PCS, structs::TrackerID,
-    verifier::tracker::VerifierTracker,
+    verifier::{ArgVerifier, tracker::VerifierTracker},
 };
-use ark_ff::Field;
-use ark_std::One;
+use ark_ff::{Field, PrimeField};
+use ark_std::{One, Zero};
 use ark_std::fmt::Debug;
 use derivative::Derivative;
 use either::Either;
@@ -399,4 +399,111 @@ where
         };
         TrackedOracle::new(id_or_const, tracker, self.log_size)
     }
+}
+
+pub fn get_or_insert_shift_oracle<B>(
+    verifier: &mut ArgVerifier<B>,
+    log_size: usize,
+    shift: usize,
+    is_right: bool,
+) -> TrackedOracle<B>
+where
+    B: SnarkBackend,
+    B::F: PrimeField,
+{
+    let label = format!("shift_perm_{}_{}_{}", log_size, shift, is_right);
+    match verifier.indexed_oracle(label.clone()) {
+        Ok(oracle) => oracle,
+        Err(_) => {
+            let oracle = build_shift_oracle::<B::F>(log_size, shift, is_right);
+            let oracle = verifier.track_oracle(oracle);
+            verifier.add_indexed_tracked_oracle(label, oracle.clone());
+            oracle
+        }
+    }
+}
+
+fn build_shift_oracle<F: PrimeField>(log_size: usize, shift: usize, right: bool) -> Oracle<F> {
+    let domain_size = 1usize << log_size;
+    let shift_mod = if domain_size == 0 {
+        0
+    } else {
+        shift % domain_size
+    };
+
+    let mut weights = Vec::with_capacity(log_size);
+    let mut coeff = F::one();
+    for _ in 0..log_size {
+        weights.push(coeff);
+        coeff += coeff;
+    }
+
+    let (delta_int, overflow_threshold) = if shift_mod == 0 {
+        (0usize, None)
+    } else if right {
+        ((domain_size - shift_mod) % domain_size, Some(shift_mod))
+    } else {
+        (shift_mod, Some(domain_size - shift_mod))
+    };
+
+    let mut delta_f = F::zero();
+    for (i, weight) in weights.iter().enumerate() {
+        if ((delta_int >> i) & 1) == 1 {
+            delta_f += *weight;
+        }
+    }
+
+    let domain_f = overflow_threshold.map(|_| {
+        let mut value = F::one();
+        for _ in 0..log_size {
+            value += value;
+        }
+        value
+    });
+
+    let threshold_bits = overflow_threshold.map(|thr| {
+        (0..log_size)
+            .map(|i| ((thr >> i) & 1) == 1)
+            .collect::<Vec<bool>>()
+    });
+
+    Oracle::new_multivariate(log_size, move |mut point: Vec<F>| {
+        if point.len() > log_size {
+            point.truncate(log_size);
+        } else if point.len() < log_size {
+            point.resize(log_size, F::zero());
+        }
+
+        let range_value = point
+            .iter()
+            .zip(weights.iter())
+            .fold(F::zero(), |acc, (bit, weight)| acc + (*bit * *weight));
+
+        let mut result = range_value + delta_f;
+
+        if let (Some(bits), Some(domain)) = (threshold_bits.as_ref(), domain_f) {
+            let overflow = evaluate_ge_bits(&point, bits);
+            result -= domain * overflow;
+        }
+
+        Ok(result)
+    })
+}
+
+fn evaluate_ge_bits<F: PrimeField>(vars: &[F], threshold_bits: &[bool]) -> F {
+    let one = F::one();
+    let mut prefix_equal = F::one();
+    let mut greater = F::zero();
+
+    for i in (0..vars.len()).rev() {
+        let bit_val = vars[i];
+        if !threshold_bits[i] {
+            greater += prefix_equal * bit_val;
+            prefix_equal *= one - bit_val;
+        } else {
+            prefix_equal *= bit_val;
+        }
+    }
+
+    greater + prefix_equal
 }

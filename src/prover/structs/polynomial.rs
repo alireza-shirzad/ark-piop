@@ -2,12 +2,12 @@ use std::{cell::RefCell, panic, rc::Rc};
 
 use crate::{
     SnarkBackend,
-    arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    pcs::PCS,
+    arithmetic::mat_poly::mle::MLE,
     piop::DeepClone,
     prover::{ArgProver, tracker::ProverTracker},
     structs::TrackerID,
 };
+use ark_ff::PrimeField;
 use ark_std::One;
 use ark_std::Zero;
 use ark_std::fmt::Debug;
@@ -244,7 +244,6 @@ where
         };
         (id_or_const, self.log_size)
     }
-
 }
 
 impl<B: SnarkBackend> DeepClone<B> for TrackedPoly<B> {
@@ -308,7 +307,6 @@ impl<'a, 'b, B: SnarkBackend> std::ops::Mul<&'b TrackedPoly<B>> for &'a TrackedP
     }
 }
 
-
 impl<B: SnarkBackend> std::ops::Add<B::F> for TrackedPoly<B> {
     type Output = TrackedPoly<B>;
 
@@ -363,5 +361,42 @@ impl<'a, B: SnarkBackend> std::ops::MulAssign<&'a TrackedPoly<B>> for TrackedPol
         let (id_or_const, log_size) = self.compute_mul(rhs);
         self.id_or_const = id_or_const;
         self.log_size = log_size;
+    }
+}
+
+pub fn get_or_insert_shift_poly<B>(
+    prover: &mut ArgProver<B>,
+    log_size: usize,
+    shift: usize,
+    is_right: bool,
+) -> TrackedPoly<B>
+where
+    B: SnarkBackend,
+    B::F: PrimeField,
+{
+    let label = format!("shift_perm_{}_{}_{}", log_size, shift, is_right);
+    match prover.indexed_tracked_poly(label.clone()) {
+        Ok(poly) => poly,
+        Err(_) => {
+            let domain_size = 1usize << log_size;
+            let normalized_shift = if domain_size == 0 {
+                0
+            } else {
+                shift % domain_size
+            };
+
+            let mut evals: Vec<B::F> = (0..domain_size).map(|i| B::F::from(i as u64)).collect();
+            if domain_size > 0 {
+                if is_right {
+                    evals.rotate_right(normalized_shift);
+                } else {
+                    evals.rotate_left(normalized_shift);
+                }
+            }
+
+            let poly = prover.track_mat_mv_poly(MLE::from_evaluations_vec(log_size, evals));
+            prover.add_indexed_tracked_poly(label, poly.clone());
+            poly
+        }
     }
 }
