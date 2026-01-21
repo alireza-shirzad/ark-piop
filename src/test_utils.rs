@@ -151,7 +151,7 @@ pub fn init_subscriber() {
         // Layer 1: tree test output to stdout (test writer)
         let stdout_layer = tracing_tree::HierarchicalLayer::new(2)
             .with_targets(true)
-            .with_indent_lines(true)
+            // .with_indent_lines(true)
             .with_bracketed_fields(true)
             .with_timer(tracing_tree::time::Uptime::default()) // time since process start
             .with_verbose_exit(true)
