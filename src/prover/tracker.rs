@@ -40,7 +40,7 @@ use derivative::Derivative;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem::take,
     panic,
     sync::Arc,
@@ -388,6 +388,48 @@ where
     /// Get the number of variables of a polynomial, by its TrackerID
     pub fn poly_nv(&self, id: TrackerID) -> usize {
         self.state.num_vars.get(&id).copied().unwrap()
+    }
+
+    /// Return the max multiplicative degree (max number of MLEs in any product)
+    /// of the virtual-poly tree rooted at `id`, matching HPVirtualPolynomial::max_degree.
+    pub fn virt_poly_degree(&self, id: TrackerID) -> usize {
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+        self.virt_poly_degree_inner(id, &mut memo, &mut visiting)
+    }
+
+    fn virt_poly_degree_inner(
+        &self,
+        id: TrackerID,
+        memo: &mut HashMap<TrackerID, usize>,
+        visiting: &mut HashSet<TrackerID>,
+    ) -> usize {
+        if let Some(&cached) = memo.get(&id) {
+            return cached;
+        }
+        if self.mat_mv_poly(id).is_some() || self.mat_uv_poly(id).is_some() {
+            memo.insert(id, 1);
+            return 1;
+        }
+        let Some(vpoly) = self.state.virtual_polys.get(&id) else {
+            return 0;
+        };
+        if !visiting.insert(id) {
+            return 0;
+        }
+        let mut max_degree = 0;
+        for (_, prod_ids) in vpoly.iter() {
+            let mut term_degree = 0;
+            for child_id in prod_ids {
+                term_degree += self.virt_poly_degree_inner(*child_id, memo, visiting);
+            }
+            if term_degree > max_degree {
+                max_degree = term_degree;
+            }
+        }
+        visiting.remove(&id);
+        memo.insert(id, max_degree);
+        max_degree
     }
 
     /// Adds/Subtracts two polynomials together
@@ -744,6 +786,7 @@ where
     // TODO: Is this only used to be compatible with the hyperplonk code?
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<B::F> {
+        dbg!(self.virt_poly_degree(id));
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
             return HPVirtualPolynomial::new_from_mle(poly, B::F::one());
@@ -771,6 +814,7 @@ where
                 .unwrap();
         }
 
+        dbg!(&arith_virt_poly.aux_info);
         arith_virt_poly
     }
 
@@ -819,7 +863,7 @@ where
         }
 
         // build the running aggregate polynomial
-        let mut agg = self.track_virt_poly(Vec::new());
+        let mut agg = self.track_virt_poly(VirtualPoly::new());
         // Perform the random linear combination and aggregate them
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
@@ -852,7 +896,7 @@ where
             return Ok(BTreeMap::new());
         }
 
-        let mut agg = self.track_virt_poly(Vec::new());
+        let mut agg = self.track_virt_poly(VirtualPoly::new());
         let mut sc_sum = B::F::zero();
 
         // Record the individual sumcheck claims to send to the verifier
