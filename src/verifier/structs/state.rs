@@ -36,6 +36,7 @@ where
     pub transcript: Tr<B::F>,
     pub num_tracked_polys: usize,
     pub virtual_oracles: IndexMap<TrackerID, Oracle<B::F>>,
+    pub oracle_degrees: IndexMap<TrackerID, usize>,
     /// Mutable indexed tracked oracles for protocol-time updates.
     pub indexed_tracked_oracles: BTreeMap<String, TrackedOracle<B>>,
     pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,

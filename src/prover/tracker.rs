@@ -1010,6 +1010,9 @@ where
             debug!("No sumcheck claims to prove",);
             return Ok(None);
         }
+
+        
+
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
         // Assemble the sumcheck subproof of the prover

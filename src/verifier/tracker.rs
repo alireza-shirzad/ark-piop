@@ -128,6 +128,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .cloned()
     }
 
+    /// Return the max multiplicative degree of the oracle rooted at `id`.
+    pub fn virt_oracle_degree(&self, id: TrackerID) -> usize {
+        self.state.oracle_degrees.get(&id).copied().unwrap_or(0)
+    }
+
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         let comm: <B::UvPCS as PCS<B::F>>::Commitment;
         {
@@ -198,6 +203,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .mv_pcs_substate
             .materialized_comms
             .insert(id, comm);
+        self.state.oracle_degrees.insert(id, 1);
 
         // return the new TrackerID
         Ok(id)
@@ -234,6 +240,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .uv_pcs_substate
             .materialized_comms
             .insert(id, comm);
+        self.state.oracle_degrees.insert(id, 1);
 
         // return the new TrackerID
         Ok(id)
@@ -242,7 +249,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// Track an oracle
     pub fn track_oracle(&mut self, oracle: Oracle<B::F>) -> TrackerID {
         let id = self.gen_id();
+        let degree = match oracle.inner() {
+            InnerOracle::Constant(_) => 0,
+            InnerOracle::Multivariate(_) | InnerOracle::Univariate(_) => 1,
+        };
         self.state.virtual_oracles.borrow_mut().insert(id, oracle);
+        self.state.oracle_degrees.insert(id, degree);
         id
     }
 
@@ -250,6 +262,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn add_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
+        let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
 
         let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
 
@@ -299,12 +313,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         };
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state
+            .oracle_degrees
+            .insert(res_id, o1_degree.max(o2_degree));
         res_id
     }
 
     pub fn sub_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
+        let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
 
         let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
 
@@ -354,12 +373,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         };
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state
+            .oracle_degrees
+            .insert(res_id, o1_degree.max(o2_degree));
         res_id
     }
 
     pub fn mul_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
         let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
+        let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
 
         let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
 
@@ -409,6 +433,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         };
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state
+            .oracle_degrees
+            .insert(res_id, o1_degree + o2_degree);
         res_id
     }
 
@@ -416,6 +443,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let _ = self.gen_id(); // burn a tracker id to match how prover::add_scalar works
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
+        let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
         let log_size = o1_eval_box.log_size();
 
         // Create the new virtual oracle
@@ -435,6 +463,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.oracle_degrees.insert(res_id, o1_degree);
         // Return the new TrackerID
         res_id
     }
@@ -446,6 +475,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         // Get the references for the virtual oracles corresponding to the operands
         let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
+        let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
         let log_size = o1_eval_box.log_size();
         // Create the new virtual oracle
         let res_oracle = match o1_eval_box.inner() {
@@ -464,6 +494,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // Insert the new virtual oracle into the state
         let res_id = self.gen_id();
         self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.oracle_degrees.insert(res_id, o1_degree);
         // Return the new TrackerID
         res_id
     }
@@ -736,6 +767,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
+        dbg!(self.virt_oracle_degree(sumcheck_aggr_claim.id()));
 
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
