@@ -13,6 +13,7 @@ use crate::{
 };
 use ark_ff::One;
 use derivative::Derivative;
+use rayon::vec;
 use std::marker::PhantomData;
 use utils::calc_inclusion_multiplicity;
 
@@ -23,7 +24,7 @@ use super::keyed_sumcheck::{KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumche
 pub struct HintedLookupCheckProverInput<B: SnarkBackend> {
     pub included_cols: Vec<TrackedPoly<B>>,
     pub super_col: TrackedPoly<B>,
-    pub super_col_multiplicities: Vec<TrackedPoly<B>>,
+    pub super_col_multiplicity: TrackedPoly<B>,
 }
 
 impl<B: SnarkBackend> DeepClone<B> for HintedLookupCheckProverInput<B> {
@@ -35,11 +36,7 @@ impl<B: SnarkBackend> DeepClone<B> for HintedLookupCheckProverInput<B> {
                 .map(|c| c.deep_clone(prover.clone()))
                 .collect(),
             super_col: self.super_col.deep_clone(prover.clone()),
-            super_col_multiplicities: self
-                .super_col_multiplicities
-                .iter()
-                .map(|poly| poly.deep_clone(prover.clone()))
-                .collect(),
+            super_col_multiplicity: self.super_col_multiplicity.deep_clone(prover.clone()),
         }
     }
 }
@@ -47,7 +44,7 @@ impl<B: SnarkBackend> DeepClone<B> for HintedLookupCheckProverInput<B> {
 pub struct HintedLookupCheckVerifierInput<B: SnarkBackend> {
     pub included_tracked_col_oracles: Vec<TrackedOracle<B>>,
     pub super_tracked_col_oracle: TrackedOracle<B>,
-    pub super_col_multiplicities: Vec<TrackedOracle<B>>,
+    pub super_col_multiplicity: TrackedOracle<B>,
 }
 
 pub struct HintedLookupCheckPIOP<B: SnarkBackend>(#[doc(hidden)] PhantomData<B>);
@@ -73,7 +70,7 @@ impl<B: SnarkBackend> DeepClone<B> for LookupCheckProverInput<B> {
 }
 
 pub struct LookupCheckProverOutput<B: SnarkBackend> {
-    pub super_col_ms: Vec<TrackedPoly<B>>,
+    pub super_col_m: TrackedPoly<B>,
 }
 
 pub struct LookupCheckVerifierInput<B: SnarkBackend> {
@@ -82,7 +79,7 @@ pub struct LookupCheckVerifierInput<B: SnarkBackend> {
 }
 
 pub struct LookupCheckVerifierOutput<B: SnarkBackend> {
-    pub super_col_m_comms: Vec<TrackedOracle<B>>,
+    pub super_col_m_comm: TrackedOracle<B>,
 }
 
 pub struct LookupCheckPIOP<B: SnarkBackend>(#[doc(hidden)] PhantomData<B>);
@@ -118,37 +115,19 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
-        assert_eq!(
-            input.included_cols.len(),
-            input.super_col_multiplicities.len(),
-            "super column multiplicity hints must align with included columns"
-        );
         let included_col_ms = input
             .included_cols
             .iter()
-            .map(|included_col| {
-                let nv = included_col.log_size();
-                let one_const_mle =
-                    MLE::from_evaluations_vec(nv, vec![B::F::one(); 2_usize.pow(nv as u32)]);
-                Some(prover.track_mat_mv_poly(one_const_mle))
-            })
+            .map(|_included_col| None)
             .collect::<Vec<_>>();
 
-        let super_cols = std::iter::repeat_n(
-            input.super_col.clone(),
-            input.super_col_multiplicities.len(),
-        )
-        .collect::<Vec<_>>();
+        let super_cols = vec![input.super_col.clone()];
+        let super_col_multiplicity = vec![Some(input.super_col_multiplicity.clone())];
         let keyed_sumcheck_prover_input = KeyedSumcheckProverInput {
             fxs: input.included_cols.clone(),
             gxs: super_cols,
             mfxs: included_col_ms,
-            mgxs: input
-                .super_col_multiplicities
-                .iter()
-                .cloned()
-                .map(Some)
-                .collect(),
+            mgxs: super_col_multiplicity,
         };
 
         KeyedSumcheck::<B>::prove(prover, keyed_sumcheck_prover_input)?;
@@ -160,34 +139,19 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
-        assert_eq!(
-            input.included_tracked_col_oracles.len(),
-            input.super_col_multiplicities.len(),
-            "super column multiplicity hints must align with included column oracles"
-        );
         let included_col_ms = input
             .included_tracked_col_oracles
             .iter()
-            .map(|included_col| {
-                let nv = included_col.log_size();
-                let one_closure = |_: Vec<B::F>| -> SnarkResult<B::F> { Ok(B::F::one()) };
-                Some(verifier.track_oracle(Oracle::new_multivariate(nv, one_closure)))
-            })
+            .map(|_included_col| None)
             .collect::<Vec<_>>();
 
-        let super_cols = std::iter::repeat(input.super_tracked_col_oracle.clone())
-            .take(input.super_col_multiplicities.len())
-            .collect::<Vec<_>>();
+        let super_cols = vec![input.super_tracked_col_oracle.clone()];
+        let super_col_multiplicity = vec![Some(input.super_col_multiplicity.clone())];
         let keyed_sumcheck_verifier_input = KeyedSumcheckVerifierInput {
             fxs: input.included_tracked_col_oracles.clone(),
             gxs: super_cols,
             mfxs: included_col_ms,
-            mgxs: input
-                .super_col_multiplicities
-                .iter()
-                .cloned()
-                .map(Some)
-                .collect(),
+            mgxs: super_col_multiplicity,
         };
         KeyedSumcheck::<B>::verify(verifier, keyed_sumcheck_verifier_input)?;
         Ok(())
@@ -229,44 +193,31 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
-        let super_col_m_mles = input
-            .included_cols
-            .iter()
-            .map(|included_col| calc_inclusion_multiplicity(included_col, &input.super_col))
-            .collect::<Vec<_>>();
-        let super_col_ms = super_col_m_mles
-            .iter()
-            .map(|mle| prover.track_and_commit_mat_mv_poly(mle))
-            .collect::<SnarkResult<Vec<_>>>()?;
+        let super_col_m_mle = calc_inclusion_multiplicity(&input.included_cols, &input.super_col);
+        let super_col_m = prover.track_and_commit_mat_mv_poly(&super_col_m_mle)?;
 
         let hinted_lookup_prover_input = HintedLookupCheckProverInput {
             included_cols: input.included_cols,
             super_col: input.super_col,
-            super_col_multiplicities: super_col_ms.clone(),
+            super_col_multiplicity: super_col_m.clone(),
         };
         HintedLookupCheckPIOP::<B>::prove(prover, hinted_lookup_prover_input)?;
-        Ok(LookupCheckProverOutput { super_col_ms })
+        Ok(LookupCheckProverOutput { super_col_m })
     }
 
     fn verify_inner(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
-        let super_col_m_comms = input
-            .included_tracked_col_oracles
-            .iter()
-            .map(|_| {
-                let id = verifier.peek_next_id();
-                verifier.track_mv_com_by_id(id)
-            })
-            .collect::<SnarkResult<Vec<_>>>()?;
+        let id = verifier.peek_next_id();
+        let super_col_m_comm = verifier.track_mv_com_by_id(id)?;
 
         let hinted_lookup_verifier_input = HintedLookupCheckVerifierInput {
             included_tracked_col_oracles: input.included_tracked_col_oracles,
             super_tracked_col_oracle: input.super_tracked_col_oracle,
-            super_col_multiplicities: super_col_m_comms.clone(),
+            super_col_multiplicity: super_col_m_comm.clone(),
         };
         HintedLookupCheckPIOP::<B>::verify(verifier, hinted_lookup_verifier_input)?;
-        Ok(LookupCheckVerifierOutput { super_col_m_comms })
+        Ok(LookupCheckVerifierOutput { super_col_m_comm })
     }
 }

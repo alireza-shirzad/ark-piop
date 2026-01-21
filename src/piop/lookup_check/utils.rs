@@ -3,33 +3,40 @@ use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
 use ark_ff::Zero;
 
 // TODO: Check if it can be optimized. Also, put in the paper
-/// Given a super column and a claimed included column, It outputs an MLE
-/// representing the multiplicity of the super polynomial elements in the
-/// claimed included column. This MLE will be used in the Multiplicity check
+/// Given a super column and a set of included columns, output an MLE
+/// representing the multiplicity of super column elements that appear
+/// in all included columns. The output length matches the super column.
 pub fn calc_inclusion_multiplicity<B>(
-    included_col: &TrackedPoly<B>,
+    included_col: &Vec<TrackedPoly<B>>,
     super_col: &TrackedPoly<B>,
 ) -> MLE<B::F>
 where
     B: SnarkBackend,
 {
-    let included_col_evals = included_col.evaluations();
+    let included_col_evals = included_col
+        .iter()
+        .map(|col| col.evaluations())
+        .collect::<Vec<_>>();
     let super_col_evals = super_col.evaluations();
 
     let super_col_nv = super_col.log_size();
     let super_col_len = super_col_evals.len();
 
-    let mut included_col_mults_map = vec_multiplicity_count::<B::F>(&included_col_evals, None);
+    let included_col_mults_map = included_col_evals
+        .iter()
+        .map(|evals| vec_multiplicity_count::<B::F>(evals, None))
+        .fold(HashMap::<B::F, u64>::new(), |mut acc, map| {
+            for (val, count) in map {
+                *acc.entry(val).or_insert(0) += count;
+            }
+            acc
+        });
 
     let mut super_col_mult_evals = Vec::with_capacity(super_col_len);
 
-    for (_i, &val) in super_col_evals.iter().enumerate() {
-        if let Some(&included_col_mult) = included_col_mults_map.get(&val) {
-            super_col_mult_evals.push(B::F::from(included_col_mult));
-            included_col_mults_map.insert(val, 0);
-        } else {
-            super_col_mult_evals.push(B::F::zero());
-        }
+    for &val in super_col_evals.iter() {
+        let count = included_col_mults_map.get(&val).copied().unwrap_or(0);
+        super_col_mult_evals.push(B::F::from(count));
     }
 
     MLE::from_evaluations_vec(super_col_nv, super_col_mult_evals)
