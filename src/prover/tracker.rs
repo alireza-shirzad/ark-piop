@@ -786,7 +786,6 @@ where
     // TODO: Is this only used to be compatible with the hyperplonk code?
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<B::F> {
-        dbg!(self.virt_poly_degree(id));
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
             return HPVirtualPolynomial::new_from_mle(poly, B::F::one());
@@ -814,7 +813,6 @@ where
                 .unwrap();
         }
 
-        dbg!(&arith_virt_poly.aux_info);
         arith_virt_poly
     }
 
@@ -1010,8 +1008,6 @@ where
             debug!("No sumcheck claims to prove",);
             return Ok(None);
         }
-
-        
 
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
