@@ -984,6 +984,12 @@ where
         // Generate a sumcheck proof
 
         let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id);
+        debug!(
+            "The final virtual polynomial for sumcheck has {} terms, {} degree, and {} number of variables",
+            sc_avp.products.len(),
+            sc_avp.aux_info.max_degree,
+            sc_avp.aux_info.num_variables
+        );
         let sc_aux_info = sc_avp.aux_info.clone();
         let sc_proof = SumCheck::prove(&sc_avp, &mut self.state.transcript)?;
         let _ = self.add_mv_eval_claim(sumcheck_aggr_id, &sc_proof.point);
