@@ -767,7 +767,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
-        dbg!(self.virt_oracle_degree(sumcheck_aggr_claim.id()));
 
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
