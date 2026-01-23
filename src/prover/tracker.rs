@@ -46,6 +46,7 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, instrument};
+use tracing_subscriber::field::debug;
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
 ///  1) Recording the structure of virtual polynomials and
@@ -407,7 +408,7 @@ where
         if let Some(&cached) = memo.get(&id) {
             return cached;
         }
-        if self.mat_mv_poly(id).is_some() || self.mat_uv_poly(id).is_some() {
+        if self.mat_mv_poly(id).is_some() {
             memo.insert(id, 1);
             return 1;
         }
@@ -853,6 +854,19 @@ where
     /// zerocheck claim in the prover state.
     #[instrument(level = "debug", skip(self))]
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
+        debug!(
+            "Zerocheck claims with degrees: {}",
+            self.state
+                .mv_pcs_substate
+                .zero_check_claims
+                .iter()
+                .map(|claim| self.virt_poly_degree(claim.id()))
+                .collect::<Vec<usize>>()
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
         let num_claims = self.state.mv_pcs_substate.zero_check_claims.len();
 
         if num_claims == 0 {
@@ -876,8 +890,9 @@ where
         // Push the new aggregated claim to the prover state as the inly zerocheck claim
         self.add_mv_zerocheck_claim(agg)?;
         debug!(
-            "{} zerocheck claims were batched into 1 zerocheck claim",
-            num_claims
+            "{} zerocheck claims were batched into 1 zerocheck claim with degree {}",
+            num_claims,
+            self.virt_poly_degree(agg)
         );
         Ok(())
     }
@@ -965,7 +980,10 @@ where
 
         // Add this new sumcheck claim to other sumcheck claims
         self.add_mv_sumcheck_claim(new_sc_claim_poly, B::F::zero())?;
-        debug!("The only zerocheck claim was converted to a sumcheck claim",);
+        debug!(
+            "The only zerocheck claim was converted to a sumcheck claim with degree {}",
+            self.virt_poly_degree(new_sc_claim_poly)
+        );
         Ok(())
     }
 
