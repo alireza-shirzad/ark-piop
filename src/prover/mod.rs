@@ -324,9 +324,13 @@ where
         super_id: TrackerID,
         sub_id: TrackerID,
     ) -> SnarkResult<()> {
-        self.tracker_rc
-            .borrow_mut()
-            .add_mv_lookup_claim(super_id, sub_id)
+        let mut tracker = self.tracker_rc.borrow_mut();
+        trace!(
+            "Looking up [{:?}] in [{:?}]",
+            tracker.evaluations(sub_id),
+            tracker.evaluations(super_id)
+        );
+        tracker.add_mv_lookup_claim(super_id, sub_id)
     }
 
     /// Get the next TrackerID to be used
