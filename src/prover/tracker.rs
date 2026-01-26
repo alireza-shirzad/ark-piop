@@ -1020,6 +1020,69 @@ where
         Ok((sc_proof, sc_aux_info))
     }
 
+    /// Reduce high-degree product terms in the single aggregated sumcheck polynomial.
+    ///
+    /// For any term with degree > 9, commit to the product polynomial and replace
+    /// the term with that commitment, preserving the coefficient. This is deterministic
+    /// and must stay in sync with the verifier.
+    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
+        const MAX_TERM_DEGREE: usize = 9;
+
+        if self.state.mv_pcs_substate.sum_check_claims.len() != 1 {
+            return Ok(());
+        }
+
+        let sumcheck_aggr_id = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .last()
+            .unwrap()
+            .id();
+
+        if self.mat_mv_poly(sumcheck_aggr_id).is_some() {
+            return Ok(());
+        }
+
+        let virt_poly = match self.virt_poly(sumcheck_aggr_id) {
+            Some(poly) => poly.clone(),
+            None => return Ok(()),
+        };
+
+        let mut new_poly = VirtualPoly::new();
+        let mut replaced = false;
+
+        for (coeff, prod_ids) in virt_poly.iter() {
+            if prod_ids.len() > MAX_TERM_DEGREE {
+                let nv = self.mat_mv_poly(prod_ids[0]).unwrap().num_vars();
+                let mut evals = vec![B::F::one(); 1 << nv];
+                for id in prod_ids {
+                    let poly = self.mat_mv_poly(*id).unwrap();
+                    cfg_iter_mut!(evals)
+                        .zip(poly.evaluations())
+                        .for_each(|(a, b)| *a *= b);
+                }
+                let product_mle = MLE::from_evaluations_vec(nv, evals);
+                let committed_id = self.track_and_commit_mat_mv_p(&product_mle)?;
+                new_poly.push((*coeff, vec![committed_id]));
+                replaced = true;
+            } else {
+                new_poly.push((*coeff, prod_ids.clone()));
+            }
+        }
+
+        if replaced {
+            let new_id = self.track_virt_poly(new_poly);
+            let claim = self.state.mv_pcs_substate.sum_check_claims.pop().unwrap();
+            self.state
+                .mv_pcs_substate
+                .sum_check_claims
+                .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+        }
+
+        Ok(())
+    }
+
     /// Reduces every zero-check claim, sum-check claim in
     /// the prover state, into a list of evaluation claims. These evaluation
     /// claims will be proved using a PCS
@@ -1038,6 +1101,9 @@ where
             debug!("No sumcheck claims to prove",);
             return Ok(None);
         }
+
+        // Reduce high-degree terms deterministically before sumcheck.
+        self.reduce_sumcheck_dgree()?;
 
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;

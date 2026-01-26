@@ -958,10 +958,66 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.equalize_sumcheck_claims(max_nv)?;
         // aggregate the sumcheck claims
         self.batch_s_check_claims(max_nv)?;
+        // Reduce high-degree terms deterministically before sumcheck.
+        self.reduce_sumcheck_dgree()?;
         // verify the sumcheck proof
         self.perform_single_sumcheck()?;
         // Verify the evaluation claims
         self.perform_eval_check()?;
+
+        Ok(())
+    }
+
+    /// Reduce high-degree product terms in the single aggregated sumcheck oracle.
+    ///
+    /// For any term with degree > 9, track the corresponding commitment and replace
+    /// the term with that commitment, preserving the coefficient. This is deterministic
+    /// and must stay in sync with the prover.
+    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
+        const MAX_TERM_DEGREE: usize = 9;
+
+        if self.state.mv_pcs_substate.sum_check_claims.len() != 1 {
+            return Ok(());
+        }
+
+        let sumcheck_aggr_id = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .last()
+            .unwrap()
+            .id();
+
+        let terms = match self.state.virtual_oracles.get(&sumcheck_aggr_id) {
+            Some(terms) => terms.clone(),
+            None => return Ok(()),
+        };
+
+        let mut new_terms = VirtualOracle::new();
+        let mut replaced = false;
+
+        for (coeff, prod_ids) in terms.iter() {
+            if prod_ids.len() > MAX_TERM_DEGREE {
+                let new_id = self.peek_next_id();
+                let _ = self.track_mv_com_by_id(new_id)?;
+                new_terms.push((*coeff, vec![new_id]));
+                replaced = true;
+            } else {
+                new_terms.push((*coeff, prod_ids.clone()));
+            }
+        }
+
+        if replaced {
+            self.state
+                .virtual_oracles
+                .insert(sumcheck_aggr_id, new_terms);
+            let new_degree = self.state.virtual_oracles[&sumcheck_aggr_id]
+                .iter()
+                .map(|(_, ids)| ids.len())
+                .max()
+                .unwrap_or(0);
+            self.state.oracle_degrees.insert(sumcheck_aggr_id, new_degree);
+        }
 
         Ok(())
     }
