@@ -12,7 +12,7 @@ use crate::{
     },
     verifier::structs::oracle::InnerOracle,
 };
-use ark_std::Zero;
+use ark_std::{One, Zero};
 use itertools::MultiUnzip;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
 use tracing::{debug, instrument};
@@ -22,7 +22,7 @@ use super::{
     errors::VerifierError,
     structs::{
         ProcessedSNARKVk,
-        oracle::Oracle,
+        oracle::{Oracle, VirtualOracle},
         state::{ProcessedProof, VerifierState},
     },
 };
@@ -133,6 +133,81 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.oracle_degrees.get(&id).copied().unwrap_or(0)
     }
 
+    fn oracle_kind_from_inner(inner: &InnerOracle<B::F>) -> crate::verifier::structs::oracle::OracleKind {
+        use crate::verifier::structs::oracle::OracleKind;
+        match inner {
+            InnerOracle::Univariate(_) => OracleKind::Univariate,
+            InnerOracle::Multivariate(_) => OracleKind::Multivariate,
+            InnerOracle::Constant(_) => OracleKind::Constant,
+        }
+    }
+
+    fn combine_kinds(
+        &self,
+        k1: crate::verifier::structs::oracle::OracleKind,
+        k2: crate::verifier::structs::oracle::OracleKind,
+    ) -> crate::verifier::structs::oracle::OracleKind {
+        use crate::verifier::structs::oracle::OracleKind;
+        match (k1, k2) {
+            (OracleKind::Constant, k) | (k, OracleKind::Constant) => k,
+            (OracleKind::Univariate, OracleKind::Univariate) => OracleKind::Univariate,
+            (OracleKind::Multivariate, OracleKind::Multivariate) => OracleKind::Multivariate,
+            _ => panic!("Mismatched oracle types"),
+        }
+    }
+
+    fn eval_base_mv(&self, oracle_id: TrackerID, point: &Vec<B::F>) -> SnarkResult<B::F> {
+        let oracle = self.state.base_oracles.get(&oracle_id).ok_or(SnarkError::DummyError)?;
+        match oracle.inner() {
+            InnerOracle::Multivariate(f) => f(point.clone()),
+            InnerOracle::Constant(c) => Ok(*c),
+            _ => Err(SnarkError::DummyError),
+        }
+    }
+
+    fn eval_base_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
+        let oracle = self.state.base_oracles.get(&oracle_id).ok_or(SnarkError::DummyError)?;
+        match oracle.inner() {
+            InnerOracle::Univariate(f) => f(point),
+            InnerOracle::Constant(c) => Ok(*c),
+            _ => Err(SnarkError::DummyError),
+        }
+    }
+
+    fn eval_virtual_mv(&self, oracle_id: TrackerID, point: &Vec<B::F>) -> SnarkResult<B::F> {
+        let terms = self
+            .state
+            .virtual_oracles
+            .get(&oracle_id)
+            .ok_or(SnarkError::DummyError)?;
+        let mut acc = B::F::zero();
+        for (coeff, term_ids) in terms.iter() {
+            let mut term_val = *coeff;
+            for id in term_ids {
+                term_val *= self.eval_base_mv(*id, point)?;
+            }
+            acc += term_val;
+        }
+        Ok(acc)
+    }
+
+    fn eval_virtual_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
+        let terms = self
+            .state
+            .virtual_oracles
+            .get(&oracle_id)
+            .ok_or(SnarkError::DummyError)?;
+        let mut acc = B::F::zero();
+        for (coeff, term_ids) in terms.iter() {
+            let mut term_val = *coeff;
+            for id in term_ids {
+                term_val *= self.eval_base_uv(*id, point)?;
+            }
+            acc += term_val;
+        }
+        Ok(acc)
+    }
+
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         let comm: <B::UvPCS as PCS<B::F>>::Commitment;
         {
@@ -178,18 +253,26 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             Some(proof) => {
                 let mv_queries_clone = proof.mv_pcs_subproof.query_map.clone();
 
-                self.state.virtual_oracles.insert(
-                    id,
-                    Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
-                        let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
-                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                                id.0,
-                                f_vec_short_str(&point),
-                            )),
-                        )?;
-                        Ok(query_res)
-                    }),
-                );
+                let oracle = Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
+                    let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
+                        SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                            id.0,
+                            f_vec_short_str(&point),
+                        )),
+                    )?;
+                    Ok(query_res)
+                });
+                let mut terms = VirtualOracle::new();
+                terms.push((B::F::one(), vec![id]));
+                self.state.base_oracles.insert(id, oracle);
+                self.state.virtual_oracles.insert(id, terms);
+                self.state
+                    .oracle_log_sizes
+                    .insert(id, comm.log_size() as usize);
+                self.state
+                    .oracle_kinds
+                    .insert(id, crate::verifier::structs::oracle::OracleKind::Multivariate);
+                self.state.oracle_is_material.insert(id, true);
             }
             None => {
                 panic!("Should not be called");
@@ -220,13 +303,21 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         match self.proof.as_ref() {
             Some(proof) => {
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
-                self.state.virtual_oracles.insert(
-                    id,
-                    Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
-                        let query_res = uv_queries_clone.get(&(id, point)).unwrap();
-                        Ok(*query_res)
-                    }),
-                );
+                let oracle = Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
+                    let query_res = uv_queries_clone.get(&(id, point)).unwrap();
+                    Ok(*query_res)
+                });
+                let mut terms = VirtualOracle::new();
+                terms.push((B::F::one(), vec![id]));
+                self.state.base_oracles.insert(id, oracle);
+                self.state.virtual_oracles.insert(id, terms);
+                self.state
+                    .oracle_log_sizes
+                    .insert(id, comm.log_size() as usize);
+                self.state
+                    .oracle_kinds
+                    .insert(id, crate::verifier::structs::oracle::OracleKind::Univariate);
+                self.state.oracle_is_material.insert(id, true);
             }
             None => {
                 panic!("Should not be called");
@@ -249,70 +340,62 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// Track an oracle
     pub fn track_oracle(&mut self, oracle: Oracle<B::F>) -> TrackerID {
         let id = self.gen_id();
+        let log_size = oracle.log_size();
+        let kind = Self::oracle_kind_from_inner(oracle.inner());
         let degree = match oracle.inner() {
             InnerOracle::Constant(_) => 0,
             InnerOracle::Multivariate(_) | InnerOracle::Univariate(_) => 1,
         };
-        self.state.virtual_oracles.borrow_mut().insert(id, oracle);
+        let mut terms = VirtualOracle::new();
+        terms.push((B::F::one(), vec![id]));
+        self.state.base_oracles.insert(id, oracle);
+        self.state.virtual_oracles.insert(id, terms);
+        self.state.oracle_log_sizes.insert(id, log_size);
+        self.state.oracle_kinds.insert(id, kind);
+        self.state.oracle_is_material.insert(id, true);
         self.state.oracle_degrees.insert(id, degree);
         id
     }
 
     // TODO: Lots of code duplication here for add, sub, mul, etc. need to refactor.
     pub fn add_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
-        let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_terms = self.state.virtual_oracles.get(&o1_id).unwrap().clone();
+        let o2_terms = self.state.virtual_oracles.get(&o2_id).unwrap().clone();
         let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
         let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
+        let o1_kind = *self.state.oracle_kinds.get(&o1_id).unwrap();
+        let o2_kind = *self.state.oracle_kinds.get(&o2_id).unwrap();
+        let res_kind = self.combine_kinds(o1_kind, o2_kind);
+        let o1_mat = *self.state.oracle_is_material.get(&o1_id).unwrap_or(&false);
+        let o2_mat = *self.state.oracle_is_material.get(&o2_id).unwrap_or(&false);
 
-        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
+        let log_size = self
+            .state
+            .oracle_log_sizes
+            .get(&o1_id)
+            .copied()
+            .unwrap_or(0)
+            .max(
+                self.state
+                    .oracle_log_sizes
+                    .get(&o2_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
 
-        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
-            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? + o2_cloned(point.clone())?)
-                })
-            }
-            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| {
-                    Ok(o1_cloned(point)? + o2_cloned(point)?)
-                })
-            }
-            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? + c2)
-                })
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(c1 + o2_cloned(point.clone())?)
-                })
-            }
-            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? + c2))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 + o2_cloned(point)?))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
-                Oracle::new_constant(log_size, *c1 + *c2)
-            }
-            _ => panic!("Mismatched oracle types"),
-        };
+        let mut res_terms = VirtualOracle::new();
+        if !o1_mat && o2_mat {
+            res_terms.extend(o2_terms.into_iter());
+            res_terms.extend(o1_terms.into_iter());
+        } else {
+            res_terms.extend(o1_terms.into_iter());
+            res_terms.extend(o2_terms.into_iter());
+        }
         let res_id = self.gen_id();
-        self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.virtual_oracles.insert(res_id, res_terms);
+        self.state.oracle_log_sizes.insert(res_id, log_size);
+        self.state.oracle_kinds.insert(res_id, res_kind);
+        self.state.oracle_is_material.insert(res_id, false);
         self.state
             .oracle_degrees
             .insert(res_id, o1_degree.max(o2_degree));
@@ -320,59 +403,43 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub fn sub_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
-        let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_terms = self.state.virtual_oracles.get(&o1_id).unwrap().clone();
+        let o2_terms = self.state.virtual_oracles.get(&o2_id).unwrap().clone();
         let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
         let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
+        let o1_kind = *self.state.oracle_kinds.get(&o1_id).unwrap();
+        let o2_kind = *self.state.oracle_kinds.get(&o2_id).unwrap();
+        let res_kind = self.combine_kinds(o1_kind, o2_kind);
+        let o1_mat = *self.state.oracle_is_material.get(&o1_id).unwrap_or(&false);
+        let o2_mat = *self.state.oracle_is_material.get(&o2_id).unwrap_or(&false);
 
-        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
+        let log_size = self
+            .state
+            .oracle_log_sizes
+            .get(&o1_id)
+            .copied()
+            .unwrap_or(0)
+            .max(
+                self.state
+                    .oracle_log_sizes
+                    .get(&o2_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
 
-        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
-            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? - o2_cloned(point.clone())?)
-                })
-            }
-            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| {
-                    Ok(o1_cloned(point)? - o2_cloned(point)?)
-                })
-            }
-            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? - c2)
-                })
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(c1 - o2_cloned(point.clone())?)
-                })
-            }
-            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? - c2))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 - o2_cloned(point)?))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
-                Oracle::new_constant(log_size, *c1 - *c2)
-            }
-            _ => panic!("Mismatched oracle types"),
-        };
+        let mut res_terms = VirtualOracle::new();
+        if !o1_mat && o2_mat {
+            res_terms.extend(o2_terms.into_iter().map(|(coeff, ids)| (-coeff, ids)));
+            res_terms.extend(o1_terms.into_iter());
+        } else {
+            res_terms.extend(o1_terms.into_iter());
+            res_terms.extend(o2_terms.into_iter().map(|(coeff, ids)| (-coeff, ids)));
+        }
         let res_id = self.gen_id();
-        self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.virtual_oracles.insert(res_id, res_terms);
+        self.state.oracle_log_sizes.insert(res_id, log_size);
+        self.state.oracle_kinds.insert(res_id, res_kind);
+        self.state.oracle_is_material.insert(res_id, false);
         self.state
             .oracle_degrees
             .insert(res_id, o1_degree.max(o2_degree));
@@ -380,59 +447,63 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub fn mul_oracles(&mut self, o1_id: TrackerID, o2_id: TrackerID) -> TrackerID {
-        let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
-        let o2_eval_box = self.state.virtual_oracles.get(&o2_id).unwrap();
+        let o1_terms = self.state.virtual_oracles.get(&o1_id).unwrap().clone();
+        let o2_terms = self.state.virtual_oracles.get(&o2_id).unwrap().clone();
         let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
         let o2_degree = self.state.oracle_degrees.get(&o2_id).copied().unwrap_or(0);
+        let o1_kind = *self.state.oracle_kinds.get(&o1_id).unwrap();
+        let o2_kind = *self.state.oracle_kinds.get(&o2_id).unwrap();
+        let res_kind = self.combine_kinds(o1_kind, o2_kind);
+        let o1_mat = *self.state.oracle_is_material.get(&o1_id).unwrap_or(&false);
+        let o2_mat = *self.state.oracle_is_material.get(&o2_id).unwrap_or(&false);
 
-        let log_size = o1_eval_box.log_size().max(o2_eval_box.log_size());
+        let log_size = self
+            .state
+            .oracle_log_sizes
+            .get(&o1_id)
+            .copied()
+            .unwrap_or(0)
+            .max(
+                self.state
+                    .oracle_log_sizes
+                    .get(&o2_id)
+                    .copied()
+                    .unwrap_or(0),
+            );
 
-        let res_oracle = match (o1_eval_box.inner(), o2_eval_box.inner()) {
-            (InnerOracle::Multivariate(o1), InnerOracle::Multivariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? * o2_cloned(point.clone())?)
-                })
+        let mut res_terms = VirtualOracle::new();
+        if o1_mat && o2_mat {
+            let coeff1 = o1_terms.get(0).map(|(c, _)| *c).unwrap_or(B::F::one());
+            let coeff2 = o2_terms.get(0).map(|(c, _)| *c).unwrap_or(B::F::one());
+            res_terms.push((coeff1 * coeff2, vec![o1_id, o2_id]));
+        } else if o1_mat && !o2_mat {
+            let coeff1 = o1_terms.get(0).map(|(c, _)| *c).unwrap_or(B::F::one());
+            for (coeff2, prod2) in o2_terms.iter() {
+                let mut ids = prod2.clone();
+                ids.push(o1_id);
+                res_terms.push((coeff1 * *coeff2, ids));
             }
-            (InnerOracle::Univariate(o1), InnerOracle::Univariate(o2)) => {
-                let o1_cloned = o1.clone();
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| {
-                    Ok(o1_cloned(point)? * o2_cloned(point)?)
-                })
+        } else if !o1_mat && o2_mat {
+            let coeff2 = o2_terms.get(0).map(|(c, _)| *c).unwrap_or(B::F::one());
+            for (coeff1, prod1) in o1_terms.iter() {
+                let mut ids = prod1.clone();
+                ids.push(o2_id);
+                res_terms.push((*coeff1 * coeff2, ids));
             }
-            (InnerOracle::Multivariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? * c2)
-                })
+        } else {
+            for (coeff1, prod1) in o1_terms.iter() {
+                for (coeff2, prod2) in o2_terms.iter() {
+                    let mut ids = prod1.clone();
+                    ids.extend_from_slice(prod2);
+                    res_terms.push((*coeff1 * *coeff2, ids));
+                }
             }
-            (InnerOracle::Constant(c1), InnerOracle::Multivariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(c1 * o2_cloned(point.clone())?)
-                })
-            }
-            (InnerOracle::Univariate(o1), InnerOracle::Constant(c2)) => {
-                let o1_cloned = o1.clone();
-                let c2 = *c2;
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? * c2))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Univariate(o2)) => {
-                let c1 = *c1;
-                let o2_cloned = o2.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(c1 * o2_cloned(point)?))
-            }
-            (InnerOracle::Constant(c1), InnerOracle::Constant(c2)) => {
-                Oracle::new_constant(log_size, *c1 * *c2)
-            }
-            _ => panic!("Mismatched oracle types"),
-        };
+        }
         let res_id = self.gen_id();
-        self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.virtual_oracles.insert(res_id, res_terms);
+        self.state.oracle_log_sizes.insert(res_id, log_size);
+        self.state.oracle_kinds.insert(res_id, res_kind);
+        self.state.oracle_is_material.insert(res_id, false);
         self.state
             .oracle_degrees
             .insert(res_id, o1_degree + o2_degree);
@@ -440,30 +511,52 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
-        let _ = self.gen_id(); // burn a tracker id to match how prover::add_scalar works
-        // Get the references for the virtual oracles corresponding to the operands
-        let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
+        let o1_terms = self.state.virtual_oracles.get(&o1_id).unwrap().clone();
         let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
-        let log_size = o1_eval_box.log_size();
+        let log_size = self
+            .state
+            .oracle_log_sizes
+            .get(&o1_id)
+            .copied()
+            .unwrap_or(0);
+        let o1_kind = *self.state.oracle_kinds.get(&o1_id).unwrap();
 
-        // Create the new virtual oracle
-        let res_oracle = match o1_eval_box.inner() {
-            InnerOracle::Multivariate(o1) => {
-                let o1_cloned = o1.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? + scalar)
-                })
+        let scalar_id = self.gen_id();
+        let scalar_oracle = match o1_kind {
+            crate::verifier::structs::oracle::OracleKind::Multivariate => {
+                Oracle::new_multivariate(log_size, move |_pt: Vec<B::F>| Ok(scalar))
             }
-            InnerOracle::Univariate(o1) => {
-                let o1_cloned = o1.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? + scalar))
+            crate::verifier::structs::oracle::OracleKind::Univariate => {
+                Oracle::new_univariate(log_size, move |_pt: B::F| Ok(scalar))
             }
-            InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c + scalar),
+            crate::verifier::structs::oracle::OracleKind::Constant => {
+                Oracle::new_constant(log_size, scalar)
+            }
         };
-        // Insert the new virtual oracle into the state
+        let mut scalar_terms = VirtualOracle::new();
+        scalar_terms.push((B::F::one(), vec![scalar_id]));
+        self.state.base_oracles.insert(scalar_id, scalar_oracle);
+        self.state.virtual_oracles.insert(scalar_id, scalar_terms);
+        self.state.oracle_log_sizes.insert(scalar_id, log_size);
+        self.state.oracle_kinds.insert(scalar_id, o1_kind);
+        self.state.oracle_is_material.insert(scalar_id, true);
+        self.state.oracle_degrees.insert(scalar_id, 1);
+
+        let o1_mat = *self.state.oracle_is_material.get(&o1_id).unwrap_or(&false);
+        let mut res_terms = VirtualOracle::new();
+        if o1_mat {
+            res_terms.extend(o1_terms.into_iter());
+            res_terms.push((B::F::one(), vec![scalar_id]));
+        } else {
+            res_terms.push((B::F::one(), vec![scalar_id]));
+            res_terms.extend(o1_terms.into_iter());
+        }
         let res_id = self.gen_id();
-        self.state.virtual_oracles.insert(res_id, res_oracle);
-        self.state.oracle_degrees.insert(res_id, o1_degree);
+        self.state.virtual_oracles.insert(res_id, res_terms);
+        self.state.oracle_log_sizes.insert(res_id, log_size);
+        self.state.oracle_kinds.insert(res_id, o1_kind);
+        self.state.oracle_is_material.insert(res_id, false);
+        self.state.oracle_degrees.insert(res_id, o1_degree.max(1));
         // Return the new TrackerID
         res_id
     }
@@ -473,27 +566,25 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
-        // Get the references for the virtual oracles corresponding to the operands
-        let o1_eval_box = self.state.virtual_oracles.get(&o1_id).unwrap();
+        let o1_terms = self.state.virtual_oracles.get(&o1_id).unwrap().clone();
         let o1_degree = self.state.oracle_degrees.get(&o1_id).copied().unwrap_or(0);
-        let log_size = o1_eval_box.log_size();
-        // Create the new virtual oracle
-        let res_oracle = match o1_eval_box.inner() {
-            InnerOracle::Multivariate(o1) => {
-                let o1_cloned = o1.clone();
-                Oracle::new_multivariate(log_size, move |point: Vec<B::F>| {
-                    Ok(o1_cloned(point.clone())? * scalar)
-                })
-            }
-            InnerOracle::Univariate(o1) => {
-                let o1_cloned = o1.clone();
-                Oracle::new_univariate(log_size, move |point: B::F| Ok(o1_cloned(point)? * scalar))
-            }
-            InnerOracle::Constant(c) => Oracle::new_constant(log_size, *c * scalar),
-        };
-        // Insert the new virtual oracle into the state
+        let log_size = self
+            .state
+            .oracle_log_sizes
+            .get(&o1_id)
+            .copied()
+            .unwrap_or(0);
+        let o1_kind = *self.state.oracle_kinds.get(&o1_id).unwrap();
+
+        let mut res_terms = VirtualOracle::new();
+        for (coeff, ids) in o1_terms.into_iter() {
+            res_terms.push((coeff * scalar, ids));
+        }
         let res_id = self.gen_id();
-        self.state.virtual_oracles.insert(res_id, res_oracle);
+        self.state.virtual_oracles.insert(res_id, res_terms);
+        self.state.oracle_log_sizes.insert(res_id, log_size);
+        self.state.oracle_kinds.insert(res_id, o1_kind);
+        self.state.oracle_is_material.insert(res_id, false);
         self.state.oracle_degrees.insert(res_id, o1_degree);
         // Return the new TrackerID
         res_id
@@ -524,18 +615,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .num_variables,
             B::F::zero(),
         );
-        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
-        match oracle.inner() {
-            InnerOracle::Multivariate(f) => f(equalized_point),
-            _ => Err(SnarkError::DummyError),
-        }
+        self.eval_virtual_mv(oracle_id, &equalized_point)
     }
     pub fn query_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
-        let oracle = self.state.virtual_oracles.get(&oracle_id).unwrap();
-        match oracle.inner() {
-            InnerOracle::Univariate(f) => f(point),
-            _ => Err(SnarkError::DummyError),
-        }
+        self.eval_virtual_uv(oracle_id, point)
     }
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         self.state
@@ -646,10 +729,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub(crate) fn oracle_log_size(&self, id: TrackerID) -> Option<usize> {
-        self.state
-            .virtual_oracles
-            .get(&id)
-            .map(|oracle| oracle.log_size())
+        self.state.oracle_log_sizes.get(&id).copied()
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -767,6 +847,21 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
+        if let Some(terms) = self.state.virtual_oracles.get(&sumcheck_aggr_claim.id()) {
+            let degree = self.virt_oracle_degree(sumcheck_aggr_claim.id());
+            let num_vars = self
+                .state
+                .oracle_log_sizes
+                .get(&sumcheck_aggr_claim.id())
+                .copied()
+                .unwrap_or(0);
+            debug!(
+                "Sumcheck oracle stats (verifier): terms={}, degree={}, num_vars={}",
+                terms.len(),
+                degree,
+                num_vars
+            );
+        }
 
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
@@ -812,12 +907,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn equalize_sumcheck_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
-        let oracle_log_sizes: IndexMap<TrackerID, usize> = self
-            .state
-            .virtual_oracles
-            .iter()
-            .map(|(id, oracle)| (*id, oracle.log_size()))
-            .collect();
+        let oracle_log_sizes: IndexMap<TrackerID, usize> =
+            self.state.oracle_log_sizes.clone();
         let proof_claims = self
             .proof
             .as_ref()

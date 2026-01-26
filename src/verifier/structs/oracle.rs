@@ -10,6 +10,7 @@ use either::Either;
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
+    slice,
     ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign},
     rc::Rc,
     sync::Arc,
@@ -38,6 +39,66 @@ pub enum InnerOracle<F: Field + 'static> {
     Univariate(Arc<dyn CloneableFn<F, F>>),
     Multivariate(Arc<dyn CloneableFn<F, Vec<F>>>),
     Constant(F),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OracleKind {
+    Univariate,
+    Multivariate,
+    Constant,
+}
+
+#[derive(Derivative)]
+#[derivative(Clone(bound = "F: Clone"))]
+#[derivative(Default(bound = ""))]
+#[derivative(Debug(bound = "F: Debug"))]
+pub(crate) struct VirtualOracle<F>(Vec<(F, Vec<TrackerID>)>);
+
+impl<F> VirtualOracle<F> {
+    pub(crate) fn new() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<F> std::ops::Deref for VirtualOracle<F> {
+    type Target = Vec<(F, Vec<TrackerID>)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<F> std::ops::DerefMut for VirtualOracle<F> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'a, F> IntoIterator for &'a VirtualOracle<F> {
+    type Item = &'a (F, Vec<TrackerID>);
+    type IntoIter = slice::Iter<'a, (F, Vec<TrackerID>)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl<'a, F> IntoIterator for &'a mut VirtualOracle<F> {
+    type Item = &'a mut (F, Vec<TrackerID>);
+    type IntoIter = slice::IterMut<'a, (F, Vec<TrackerID>)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter_mut()
+    }
+}
+
+impl<F> IntoIterator for VirtualOracle<F> {
+    type Item = (F, Vec<TrackerID>);
+    type IntoIter = std::vec::IntoIter<(F, Vec<TrackerID>)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
 }
 
 #[derive(Clone)]

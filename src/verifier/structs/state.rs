@@ -12,7 +12,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
     VerifierEvalClaimMap,
-    oracle::{Oracle, TrackedOracle},
+    oracle::{Oracle, OracleKind, TrackedOracle, VirtualOracle},
 };
 use crate::{
     pcs::PCS,
@@ -35,7 +35,11 @@ where
 {
     pub transcript: Tr<B::F>,
     pub num_tracked_polys: usize,
-    pub virtual_oracles: IndexMap<TrackerID, Oracle<B::F>>,
+    pub base_oracles: IndexMap<TrackerID, Oracle<B::F>>,
+    pub virtual_oracles: IndexMap<TrackerID, VirtualOracle<B::F>>,
+    pub oracle_log_sizes: IndexMap<TrackerID, usize>,
+    pub oracle_kinds: IndexMap<TrackerID, OracleKind>,
+    pub oracle_is_material: IndexMap<TrackerID, bool>,
     pub oracle_degrees: IndexMap<TrackerID, usize>,
     /// Mutable indexed tracked oracles for protocol-time updates.
     pub indexed_tracked_oracles: BTreeMap<String, TrackedOracle<B>>,

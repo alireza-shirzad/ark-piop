@@ -8,6 +8,7 @@ use std::slice;
 #[derive(Derivative)]
 #[derivative(Clone(bound = "F: Clone"))]
 #[derivative(Default(bound = ""))]
+#[derivative(Debug(bound = "F: std::fmt::Debug"))]
 pub(crate) struct VirtualPoly<F>(Vec<(F, Vec<TrackerID>)>);
 
 impl<F> VirtualPoly<F> {
