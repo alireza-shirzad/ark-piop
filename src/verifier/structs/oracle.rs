@@ -189,6 +189,10 @@ where
         }
     }
 
+    pub fn id_or_const(&self) -> Either<TrackerID, B::F> {
+        self.id_or_const
+    }
+
     pub fn same_tracker(&self, other: &TrackedOracle<B>) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }

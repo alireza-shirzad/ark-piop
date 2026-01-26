@@ -703,7 +703,13 @@ where
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
-            if cfg_iter!(evals).sum::<B::F>() != claimed_sum {
+            let real_sum = cfg_iter!(evals).sum::<B::F>();
+            if real_sum != claimed_sum {
+                tracing::error!(
+                    "honest prover sumcheck mismatch: real_sum={:?} claimed_sum={:?}",
+                    real_sum,
+                    claimed_sum
+                );
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
