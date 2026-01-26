@@ -208,6 +208,20 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(acc)
     }
 
+    fn track_empty_virtual_oracle(
+        &mut self,
+        log_size: usize,
+        kind: crate::verifier::structs::oracle::OracleKind,
+    ) -> TrackerID {
+        let id = self.gen_id();
+        self.state.virtual_oracles.insert(id, VirtualOracle::new());
+        self.state.oracle_log_sizes.insert(id, log_size);
+        self.state.oracle_kinds.insert(id, kind);
+        self.state.oracle_is_material.insert(id, false);
+        self.state.oracle_degrees.insert(id, 0);
+        id
+    }
+
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         let comm: <B::UvPCS as PCS<B::F>>::Commitment;
         {
@@ -741,9 +755,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             return Ok(());
         }
 
-        let zero_closure = |_: Vec<B::F>| -> SnarkResult<B::F> { Ok(B::F::zero()) };
-        let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
-        let mut agg = self.track_oracle(zero_oracle);
+        let mut agg = self.track_empty_virtual_oracle(
+            max_nv,
+            crate::verifier::structs::oracle::OracleKind::Multivariate,
+        );
 
         agg = take(&mut self.state.mv_pcs_substate.zero_check_claims)
             .into_iter()
@@ -811,9 +826,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
 
         // Aggreage te the sumcheck claims
-        let zero_closure = |_: Vec<B::F>| -> SnarkResult<B::F> { Ok(B::F::zero()) };
-        let zero_oracle = Oracle::new_multivariate(max_nv, zero_closure);
-        let mut agg = self.track_oracle(zero_oracle);
+        let mut agg = self.track_empty_virtual_oracle(
+            max_nv,
+            crate::verifier::structs::oracle::OracleKind::Multivariate,
+        );
         let mut sc_sum = B::F::zero();
         // Iterate over the sumcheck claims and aggregate them
         // Order matters here, DO NOT PARALLELIZE
