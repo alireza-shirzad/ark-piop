@@ -995,7 +995,7 @@ where
 
     #[instrument(level = "debug", skip(self))]
     fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
-        debug_assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
+        assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
 
         // Get the sumcheck claim polynomial id
         let sumcheck_aggr_id = self
@@ -1046,6 +1046,9 @@ where
             };
             let mut term_ids: Vec<Vec<TrackerID>> =
                 virt_poly.iter().map(|(_, ids)| ids.clone()).collect();
+            for ids in term_ids.iter_mut() {
+                ids.sort();
+            }
 
             loop {
                 let mut chunks_to_commit: Vec<Vec<TrackerID>> = Vec::new();
@@ -1071,6 +1074,8 @@ where
                     break;
                 }
 
+                chunks_to_commit.sort();
+
                 let mut chunk_mles: Vec<Arc<MLE<B::F>>> =
                     Vec::with_capacity(chunks_to_commit.len());
                 for chunk in chunks_to_commit.iter() {
@@ -1086,10 +1091,9 @@ where
                 }
 
                 let prover_param = tracker.pk.mv_pcs_param.clone();
-                let commitments: Vec<<B::MvPCS as PCS<B::F>>::Commitment> =
-                    cfg_iter!(chunk_mles)
-                        .map(|mle| B::MvPCS::commit(prover_param.as_ref(), mle))
-                        .collect::<SnarkResult<Vec<_>>>()?;
+                let commitments: Vec<<B::MvPCS as PCS<B::F>>::Commitment> = cfg_iter!(chunk_mles)
+                    .map(|mle| B::MvPCS::commit(prover_param.as_ref(), mle))
+                    .collect::<SnarkResult<Vec<_>>>()?;
 
                 for ((chunk, mle), com) in chunks_to_commit
                     .into_iter()
@@ -1117,8 +1121,7 @@ where
                             reduced.push(chunk[0]);
                         } else {
                             let key = chunk.to_vec();
-                            let committed_id =
-                                *cache.get(&key).expect("missing chunk commitment");
+                            let committed_id = *cache.get(&key).expect("missing chunk commitment");
                             reduced.push(committed_id);
                         }
                     }
@@ -1168,8 +1171,8 @@ where
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
-        // Batch all the cumcheck claims into one sumcheck claims
-        let individual_sumcheck_claims = self.batch_s_check_claims()?;
+        // Batch all the sumcheck claims into one sumcheck claim
+        let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove",);
             return Ok(None);
@@ -1182,7 +1185,15 @@ where
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
-
+        // Batch all the sumcheck claims into one sumcheck claim
+        let additional_sumcheck_claims = self.batch_s_check_claims()?;
+        for (id, claim) in additional_sumcheck_claims {
+            individual_sumcheck_claims.entry(id).or_insert(claim);
+        }
+        // if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
+        //     debug!("No sumcheck claims to prove",);
+        //     return Ok(None);
+        // }
         // Perform the one batched sumcheck
         let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
         // Assemble the sumcheck subproof of the prover

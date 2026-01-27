@@ -14,7 +14,11 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, collections::{BTreeMap, BTreeSet}, mem::take};
+use std::{
+    borrow::BorrowMut,
+    collections::{BTreeMap, BTreeSet},
+    mem::take,
+};
 use tracing::{debug, instrument};
 
 use super::{
@@ -873,7 +877,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             debug!("No sumcheck claims to verify",);
             return Ok(());
         }
-        debug_assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
+        assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
         if let Some(terms) = self.state.virtual_oracles.get(&sumcheck_aggr_claim.id()) {
@@ -977,7 +981,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // Convert the only zero check claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // Ensure sumcheck claims are consistent with the max nv used in the protocol
-        self.equalize_sumcheck_claims(max_nv)?;
+        // self.equalize_sumcheck_claims(max_nv)?;
         // aggregate the sumcheck claims
         self.batch_s_check_claims(max_nv)?;
         // verify the sumcheck proof
@@ -1012,6 +1016,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
             let mut term_ids: Vec<Vec<TrackerID>> =
                 terms.iter().map(|(_, ids)| ids.clone()).collect();
+            for ids in term_ids.iter_mut() {
+                ids.sort();
+            }
 
             loop {
                 let mut chunks_to_commit: Vec<Vec<TrackerID>> = Vec::new();
@@ -1037,8 +1044,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     break;
                 }
 
+                chunks_to_commit.sort();
+
                 for chunk in chunks_to_commit.into_iter() {
                     let chunk_len = chunk.len();
+                    let chunk_log_size = chunk
+                        .iter()
+                        .filter_map(|id| tracker.state.oracle_log_sizes.get(id).copied())
+                        .max()
+                        .unwrap_or(0);
                     let new_id = tracker.peek_next_id();
                     let _ = tracker.track_mv_com_by_id(new_id)?;
                     cache.insert(chunk.clone(), new_id);
@@ -1049,13 +1063,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                         let mut prod_terms = VirtualOracle::new();
                         prod_terms.push((B::F::one(), chunk));
                         tracker.state.virtual_oracles.insert(id, prod_terms);
-                        let log_size = tracker
-                            .state
-                            .oracle_log_sizes
-                            .get(&poly_id)
-                            .copied()
-                            .unwrap_or(0);
-                        tracker.state.oracle_log_sizes.insert(id, log_size);
+                        tracker.state.oracle_log_sizes.insert(id, chunk_log_size);
                         tracker.state.oracle_kinds.insert(
                             id,
                             crate::verifier::structs::oracle::OracleKind::Multivariate,
@@ -1079,8 +1087,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                             reduced.push(chunk[0]);
                         } else {
                             let key = chunk.to_vec();
-                            let committed_id =
-                                *cache.get(&key).expect("missing chunk commitment");
+                            let committed_id = *cache.get(&key).expect("missing chunk commitment");
                             reduced.push(committed_id);
                         }
                     }
@@ -1088,19 +1095,23 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 }
             }
 
+            let new_log_size = term_ids
+                .iter()
+                .flat_map(|ids| {
+                    ids.iter()
+                        .filter_map(|id| tracker.state.oracle_log_sizes.get(id).copied())
+                })
+                .max()
+                .unwrap_or(0);
             let mut new_terms = VirtualOracle::new();
             for ((coeff, _old_ids), ids) in terms.iter().zip(term_ids.into_iter()) {
                 new_terms.push((*coeff, ids));
             }
             let new_id = tracker.gen_id();
             tracker.state.virtual_oracles.insert(new_id, new_terms);
-            let log_size = tracker
-                .state
+            tracker.state
                 .oracle_log_sizes
-                .get(&poly_id)
-                .copied()
-                .unwrap_or(0);
-            tracker.state.oracle_log_sizes.insert(new_id, log_size);
+                .insert(new_id, new_log_size);
             tracker.state.oracle_kinds.insert(
                 new_id,
                 crate::verifier::structs::oracle::OracleKind::Multivariate,
