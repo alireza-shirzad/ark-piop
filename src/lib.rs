@@ -9,6 +9,9 @@ pub mod transcript;
 pub mod util;
 pub mod verifier;
 
+/// Max multiplicative degree allowed per sumcheck term before reduction.
+pub const SUMCHECK_TERM_DEGREE_LIMIT: usize = 5;
+
 // Make test utilities available to downstream crates' tests via a feature.
 // `cfg(test)` only applies when compiling this crate's own tests, so use
 // `any(test, feature = "test-utils")` to expose it for dependents' tests too.

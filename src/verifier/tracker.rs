@@ -133,7 +133,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.oracle_degrees.get(&id).copied().unwrap_or(0)
     }
 
-    fn oracle_kind_from_inner(inner: &InnerOracle<B::F>) -> crate::verifier::structs::oracle::OracleKind {
+    fn oracle_kind_from_inner(
+        inner: &InnerOracle<B::F>,
+    ) -> crate::verifier::structs::oracle::OracleKind {
         use crate::verifier::structs::oracle::OracleKind;
         match inner {
             InnerOracle::Univariate(_) => OracleKind::Univariate,
@@ -157,7 +159,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     fn eval_base_mv(&self, oracle_id: TrackerID, point: &Vec<B::F>) -> SnarkResult<B::F> {
-        let oracle = self.state.base_oracles.get(&oracle_id).ok_or(SnarkError::DummyError)?;
+        let oracle = self
+            .state
+            .base_oracles
+            .get(&oracle_id)
+            .ok_or(SnarkError::DummyError)?;
         match oracle.inner() {
             InnerOracle::Multivariate(f) => f(point.clone()),
             InnerOracle::Constant(c) => Ok(*c),
@@ -166,7 +172,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     fn eval_base_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
-        let oracle = self.state.base_oracles.get(&oracle_id).ok_or(SnarkError::DummyError)?;
+        let oracle = self
+            .state
+            .base_oracles
+            .get(&oracle_id)
+            .ok_or(SnarkError::DummyError)?;
         match oracle.inner() {
             InnerOracle::Univariate(f) => f(point),
             InnerOracle::Constant(c) => Ok(*c),
@@ -267,15 +277,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             Some(proof) => {
                 let mv_queries_clone = proof.mv_pcs_subproof.query_map.clone();
 
-                let oracle = Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
-                    let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
-                        SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                            id.0,
-                            f_vec_short_str(&point),
-                        )),
-                    )?;
-                    Ok(query_res)
-                });
+                let oracle =
+                    Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
+                        let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
+                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                                id.0,
+                                f_vec_short_str(&point),
+                            )),
+                        )?;
+                        Ok(query_res)
+                    });
                 let mut terms = VirtualOracle::new();
                 terms.push((B::F::one(), vec![id]));
                 self.state.base_oracles.insert(id, oracle);
@@ -283,9 +294,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 self.state
                     .oracle_log_sizes
                     .insert(id, comm.log_size() as usize);
-                self.state
-                    .oracle_kinds
-                    .insert(id, crate::verifier::structs::oracle::OracleKind::Multivariate);
+                self.state.oracle_kinds.insert(
+                    id,
+                    crate::verifier::structs::oracle::OracleKind::Multivariate,
+                );
                 self.state.oracle_is_material.insert(id, true);
             }
             None => {
@@ -317,10 +329,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         match self.proof.as_ref() {
             Some(proof) => {
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
-                let oracle = Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
-                    let query_res = uv_queries_clone.get(&(id, point)).unwrap();
-                    Ok(*query_res)
-                });
+                let oracle =
+                    Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
+                        let query_res = uv_queries_clone.get(&(id, point)).unwrap();
+                        Ok(*query_res)
+                    });
                 let mut terms = VirtualOracle::new();
                 terms.push((B::F::one(), vec![id]));
                 self.state.base_oracles.insert(id, oracle);
@@ -923,8 +936,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn equalize_sumcheck_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
-        let oracle_log_sizes: IndexMap<TrackerID, usize> =
-            self.state.oracle_log_sizes.clone();
+        let oracle_log_sizes: IndexMap<TrackerID, usize> = self.state.oracle_log_sizes.clone();
         let proof_claims = self
             .proof
             .as_ref()
@@ -960,6 +972,14 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.batch_s_check_claims(max_nv)?;
         // Reduce high-degree terms deterministically before sumcheck.
         self.reduce_sumcheck_dgree()?;
+        // Batch all the zero check claims into one
+        self.batch_z_check_claims(max_nv)?;
+        // Convert the only zero check claim to a sumcheck claim
+        self.z_check_claim_to_s_check_claim(max_nv)?;
+        // Ensure sumcheck claims are consistent with the max nv used in the protocol
+        self.equalize_sumcheck_claims(max_nv)?;
+        // aggregate the sumcheck claims
+        self.batch_s_check_claims(max_nv)?;
         // verify the sumcheck proof
         self.perform_single_sumcheck()?;
         // Verify the evaluation claims
@@ -974,7 +994,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// the term with that commitment, preserving the coefficient. This is deterministic
     /// and must stay in sync with the prover.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
-        const MAX_TERM_DEGREE: usize = 9;
+        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
         if self.state.mv_pcs_substate.sum_check_claims.len() != 1 {
             return Ok(());
@@ -1000,6 +1020,30 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             if prod_ids.len() > MAX_TERM_DEGREE {
                 let new_id = self.peek_next_id();
                 let _ = self.track_mv_com_by_id(new_id)?;
+                // Add a zerocheck claim: (high-degree term - committed term) == 0.
+                let prod_id = {
+                    let id = self.gen_id();
+                    let mut prod_terms = VirtualOracle::new();
+                    prod_terms.push((B::F::one(), prod_ids.clone()));
+                    self.state.virtual_oracles.insert(id, prod_terms);
+                    let log_size = self
+                        .state
+                        .oracle_log_sizes
+                        .get(&sumcheck_aggr_id)
+                        .copied()
+                        .unwrap_or(0);
+                    self.state.oracle_log_sizes.insert(id, log_size);
+                    self.state.oracle_kinds.insert(
+                        id,
+                        crate::verifier::structs::oracle::OracleKind::Multivariate,
+                    );
+                    self.state.oracle_is_material.insert(id, false);
+                    self.state.oracle_degrees.insert(id, prod_ids.len());
+                    id
+                };
+                let neg_committed = self.mul_scalar(new_id, -B::F::one());
+                let diff_id = self.add_oracles(prod_id, neg_committed);
+                self.add_mv_zerocheck_claim(diff_id);
                 new_terms.push((*coeff, vec![new_id]));
                 replaced = true;
             } else {
@@ -1016,7 +1060,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .map(|(_, ids)| ids.len())
                 .max()
                 .unwrap_or(0);
-            self.state.oracle_degrees.insert(sumcheck_aggr_id, new_degree);
+            self.state
+                .oracle_degrees
+                .insert(sumcheck_aggr_id, new_degree);
         }
 
         Ok(())
