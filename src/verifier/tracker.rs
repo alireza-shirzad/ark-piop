@@ -14,7 +14,7 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
+use std::{borrow::BorrowMut, collections::{BTreeMap, BTreeSet}, mem::take};
 use tracing::{debug, instrument};
 
 use super::{
@@ -996,73 +996,143 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
         const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
-        if self.state.mv_pcs_substate.sum_check_claims.len() != 1 {
-            return Ok(());
-        }
+        let mut cache: BTreeMap<Vec<TrackerID>, TrackerID> = BTreeMap::new();
+        let mut extra_zero_claims: Vec<TrackerID> = Vec::new();
 
-        let sumcheck_aggr_id = self
-            .state
-            .mv_pcs_substate
-            .sum_check_claims
-            .last()
-            .unwrap()
-            .id();
+        fn reduce_poly<B: SnarkBackend>(
+            tracker: &mut VerifierTracker<B>,
+            poly_id: TrackerID,
+            cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
+            extra_zero_claims: &mut Vec<TrackerID>,
+        ) -> SnarkResult<TrackerID> {
+            let terms = match tracker.state.virtual_oracles.get(&poly_id) {
+                Some(terms) => terms.clone(),
+                None => return Ok(poly_id),
+            };
 
-        let terms = match self.state.virtual_oracles.get(&sumcheck_aggr_id) {
-            Some(terms) => terms.clone(),
-            None => return Ok(()),
-        };
+            let mut term_ids: Vec<Vec<TrackerID>> =
+                terms.iter().map(|(_, ids)| ids.clone()).collect();
 
-        let mut new_terms = VirtualOracle::new();
-        let mut replaced = false;
+            loop {
+                let mut chunks_to_commit: Vec<Vec<TrackerID>> = Vec::new();
+                let mut queued: BTreeSet<Vec<TrackerID>> = BTreeSet::new();
 
-        for (coeff, prod_ids) in terms.iter() {
-            if prod_ids.len() > MAX_TERM_DEGREE {
-                let new_id = self.peek_next_id();
-                let _ = self.track_mv_com_by_id(new_id)?;
-                // Add a zerocheck claim: (high-degree term - committed term) == 0.
-                let prod_id = {
-                    let id = self.gen_id();
-                    let mut prod_terms = VirtualOracle::new();
-                    prod_terms.push((B::F::one(), prod_ids.clone()));
-                    self.state.virtual_oracles.insert(id, prod_terms);
-                    let log_size = self
-                        .state
-                        .oracle_log_sizes
-                        .get(&sumcheck_aggr_id)
-                        .copied()
-                        .unwrap_or(0);
-                    self.state.oracle_log_sizes.insert(id, log_size);
-                    self.state.oracle_kinds.insert(
-                        id,
-                        crate::verifier::structs::oracle::OracleKind::Multivariate,
-                    );
-                    self.state.oracle_is_material.insert(id, false);
-                    self.state.oracle_degrees.insert(id, prod_ids.len());
-                    id
-                };
-                let neg_committed = self.mul_scalar(new_id, -B::F::one());
-                let diff_id = self.add_oracles(prod_id, neg_committed);
-                self.add_mv_zerocheck_claim(diff_id);
-                new_terms.push((*coeff, vec![new_id]));
-                replaced = true;
-            } else {
-                new_terms.push((*coeff, prod_ids.clone()));
+                for ids in term_ids.iter() {
+                    if ids.len() <= MAX_TERM_DEGREE {
+                        continue;
+                    }
+                    for chunk in ids.chunks(MAX_TERM_DEGREE) {
+                        if chunk.len() <= 1 {
+                            continue;
+                        }
+                        let key = chunk.to_vec();
+                        if cache.contains_key(&key) || !queued.insert(key.clone()) {
+                            continue;
+                        }
+                        chunks_to_commit.push(key);
+                    }
+                }
+
+                if chunks_to_commit.is_empty() {
+                    break;
+                }
+
+                for chunk in chunks_to_commit.into_iter() {
+                    let chunk_len = chunk.len();
+                    let new_id = tracker.peek_next_id();
+                    let _ = tracker.track_mv_com_by_id(new_id)?;
+                    cache.insert(chunk.clone(), new_id);
+
+                    // Add zerocheck: committed - product(chunk) == 0.
+                    let prod_id = {
+                        let id = tracker.gen_id();
+                        let mut prod_terms = VirtualOracle::new();
+                        prod_terms.push((B::F::one(), chunk));
+                        tracker.state.virtual_oracles.insert(id, prod_terms);
+                        let log_size = tracker
+                            .state
+                            .oracle_log_sizes
+                            .get(&poly_id)
+                            .copied()
+                            .unwrap_or(0);
+                        tracker.state.oracle_log_sizes.insert(id, log_size);
+                        tracker.state.oracle_kinds.insert(
+                            id,
+                            crate::verifier::structs::oracle::OracleKind::Multivariate,
+                        );
+                        tracker.state.oracle_is_material.insert(id, false);
+                        tracker.state.oracle_degrees.insert(id, chunk_len);
+                        id
+                    };
+                    let neg_committed = tracker.mul_scalar(new_id, -B::F::one());
+                    let diff_id = tracker.add_oracles(prod_id, neg_committed);
+                    extra_zero_claims.push(diff_id);
+                }
+
+                for ids in term_ids.iter_mut() {
+                    if ids.len() <= MAX_TERM_DEGREE {
+                        continue;
+                    }
+                    let mut reduced: Vec<TrackerID> = Vec::new();
+                    for chunk in ids.chunks(MAX_TERM_DEGREE) {
+                        if chunk.len() == 1 {
+                            reduced.push(chunk[0]);
+                        } else {
+                            let key = chunk.to_vec();
+                            let committed_id =
+                                *cache.get(&key).expect("missing chunk commitment");
+                            reduced.push(committed_id);
+                        }
+                    }
+                    *ids = reduced;
+                }
             }
-        }
 
-        if replaced {
-            self.state
-                .virtual_oracles
-                .insert(sumcheck_aggr_id, new_terms);
-            let new_degree = self.state.virtual_oracles[&sumcheck_aggr_id]
+            let mut new_terms = VirtualOracle::new();
+            for ((coeff, _old_ids), ids) in terms.iter().zip(term_ids.into_iter()) {
+                new_terms.push((*coeff, ids));
+            }
+            let new_id = tracker.gen_id();
+            tracker.state.virtual_oracles.insert(new_id, new_terms);
+            let log_size = tracker
+                .state
+                .oracle_log_sizes
+                .get(&poly_id)
+                .copied()
+                .unwrap_or(0);
+            tracker.state.oracle_log_sizes.insert(new_id, log_size);
+            tracker.state.oracle_kinds.insert(
+                new_id,
+                crate::verifier::structs::oracle::OracleKind::Multivariate,
+            );
+            tracker.state.oracle_is_material.insert(new_id, false);
+            let new_degree = tracker.state.virtual_oracles[&new_id]
                 .iter()
                 .map(|(_, ids)| ids.len())
                 .max()
                 .unwrap_or(0);
+            tracker.state.oracle_degrees.insert(new_id, new_degree);
+
+            Ok(new_id)
+        }
+
+        let zero_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        for claim in zero_claims.into_iter() {
+            let new_id = reduce_poly(self, claim.id(), &mut cache, &mut extra_zero_claims)?;
+            self.add_mv_zerocheck_claim(new_id);
+        }
+
+        let sum_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+        for claim in sum_claims.into_iter() {
+            let new_id = reduce_poly(self, claim.id(), &mut cache, &mut extra_zero_claims)?;
             self.state
-                .oracle_degrees
-                .insert(sumcheck_aggr_id, new_degree);
+                .mv_pcs_substate
+                .sum_check_claims
+                .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+        }
+
+        for id in extra_zero_claims {
+            self.add_mv_zerocheck_claim(id);
         }
 
         Ok(())

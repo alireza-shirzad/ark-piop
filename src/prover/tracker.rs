@@ -1028,86 +1028,129 @@ where
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
         const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
-        if self.state.mv_pcs_substate.sum_check_claims.len() != 1 {
-            return Ok(());
-        }
+        let mut cache: BTreeMap<Vec<TrackerID>, TrackerID> = BTreeMap::new();
+        let mut extra_zero_claims: Vec<TrackerID> = Vec::new();
 
-        let sumcheck_aggr_id = self
-            .state
-            .mv_pcs_substate
-            .sum_check_claims
-            .last()
-            .unwrap()
-            .id();
+        fn reduce_poly<B: SnarkBackend>(
+            tracker: &mut ProverTracker<B>,
+            poly_id: TrackerID,
+            cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
+            extra_zero_claims: &mut Vec<TrackerID>,
+        ) -> SnarkResult<TrackerID> {
+            if tracker.mat_mv_poly(poly_id).is_some() {
+                return Ok(poly_id);
+            }
+            let virt_poly = match tracker.virt_poly(poly_id) {
+                Some(poly) => poly.clone(),
+                None => return Ok(poly_id),
+            };
+            let mut term_ids: Vec<Vec<TrackerID>> =
+                virt_poly.iter().map(|(_, ids)| ids.clone()).collect();
 
-        if self.mat_mv_poly(sumcheck_aggr_id).is_some() {
-            return Ok(());
-        }
+            loop {
+                let mut chunks_to_commit: Vec<Vec<TrackerID>> = Vec::new();
+                let mut queued: BTreeSet<Vec<TrackerID>> = BTreeSet::new();
 
-        let virt_poly = match self.virt_poly(sumcheck_aggr_id) {
-            Some(poly) => poly.clone(),
-            None => return Ok(()),
-        };
-
-        // Build the list of product polynomials to commit to, preserving order.
-        let mut to_commit: Vec<Arc<MLE<B::F>>> = Vec::new();
-        let mut needs_commit: Vec<bool> = Vec::with_capacity(virt_poly.len());
-        for (_coeff, prod_ids) in virt_poly.iter() {
-            if prod_ids.len() > MAX_TERM_DEGREE {
-                let nv = self.mat_mv_poly(prod_ids[0]).unwrap().num_vars();
-                let mut evals = vec![B::F::one(); 1 << nv];
-                for id in prod_ids {
-                    let poly = self.mat_mv_poly(*id).unwrap();
-                    cfg_iter_mut!(evals)
-                        .zip(poly.evaluations())
-                        .for_each(|(a, b)| *a *= b);
+                for ids in term_ids.iter() {
+                    if ids.len() <= MAX_TERM_DEGREE {
+                        continue;
+                    }
+                    for chunk in ids.chunks(MAX_TERM_DEGREE) {
+                        if chunk.len() <= 1 {
+                            continue;
+                        }
+                        let key = chunk.to_vec();
+                        if cache.contains_key(&key) || !queued.insert(key.clone()) {
+                            continue;
+                        }
+                        chunks_to_commit.push(key);
+                    }
                 }
-                to_commit.push(Arc::new(MLE::from_evaluations_vec(nv, evals)));
-                needs_commit.push(true);
-            } else {
-                needs_commit.push(false);
+
+                if chunks_to_commit.is_empty() {
+                    break;
+                }
+
+                let mut chunk_mles: Vec<Arc<MLE<B::F>>> =
+                    Vec::with_capacity(chunks_to_commit.len());
+                for chunk in chunks_to_commit.iter() {
+                    let nv = tracker.mat_mv_poly(chunk[0]).unwrap().num_vars();
+                    let mut evals = vec![B::F::one(); 1 << nv];
+                    for id in chunk {
+                        let poly = tracker.mat_mv_poly(*id).unwrap();
+                        cfg_iter_mut!(evals)
+                            .zip(poly.evaluations())
+                            .for_each(|(a, b)| *a *= b);
+                    }
+                    chunk_mles.push(Arc::new(MLE::from_evaluations_vec(nv, evals)));
+                }
+
+                let prover_param = tracker.pk.mv_pcs_param.clone();
+                let commitments: Vec<<B::MvPCS as PCS<B::F>>::Commitment> =
+                    cfg_iter!(chunk_mles)
+                        .map(|mle| B::MvPCS::commit(prover_param.as_ref(), mle))
+                        .collect::<SnarkResult<Vec<_>>>()?;
+
+                for ((chunk, mle), com) in chunks_to_commit
+                    .into_iter()
+                    .zip(chunk_mles.into_iter())
+                    .zip(commitments.into_iter())
+                {
+                    let committed_id = tracker.track_mat_mv_p_and_commitment(&mle, com)?;
+                    cache.insert(chunk.clone(), committed_id);
+
+                    let mut chunk_poly = VirtualPoly::new();
+                    chunk_poly.push((B::F::one(), chunk));
+                    let chunk_id = tracker.track_virt_poly(chunk_poly);
+                    let neg_committed = tracker.mul_scalar(committed_id, -B::F::one());
+                    let diff_id = tracker.add_polys(chunk_id, neg_committed);
+                    extra_zero_claims.push(diff_id);
+                }
+
+                for ids in term_ids.iter_mut() {
+                    if ids.len() <= MAX_TERM_DEGREE {
+                        continue;
+                    }
+                    let mut reduced: Vec<TrackerID> = Vec::new();
+                    for chunk in ids.chunks(MAX_TERM_DEGREE) {
+                        if chunk.len() == 1 {
+                            reduced.push(chunk[0]);
+                        } else {
+                            let key = chunk.to_vec();
+                            let committed_id =
+                                *cache.get(&key).expect("missing chunk commitment");
+                            reduced.push(committed_id);
+                        }
+                    }
+                    *ids = reduced;
+                }
             }
+
+            let mut new_poly = VirtualPoly::new();
+            for ((coeff, _old_ids), ids) in virt_poly.iter().zip(term_ids.into_iter()) {
+                new_poly.push((*coeff, ids));
+            }
+            let new_id = tracker.track_virt_poly(new_poly);
+            Ok(new_id)
         }
 
-        // Commit in parallel, then track sequentially to keep IDs/transcript in sync.
-        let commitments: Vec<<B::MvPCS as PCS<B::F>>::Commitment> = cfg_iter!(to_commit)
-            .map(|mle| B::MvPCS::commit(self.pk.mv_pcs_param.as_ref(), mle))
-            .collect::<SnarkResult<Vec<_>>>()?;
-        let mut commitments_iter = commitments.into_iter();
-        let mut product_iter = to_commit.into_iter();
-
-        let mut new_poly = VirtualPoly::new();
-        let mut replaced = false;
-        for ((coeff, prod_ids), needs) in virt_poly.iter().zip(needs_commit.iter()) {
-            if *needs {
-                let product_mle = product_iter
-                    .next()
-                    .expect("commitment list and terms out of sync");
-                let com = commitments_iter
-                    .next()
-                    .expect("commitment list and terms out of sync");
-                let committed_id = self.track_mat_mv_p_and_commitment(&product_mle, com)?;
-                // Add a zerocheck claim: (high-degree term - committed term) == 0.
-                let mut prod_vpoly = VirtualPoly::new();
-                prod_vpoly.push((B::F::one(), prod_ids.clone()));
-                let prod_id = self.track_virt_poly(prod_vpoly);
-                let neg_committed = self.mul_scalar(committed_id, -B::F::one());
-                let diff_id = self.add_polys(prod_id, neg_committed);
-                self.add_mv_zerocheck_claim(diff_id)?;
-                new_poly.push((*coeff, vec![committed_id]));
-                replaced = true;
-            } else {
-                new_poly.push((*coeff, prod_ids.clone()));
-            }
+        let zero_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        for claim in zero_claims.into_iter() {
+            let new_id = reduce_poly(self, claim.id(), &mut cache, &mut extra_zero_claims)?;
+            self.add_mv_zerocheck_claim(new_id)?;
         }
 
-        if replaced {
-            let new_id = self.track_virt_poly(new_poly);
-            let claim = self.state.mv_pcs_substate.sum_check_claims.pop().unwrap();
+        let sum_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+        for claim in sum_claims.into_iter() {
+            let new_id = reduce_poly(self, claim.id(), &mut cache, &mut extra_zero_claims)?;
             self.state
                 .mv_pcs_substate
                 .sum_check_claims
                 .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+        }
+
+        for id in extra_zero_claims {
+            self.add_mv_zerocheck_claim(id)?;
         }
 
         Ok(())
