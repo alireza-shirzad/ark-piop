@@ -45,7 +45,7 @@ use std::{
     panic,
     sync::Arc,
 };
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, trace};
 use tracing_subscriber::field::debug;
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
@@ -725,6 +725,11 @@ where
     /// claims that the polynomial with poly_id evaluates to zero all over the
     /// boolean hypercube
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
+        if let Some(poly) = self.virt_poly(poly_id) {
+            trace!(?poly_id, ?poly, "add_mv_zerocheck_claim virtual");
+        } else {
+            trace!(?poly_id, "add_mv_zerocheck_claim materialized");
+        }
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);

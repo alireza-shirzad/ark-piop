@@ -14,6 +14,7 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
+use tracing::trace;
 use std::{
     borrow::BorrowMut,
     collections::{BTreeMap, BTreeSet},
@@ -672,6 +673,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
     }
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
+        if let Some(terms) = self.state.virtual_oracles.get(&poly_id) {
+            trace!(?poly_id, ?terms, "add_mv_zerocheck_claim virtual");
+        } else {
+            trace!(?poly_id, "add_mv_zerocheck_claim materialized");
+        }
         self.state
             .mv_pcs_substate
             .zero_check_claims
