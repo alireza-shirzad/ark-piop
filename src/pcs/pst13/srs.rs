@@ -211,7 +211,7 @@ fn remove_dummy_variable<F: PrimeField>(poly: &[F], pad: usize) -> SnarkResult<V
 mod tests {
     use super::*;
     use ark_std::test_rng;
-    type E = ark_test_curves::bls12_381::Bls12_381;
+    type E = ark_bn254::Bn254;
 
     #[test]
     fn test_srs_gen() -> SnarkResult<()> {

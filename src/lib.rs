@@ -31,12 +31,12 @@ pub trait SnarkBackend: 'static + Send + Sync {
 }
 
 #[cfg(any(test, feature = "test-utils"))]
-use ark_test_curves::bls12_381::Bls12_381;
+use ark_bn254::Bn254;
 #[cfg(any(test, feature = "test-utils"))]
 pub struct DefaultSnarkBackend;
 #[cfg(any(test, feature = "test-utils"))]
 impl SnarkBackend for DefaultSnarkBackend {
-    type F = <Bls12_381 as ark_ec::pairing::Pairing>::ScalarField;
-    type MvPCS = pcs::pst13::PST13<Bls12_381>;
-    type UvPCS = pcs::kzg10::KZG10<Bls12_381>;
+    type F = <Bn254 as ark_ec::pairing::Pairing>::ScalarField;
+    type MvPCS = pcs::pst13::PST13<Bn254>;
+    type UvPCS = pcs::kzg10::KZG10<Bn254>;
 }

@@ -300,7 +300,7 @@ mod test {
     use crate::{arithmetic::mat_poly::lde::LDE, piop::errors::PolyIOPErrors};
     use ark_poly::{DenseUVPolynomial, Polynomial};
     use ark_std::{self, UniformRand, vec::Vec};
-    use ark_test_curves::bls12_381::Fr;
+    use ark_bn254::Fr;
     #[test]
     fn test_interpolation() -> Result<(), PolyIOPErrors> {
         let mut prng = ark_std::test_rng();

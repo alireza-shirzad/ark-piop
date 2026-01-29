@@ -425,7 +425,7 @@ mod tests {
     use ark_ec::pairing::Pairing;
     use ark_std::{UniformRand, rand::Rng, test_rng, vec::Vec};
 
-    type E = ark_test_curves::bls12_381::Bls12_381;
+    type E = ark_bn254::Bn254;
     type Fr = <E as Pairing>::ScalarField;
 
     fn test_single_helper<R: Rng>(

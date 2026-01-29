@@ -234,7 +234,7 @@ mod tests {
     use super::*;
     use ark_std::UniformRand;
     use ark_std::test_rng;
-    use ark_test_curves::bls12_381::Bls12_381;
+    use ark_bn254::Bn254;
     fn end_to_end_test_template<E>() -> SnarkResult<()>
     where
         E: Pairing,
@@ -289,11 +289,11 @@ mod tests {
 
     #[test]
     fn end_to_end_test() {
-        end_to_end_test_template::<Bls12_381>().expect("test failed for bls12-381");
+        end_to_end_test_template::<Bn254>().expect("test failed for bn254");
     }
 
     #[test]
     fn linear_polynomial_test() {
-        linear_polynomial_test_template::<Bls12_381>().expect("test failed for bls12-381");
+        linear_polynomial_test_template::<Bn254>().expect("test failed for bn254");
     }
 }

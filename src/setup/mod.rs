@@ -148,7 +148,6 @@ mod tests {
         DefaultSnarkBackend,
         pcs::{kzg10::KZG10, pst13::PST13},
     };
-    use ark_test_curves::bls12_381::{Bls12_381, Fr};
     #[test]
     fn test_keygen() {
         let key_generator = KeyGenerator::<DefaultSnarkBackend>::new().with_num_mv_vars(16);
