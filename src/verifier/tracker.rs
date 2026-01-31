@@ -17,8 +17,8 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
-use tracing::trace;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
+use tracing::trace;
 use tracing::{debug, instrument};
 
 use super::{
@@ -814,6 +814,33 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip(self))]
+    fn batch_nozero_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
+        let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        if nozero_claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut claim_iter = nozero_claims.into_iter();
+        let first = claim_iter
+            .next()
+            .expect("nozero_claims should be non-empty");
+        let mut prod_id = first.id();
+        for claim in claim_iter {
+            prod_id = self.mul_oracles(prod_id, claim.id());
+        }
+
+        // Track the committed inverse polynomial by id provided in the proof.
+        let inverses_poly_id = self.peek_next_id();
+        let _ = self.track_mv_com_by_id(inverses_poly_id)?;
+
+        let prod_inv_id = self.mul_oracles(prod_id, inverses_poly_id);
+        let diff_id = self.add_scalar(prod_inv_id, -B::F::one());
+        self.add_mv_zerocheck_claim(diff_id);
+
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip(self))]
     fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
         if (self.state.mv_pcs_substate.zero_check_claims.is_empty()) {
             debug!("No zerocheck claims to convert to sumcheck claims",);
@@ -986,6 +1013,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
+        self.batch_nozero_check_claims(max_nv)?;
         // Batch all the zero check claims into one
         self.batch_z_check_claims(max_nv)?;
         // Convert the only zero check claim to a sumcheck claim
@@ -1191,13 +1219,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                         .or_else(|| ids.get(..MAX_TERM_DEGREE).map(|s| s.to_vec()))
                         .expect("term must be non-empty");
 
-                    let committed_id = track_chunk(
-                        tracker,
-                        &chunk,
-                        cache,
-                        extra_zero_claims,
-                        committed_chunks,
-                    )?;
+                    let committed_id =
+                        track_chunk(tracker, &chunk, cache, extra_zero_claims, committed_chunks)?;
                     remove_chunk(ids, &chunk);
                     let insert_at = ids.binary_search(&committed_id).unwrap_or_else(|i| i);
                     ids.insert(insert_at, committed_id);
@@ -1218,9 +1241,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
             let new_id = tracker.gen_id();
             tracker.state.virtual_oracles.insert(new_id, new_terms);
-            tracker.state
-                .oracle_log_sizes
-                .insert(new_id, new_log_size);
+            tracker.state.oracle_log_sizes.insert(new_id, new_log_size);
             tracker.state.oracle_kinds.insert(
                 new_id,
                 crate::verifier::structs::oracle::OracleKind::Multivariate,

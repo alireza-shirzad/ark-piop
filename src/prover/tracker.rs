@@ -34,6 +34,7 @@ use crate::{
     prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly},
 };
 use ark_ec::AdditiveGroup;
+use ark_ff::batch_inversion;
 use ark_poly::Polynomial;
 use ark_std::One;
 use ark_std::Zero;
@@ -1286,6 +1287,34 @@ where
         Ok(())
     }
 
+    fn batch_nozero_check_claims(&mut self) -> SnarkResult<()> {
+        let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        if nozero_claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut claim_iter = nozero_claims.into_iter();
+        let first = claim_iter
+            .next()
+            .expect("nozero_claims should be non-empty");
+        let mut prod_id = first.id();
+        for claim in claim_iter {
+            prod_id = self.mul_polys(prod_id, claim.id());
+        }
+
+        let mut eval_inverses = self.evaluations(prod_id);
+        batch_inversion(&mut eval_inverses);
+        let nv = self.poly_nv(prod_id);
+        let inverses_mle = MLE::from_evaluations_vec(nv, eval_inverses);
+        let inverses_poly_id = self.track_and_commit_mat_mv_p(&inverses_mle)?;
+
+        let prod_inv_id = self.mul_polys(prod_id, inverses_poly_id);
+        let diff_id = self.add_scalar(prod_inv_id, -B::F::one());
+        self.add_mv_zerocheck_claim(diff_id)?;
+
+        Ok(())
+    }
+
     /// Reduces every zero-check claim, sum-check claim in
     /// the prover state, into a list of evaluation claims. These evaluation
     /// claims will be proved using a PCS
@@ -1294,6 +1323,7 @@ where
         &mut self,
         max_nv: usize,
     ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        self.batch_nozero_check_claims()?;
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
         // Convert the only zerocheck claim to a sumcheck claim
