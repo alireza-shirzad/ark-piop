@@ -1293,6 +1293,7 @@ where
             return Ok(());
         }
 
+        let num_claims = nozero_claims.len();
         let mut claim_iter = nozero_claims.into_iter();
         let first = claim_iter
             .next()
@@ -1301,7 +1302,11 @@ where
         for claim in claim_iter {
             prod_id = self.mul_polys(prod_id, claim.id());
         }
-
+        debug!(
+            "{} nozerocheck polynomials multiplied; final degree {}",
+            num_claims,
+            self.virt_poly_degree(prod_id)
+        );
         let mut eval_inverses = self.evaluations(prod_id);
         batch_inversion(&mut eval_inverses);
         let nv = self.poly_nv(prod_id);
