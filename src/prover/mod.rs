@@ -317,6 +317,15 @@ where
         tracker.add_mv_zerocheck_claim(poly_id)
     }
 
+    /// Add a multivariate nozerocheck claim to the proof
+    #[instrument(level = "debug", skip(self), fields(virt_degree = tracing::field::Empty))]
+    pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
+        let mut tracker = self.tracker_rc.borrow_mut();
+        let degree = tracker.virt_poly_degree(poly_id);
+        Span::current().record("virt_degree", &degree);
+        tracker.add_mv_nozerocheck_claim(poly_id)
+    }
+
     /// Add a multivariate lookup claim to the proof
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(

@@ -60,6 +60,21 @@ impl TrackerZerocheckClaim {
     }
 }
 
+/// A claim that a polynomial is not zero at any point.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TrackerNoZerocheckClaim {
+    id: TrackerID,
+}
+
+impl TrackerNoZerocheckClaim {
+    pub(crate) fn new(id: TrackerID) -> Self {
+        Self { id }
+    }
+    pub(crate) fn id(&self) -> TrackerID {
+        self.id
+    }
+}
+
 /// A claim that a super polynomial contains all the entries of a sub polynomial.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TrackerLookupClaim {

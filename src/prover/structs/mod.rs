@@ -5,12 +5,10 @@ pub mod proof;
 /////////////////// Imports //////////////////
 use std::{collections::BTreeMap, sync::Arc};
 
+use crate::structs::claim::TrackerNoZerocheckClaim;
 use crate::{
     SnarkBackend,
-    arithmetic::{
-        mat_poly::{lde::LDE, mle::MLE},
-        virt_poly::VirtualPoly,
-    },
+    arithmetic::virt_poly::VirtualPoly,
     pcs::PCS,
     prover::structs::polynomial::TrackedPoly,
     setup::structs::SNARKPk,
@@ -24,7 +22,6 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
-
 /// A claim that the sum of the evaluations of a polynomial on the boolean
 /// hypercube is equal to a certain value.
 #[derive(Derivative)]
@@ -92,6 +89,7 @@ where
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
     pub eval_claims: Vec<TrackerEvalClaim<F, PC>>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
+    pub no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
     pub lookup_claims: Vec<TrackerLookupClaim>,
 }

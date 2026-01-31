@@ -162,6 +162,13 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
+    pub fn add_nozerocheck_claim(&mut self, poly_id: TrackerID) {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_nozerocheck_claim(poly_id);
+    }
+
+    #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(
         &mut self,
         super_id: TrackerID,

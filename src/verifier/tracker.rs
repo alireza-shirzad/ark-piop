@@ -8,7 +8,10 @@ use crate::{
     setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     structs::{
         PCSOpeningProof, TrackerID,
-        claim::{TrackerLookupClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
+        claim::{
+            TrackerLookupClaim, TrackerNoZerocheckClaim, TrackerSumcheckClaim,
+            TrackerZerocheckClaim,
+        },
     },
     verifier::structs::oracle::InnerOracle,
 };
@@ -678,6 +681,19 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .mv_pcs_substate
             .zero_check_claims
             .push(TrackerZerocheckClaim::new(poly_id));
+    }
+
+    /// Adds a nozerocheck claim to the verifier state.
+    pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) {
+        if let Some(terms) = self.state.virtual_oracles.get(&poly_id) {
+            trace!(?poly_id, ?terms, "add_mv_nozerocheck_claim virtual");
+        } else {
+            trace!(?poly_id, "add_mv_nozerocheck_claim materialized");
+        }
+        self.state
+            .mv_pcs_substate
+            .no_zero_check_claims
+            .push(TrackerNoZerocheckClaim::new(poly_id));
     }
     pub fn add_mv_lookup_claim(
         &mut self,

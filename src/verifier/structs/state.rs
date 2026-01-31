@@ -19,7 +19,7 @@ use crate::{
     prover::structs::proof::SNARKProof,
     structs::{
         QueryMap, SumcheckSubproof, TrackerID,
-        claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
+        claim::{TrackerNoZerocheckClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     transcript::Tr,
 };
@@ -58,6 +58,7 @@ where
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
     pub eval_claims: VerifierEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
+    pub no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<F>>,
     pub lookup_claims: Vec<TrackerLookupClaim>,
 }

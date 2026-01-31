@@ -2,7 +2,10 @@ use super::structs::{
     ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, SNARKProof},
 };
-use crate::{SnarkBackend, structs::claim::TrackerLookupClaim};
+use crate::{
+    SnarkBackend,
+    structs::claim::{TrackerLookupClaim, TrackerNoZerocheckClaim},
+};
 use crate::{
     arithmetic::mat_poly::utils::evaluate_with_eq, prover::tracker::SnarkError::ProverError,
 };
@@ -31,7 +34,7 @@ use crate::{
     prover::{errors::ProverError::HonestProverError, structs::polynomial::TrackedPoly},
 };
 use ark_ec::AdditiveGroup;
-use ark_poly::{MultilinearExtension, Polynomial};
+use ark_poly::Polynomial;
 use ark_std::One;
 use ark_std::Zero;
 use ark_std::{cfg_iter, cfg_iter_mut};
@@ -46,7 +49,6 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, instrument, trace};
-use tracing_subscriber::field::debug;
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
 ///  1) Recording the structure of virtual polynomials and
@@ -744,6 +746,30 @@ where
         Ok(())
     }
 
+    /// Adds a nozerocheck claim to the list of the nozerocheck claims of the prover
+    /// a nozerocheck claim is of the form (poly_id) which means that the prover
+    /// claims that the polynomial with poly_id evaluates to zero all over the
+    /// boolean hypercube
+    pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
+        if let Some(poly) = self.virt_poly(poly_id) {
+            trace!(?poly_id, ?poly, "add_mv_nozerocheck_claim virtual");
+        } else {
+            trace!(?poly_id, "add_mv_nozerocheck_claim materialized");
+        }
+        #[cfg(feature = "honest-prover")]
+        {
+            let evals = self.evaluations(poly_id);
+            if cfg_iter!(evals).any(|eval| *eval != B::F::zero()) {
+                return Err(ProverError(HonestProverError(FalseClaim)));
+            }
+        }
+        self.state
+            .mv_pcs_substate
+            .no_zero_check_claims
+            .push(TrackerNoZerocheckClaim::new(poly_id));
+        Ok(())
+    }
+
     /// Add a multivariate lookup claim to the proof
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(
@@ -1204,13 +1230,8 @@ where
                         .or_else(|| ids.get(..MAX_TERM_DEGREE).map(|s| s.to_vec()))
                         .expect("term must be non-empty");
 
-                    let committed_id = commit_chunk(
-                        tracker,
-                        &chunk,
-                        cache,
-                        extra_zero_claims,
-                        committed_chunks,
-                    )?;
+                    let committed_id =
+                        commit_chunk(tracker, &chunk, cache, extra_zero_claims, committed_chunks)?;
                     remove_chunk(ids, &chunk);
                     let insert_at = ids.binary_search(&committed_id).unwrap_or_else(|i| i);
                     ids.insert(insert_at, committed_id);
