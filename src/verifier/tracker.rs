@@ -17,7 +17,7 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
+use std::{borrow::BorrowMut, collections::{BTreeMap, BTreeSet}, mem::take};
 use tracing::trace;
 use tracing::{debug, instrument};
 
@@ -815,25 +815,53 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
+        const NOZERO_CHUNK_SIZE: usize = 1;
         let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
         if nozero_claims.is_empty() {
             return Ok(());
         }
 
-        let mut claim_iter = nozero_claims.into_iter();
-        let first = claim_iter
-            .next()
-            .expect("nozero_claims should be non-empty");
-        let mut prod_id = first.id();
-        for claim in claim_iter {
-            prod_id = self.mul_oracles(prod_id, claim.id());
+        let num_claims = nozero_claims.len();
+        let mut chunk_comm_ids = Vec::new();
+        let mut master_prod_id = None;
+
+        for chunk in nozero_claims.chunks(NOZERO_CHUNK_SIZE) {
+            let mut iter = chunk.iter();
+            let first = iter
+                .next()
+                .expect("nozero_claims chunk should be non-empty");
+            let mut chunk_prod_id = first.id();
+            for claim in iter {
+                chunk_prod_id = self.mul_oracles(chunk_prod_id, claim.id());
+            }
+
+            // Track the committed chunk product and link it via a zerocheck.
+            let chunk_comm_id = self.peek_next_id();
+            let _ = self.track_mv_com_by_id(chunk_comm_id)?;
+            let diff_id = self.sub_oracles(chunk_comm_id, chunk_prod_id);
+            self.add_mv_zerocheck_claim(diff_id);
+
+            master_prod_id = Some(match master_prod_id {
+                None => chunk_comm_id,
+                Some(acc) => self.mul_oracles(acc, chunk_comm_id),
+            });
+            chunk_comm_ids.push(chunk_comm_id);
         }
+
+        let master_prod_id = master_prod_id.expect("nozero_claims should be non-empty");
 
         // Track the committed inverse polynomial by id provided in the proof.
         let inverses_poly_id = self.peek_next_id();
         let _ = self.track_mv_com_by_id(inverses_poly_id)?;
 
-        let prod_inv_id = self.mul_oracles(prod_id, inverses_poly_id);
+        debug!(
+            "{} nozerocheck polynomials chunked into {}; final degree {}",
+            num_claims,
+            chunk_comm_ids.len(),
+            self.virt_oracle_degree(master_prod_id)
+        );
+
+        let prod_inv_id = self.mul_oracles(master_prod_id, inverses_poly_id);
         let diff_id = self.add_scalar(prod_inv_id, -B::F::one());
         self.add_mv_zerocheck_claim(diff_id);
 
@@ -1042,17 +1070,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     /// Reduce high-degree product terms in the single aggregated sumcheck oracle.
     ///
-    /// Deterministic "reuse-first chunking":
-    /// 1) Collect all oversized terms (degree > MAX_TERM_DEGREE).
-    /// 2) Build a global frequency map of size-MAX_TERM_DEGREE subchunks
-    ///    (sliding windows over the sorted factor IDs) across all oversized terms.
-    /// 3) Sort these candidate chunks by descending frequency, then lexicographic order.
-    /// 4) For each term, greedily replace the highest-ranked chunk that is a subset
-    ///    of the term; if none match, fall back to the lexicographically smallest
-    ///    size-MAX_TERM_DEGREE chunk from the term itself.
+    /// Deterministic two-pass reduction:
+    /// 1) Factor-aware contraction: if a term references a virtual oracle
+    ///    directly, track its commitment and replace its id. This preserves
+    ///    factorized structure when present.
+    /// 2) Reuse-first chunking on remaining oversized terms.
     ///
-    /// This minimizes the number of commitments by maximizing reuse, remains
-    /// deterministic, and stays in sync with the prover.
+    /// This keeps the process deterministic, fast, and in sync with the prover.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
         const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
@@ -1106,7 +1130,36 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 "sumcheck degree reduction claim stats"
             );
 
-            // Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
+            // Pass 1: factor-aware contraction of virtual oracles referenced in terms.
+            let mut virtual_ids: BTreeSet<TrackerID> = BTreeSet::new();
+            for ids in term_ids.iter() {
+                for id in ids.iter() {
+                    if !tracker.state.oracle_is_material.get(id).copied().unwrap_or(false) {
+                        virtual_ids.insert(*id);
+                    }
+                }
+            }
+            for vid in virtual_ids.into_iter() {
+                if cache.contains_key(&vec![vid]) {
+                    continue;
+                }
+                let committed_id = tracker.peek_next_id();
+                let _ = tracker.track_mv_com_by_id(committed_id)?;
+                cache.insert(vec![vid], committed_id);
+                let neg_committed = tracker.mul_scalar(committed_id, -B::F::one());
+                let diff_id = tracker.add_oracles(vid, neg_committed);
+                extra_zero_claims.push(diff_id);
+                for ids in term_ids.iter_mut() {
+                    for id in ids.iter_mut() {
+                        if *id == vid {
+                            *id = committed_id;
+                        }
+                    }
+                    ids.sort();
+                }
+            }
+
+            // Pass 2: Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
             let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();
             for ids in term_ids.iter() {
                 if ids.len() <= MAX_TERM_DEGREE {

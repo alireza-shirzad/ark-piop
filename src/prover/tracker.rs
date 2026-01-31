@@ -1056,17 +1056,13 @@ where
 
     /// Reduce high-degree product terms in the single aggregated sumcheck polynomial.
     ///
-    /// Deterministic "reuse-first chunking":
-    /// 1) Collect all oversized terms (degree > MAX_TERM_DEGREE).
-    /// 2) Build a global frequency map of size-MAX_TERM_DEGREE subchunks
-    ///    (sliding windows over the sorted factor IDs) across all oversized terms.
-    /// 3) Sort these candidate chunks by descending frequency, then lexicographic order.
-    /// 4) For each term, greedily replace the highest-ranked chunk that is a subset
-    ///    of the term; if none match, fall back to the lexicographically smallest
-    ///    size-MAX_TERM_DEGREE chunk from the term itself.
+    /// Deterministic two-pass reduction:
+    /// 1) Factor-aware contraction: if a term references a virtual polynomial
+    ///    directly, commit that virtual polynomial and replace its id. This
+    ///    preserves factorized structure when present (e.g., (a1+b1)(a2+b2)).
+    /// 2) Reuse-first chunking on remaining oversized terms (flattened factors).
     ///
-    /// This minimizes the number of commitments by maximizing reuse, remains
-    /// deterministic, and stays in sync with the verifier.
+    /// This keeps the process deterministic, fast, and in sync with the verifier.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
         const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
@@ -1122,7 +1118,47 @@ where
                 "sumcheck degree reduction claim stats"
             );
 
-            // Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
+            // Pass 1: factor-aware contraction of virtual subpolys referenced in terms.
+            let mut virtual_ids: BTreeSet<TrackerID> = BTreeSet::new();
+            for ids in term_ids.iter() {
+                for id in ids.iter() {
+                    if tracker.mat_mv_poly(*id).is_none() {
+                        virtual_ids.insert(*id);
+                    }
+                }
+            }
+            for vid in virtual_ids.into_iter() {
+                // Only contract if the virtual poly is directly materializable
+                // (i.e., it is a sum of products of material polys).
+                let Some(vpoly) = tracker.virt_poly(vid) else { continue };
+                let is_material_only = vpoly
+                    .iter()
+                    .all(|(_, ids)| ids.iter().all(|id| tracker.mat_mv_poly(*id).is_some()));
+                if !is_material_only {
+                    continue;
+                }
+                if cache.contains_key(&vec![vid]) {
+                    continue;
+                }
+                // Materialize the virtual poly, commit it, and add zerocheck diff.
+                let mat = tracker.materialize_poly(vid);
+                let committed_id = tracker.track_and_commit_mat_mv_p(mat.as_ref())?;
+                cache.insert(vec![vid], committed_id);
+                let neg_committed = tracker.mul_scalar(committed_id, -B::F::one());
+                let diff_id = tracker.add_polys(vid, neg_committed);
+                extra_zero_claims.push(diff_id);
+                // Replace occurrences in term_ids.
+                for ids in term_ids.iter_mut() {
+                    for id in ids.iter_mut() {
+                        if *id == vid {
+                            *id = committed_id;
+                        }
+                    }
+                    ids.sort();
+                }
+            }
+
+            // Pass 2: Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
             let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();
             for ids in term_ids.iter() {
                 if ids.len() <= MAX_TERM_DEGREE {
@@ -1288,32 +1324,87 @@ where
     }
 
     fn batch_nozero_check_claims(&mut self) -> SnarkResult<()> {
+        const NOZERO_CHUNK_SIZE: usize = 1;
         let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
         if nozero_claims.is_empty() {
             return Ok(());
         }
 
+        let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
         let num_claims = nozero_claims.len();
-        let mut claim_iter = nozero_claims.into_iter();
-        let first = claim_iter
-            .next()
-            .expect("nozero_claims should be non-empty");
-        let mut prod_id = first.id();
-        for claim in claim_iter {
-            prod_id = self.mul_polys(prod_id, claim.id());
+        let mut chunk_comm_ids = Vec::new();
+        let mut master_prod_id = None;
+        let mut master_evals: Option<Vec<B::F>> = None;
+
+        for chunk in nozero_claims.chunks(NOZERO_CHUNK_SIZE) {
+            let mut iter = chunk.iter();
+            let first = iter
+                .next()
+                .expect("nozero_claims chunk should be non-empty");
+            let mut chunk_prod_id = first.id();
+            let mut chunk_evals = self.evaluations(first.id());
+            for claim in iter {
+                let id = claim.id();
+                chunk_prod_id = self.mul_polys(chunk_prod_id, id);
+                let evals = self.evaluations(id);
+                debug_assert_eq!(chunk_evals.len(), evals.len());
+                cfg_iter_mut!(chunk_evals)
+                    .zip(evals)
+                    .for_each(|(a, b)| *a *= b);
+            }
+
+            // Commit to the chunk product and link it to the virtual product via a zerocheck.
+            let mut nv = self.poly_nv(chunk_prod_id);
+            if nv < max_nv {
+                let expand = 1usize << (max_nv - nv);
+                let mut expanded = Vec::with_capacity(chunk_evals.len() * expand);
+                for v in &chunk_evals {
+                    expanded.extend(std::iter::repeat(*v).take(expand));
+                }
+                chunk_evals = expanded;
+                nv = max_nv;
+            }
+            let chunk_mle = MLE::from_evaluations_vec(nv, chunk_evals.clone());
+            let chunk_comm_id = self.track_and_commit_mat_mv_p(&chunk_mle)?;
+            let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
+            self.add_mv_zerocheck_claim(diff_id)?;
+
+            // Accumulate chunk commitments into the master product and evals.
+            master_prod_id = Some(match master_prod_id {
+                None => chunk_comm_id,
+                Some(acc) => self.mul_polys(acc, chunk_comm_id),
+            });
+            master_evals = Some(match master_evals {
+                None => chunk_evals,
+                Some(mut acc) => {
+                    debug_assert_eq!(acc.len(), chunk_evals.len());
+                    cfg_iter_mut!(acc)
+                        .zip(chunk_evals)
+                        .for_each(|(a, b)| *a *= b);
+                    acc
+                }
+            });
+            chunk_comm_ids.push(chunk_comm_id);
         }
+
+        let master_prod_id = master_prod_id.expect("nozero_claims should be non-empty");
+        let mut master_evals =
+            master_evals.expect("nozero_claims should be non-empty");
+
         debug!(
-            "{} nozerocheck polynomials multiplied; final degree {}",
+            "{} nozerocheck polynomials chunked into {}; final degree {}",
             num_claims,
-            self.virt_poly_degree(prod_id)
+            chunk_comm_ids.len(),
+            self.virt_poly_degree(master_prod_id)
         );
-        let mut eval_inverses = self.evaluations(prod_id);
-        batch_inversion(&mut eval_inverses);
-        let nv = self.poly_nv(prod_id);
-        let inverses_mle = MLE::from_evaluations_vec(nv, eval_inverses);
+
+        batch_inversion(&mut master_evals);
+        let nv = self.poly_nv(master_prod_id);
+        debug_assert_eq!(nv, max_nv);
+        let inverses_mle = MLE::from_evaluations_vec(nv, master_evals);
         let inverses_poly_id = self.track_and_commit_mat_mv_p(&inverses_mle)?;
 
-        let prod_inv_id = self.mul_polys(prod_id, inverses_poly_id);
+        let prod_inv_id = self.mul_polys(master_prod_id, inverses_poly_id);
         let diff_id = self.add_scalar(prod_inv_id, -B::F::one());
         self.add_mv_zerocheck_claim(diff_id)?;
 
