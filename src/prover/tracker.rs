@@ -760,7 +760,7 @@ where
         #[cfg(feature = "honest-prover")]
         {
             let evals = self.evaluations(poly_id);
-            if cfg_iter!(evals).any(|eval| *eval != B::F::zero()) {
+            if cfg_iter!(evals).any(|eval| *eval == B::F::zero()) {
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -1130,7 +1130,9 @@ where
             for vid in virtual_ids.into_iter() {
                 // Only contract if the virtual poly is directly materializable
                 // (i.e., it is a sum of products of material polys).
-                let Some(vpoly) = tracker.virt_poly(vid) else { continue };
+                let Some(vpoly) = tracker.virt_poly(vid) else {
+                    continue;
+                };
                 let is_material_only = vpoly
                     .iter()
                     .all(|(_, ids)| ids.iter().all(|id| tracker.mat_mv_poly(*id).is_some()));
@@ -1392,8 +1394,7 @@ where
         }
 
         let master_prod_id = master_prod_id.expect("nozero_claims should be non-empty");
-        let mut master_evals =
-            master_evals.expect("nozero_claims should be non-empty");
+        let mut master_evals = master_evals.expect("nozero_claims should be non-empty");
 
         debug!(
             "{} nozerocheck polynomials chunked into {}; final degree {}",
