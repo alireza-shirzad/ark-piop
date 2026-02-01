@@ -1330,17 +1330,19 @@ where
             return Ok(());
         }
 
+        // Use the largest nv in the tracker so all committed chunk polys share a domain.
         let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
         let num_claims = nozero_claims.len();
-        let mut chunk_comm_ids = Vec::new();
-        let mut master_prod_id = None;
-        let mut master_evals: Option<Vec<B::F>> = None;
+        let mut chunk_comm_ids = Vec::new(); // committed chunk products (materialized)
+        let mut master_prod_id = None; // virtual product of chunk commitments
+        let mut master_evals: Option<Vec<B::F>> = None; // evals of the same product
 
         for chunk in nozero_claims.chunks(NOZERO_CHUNK_SIZE) {
             let mut iter = chunk.iter();
             let first = iter
                 .next()
                 .expect("nozero_claims chunk should be non-empty");
+            // 1) Multiply polynomials in the chunk (virtual product + evals).
             let mut chunk_prod_id = first.id();
             let mut chunk_evals = self.evaluations(first.id());
             for claim in iter {
@@ -1353,23 +1355,25 @@ where
                     .for_each(|(a, b)| *a *= b);
             }
 
-            // Commit to the chunk product and link it to the virtual product via a zerocheck.
-            let mut nv = self.poly_nv(chunk_prod_id);
-            if nv < max_nv {
-                let expand = 1usize << (max_nv - nv);
-                let mut expanded = Vec::with_capacity(chunk_evals.len() * expand);
+            // 2) Expand evals to max_nv (by repetition) and commit to the chunk product.
+            let base_len = chunk_evals.len();
+            debug_assert!(base_len.is_power_of_two());
+            let base_nv = base_len.trailing_zeros() as usize;
+            if base_nv < max_nv {
+                let expand = 1usize << (max_nv - base_nv);
+                let mut expanded = Vec::with_capacity(base_len * expand);
                 for v in &chunk_evals {
                     expanded.extend(std::iter::repeat(*v).take(expand));
                 }
                 chunk_evals = expanded;
-                nv = max_nv;
             }
-            let chunk_mle = MLE::from_evaluations_vec(nv, chunk_evals.clone());
+            let chunk_mle = MLE::from_evaluations_vec(max_nv, chunk_evals.clone());
             let chunk_comm_id = self.track_and_commit_mat_mv_p(&chunk_mle)?;
+            // Link committed chunk to its virtual definition: c_i - prod_i == 0.
             let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
             self.add_mv_zerocheck_claim(diff_id)?;
 
-            // Accumulate chunk commitments into the master product and evals.
+            // 3) Accumulate committed chunks into a master product (virtual + evals).
             master_prod_id = Some(match master_prod_id {
                 None => chunk_comm_id,
                 Some(acc) => self.mul_polys(acc, chunk_comm_id),
@@ -1398,10 +1402,9 @@ where
             self.virt_poly_degree(master_prod_id)
         );
 
+        // 4) Commit to the inverse of the master product and enforce prod * inv == 1.
         batch_inversion(&mut master_evals);
-        let nv = self.poly_nv(master_prod_id);
-        debug_assert_eq!(nv, max_nv);
-        let inverses_mle = MLE::from_evaluations_vec(nv, master_evals);
+        let inverses_mle = MLE::from_evaluations_vec(max_nv, master_evals);
         let inverses_poly_id = self.track_and_commit_mat_mv_p(&inverses_mle)?;
 
         let prod_inv_id = self.mul_polys(master_prod_id, inverses_poly_id);
