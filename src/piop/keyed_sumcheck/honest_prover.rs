@@ -138,7 +138,7 @@ where
                     errors::SnarkError,
                     prover::errors::{HonestProverError, ProverError},
                 };
-
+                tracing::error!("error");
                 return Err(SnarkError::ProverError(ProverError::HonestProverError(
                     HonestProverError::FalseClaim,
                 )));

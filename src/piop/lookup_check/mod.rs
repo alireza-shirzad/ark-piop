@@ -102,6 +102,7 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
             HashSet::from_iter(input.super_col.evaluations().iter().cloned());
         for elem in input.included_cols.iter().flat_map(|c| c.evaluations()) {
             if !super_col_hash_set.contains(&elem) {
+                tracing::error!("error");
                 return Err(SnarkError::ProverError(ProverError::HonestProverError(
                     HonestProverError::FalseClaim,
                 )));
@@ -180,6 +181,7 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
             HashSet::from_iter(input.super_col.evaluations().iter().cloned());
         for elem in input.included_cols.iter().flat_map(|c| c.evaluations()) {
             if !super_col_hash_set.contains(&elem) {
+                tracing::error!("error");
                 return Err(SnarkError::ProverError(ProverError::HonestProverError(
                     HonestProverError::FalseClaim,
                 )));

@@ -737,6 +737,7 @@ where
         {
             let evals = self.evaluations(poly_id);
             if cfg_iter!(evals).any(|eval| *eval != B::F::zero()) {
+                tracing::error!("error");
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -761,6 +762,7 @@ where
         {
             let evals = self.evaluations(poly_id);
             if cfg_iter!(evals).any(|eval| *eval == B::F::zero()) {
+                tracing::error!("error");
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -784,6 +786,7 @@ where
             let sub_evals = self.evaluations(sub_id);
             let super_eval_set: HashSet<B::F> = super_evals.into_iter().collect();
             if cfg_iter!(sub_evals).any(|eval| !super_eval_set.contains(eval)) {
+                tracing::error!("error");
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
