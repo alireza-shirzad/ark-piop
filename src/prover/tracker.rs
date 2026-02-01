@@ -1368,8 +1368,10 @@ where
             if base_nv < max_nv {
                 let expand = 1usize << (max_nv - base_nv);
                 let mut expanded = Vec::with_capacity(base_len * expand);
-                for v in &chunk_evals {
-                    expanded.extend(std::iter::repeat(*v).take(expand));
+                // Keep evaluation ordering consistent with `MLE::new(..., Some(max_nv))`,
+                // which repeats the whole evaluation vector cyclically.
+                for _ in 0..expand {
+                    expanded.extend_from_slice(&chunk_evals);
                 }
                 chunk_evals = expanded;
             }
