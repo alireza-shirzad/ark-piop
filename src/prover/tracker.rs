@@ -737,7 +737,7 @@ where
         {
             let evals = self.evaluations(poly_id);
             if cfg_iter!(evals).any(|eval| *eval != B::F::zero()) {
-                tracing::error!("error");
+                tracing::error!("The emitted Zerocheck claim is false");
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
@@ -1328,6 +1328,7 @@ where
         Ok(())
     }
 
+    #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims(&mut self) -> SnarkResult<()> {
         const NOZERO_CHUNK_SIZE: usize = 1;
         let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
