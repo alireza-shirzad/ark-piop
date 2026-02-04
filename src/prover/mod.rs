@@ -368,6 +368,13 @@ where
                 .push(claim.sub_poly());
         }
         info!("reducing {} lookup claims", by_super.len());
+        for (super_id, sub_ids) in &by_super {
+            info!(
+                super_poly = ?super_id,
+                sub_poly_count = sub_ids.len(),
+                "lookup super polynomial group"
+            );
+        }
 
         for (super_id, sub_ids) in by_super {
             let super_nv = self.tracker_rc.borrow().poly_nv(super_id);
