@@ -65,23 +65,59 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         // Get the challenge gamma for the check -- Gamma appears in the denominator of
         // the sum
         let gamma = prover.get_and_append_challenge(b"gamma")?;
-        // iterate over vector elements and generate subclaims:
-        for i in 0..input.fxs.len() {
+        // Iterate over vector elements and generate subclaims.
+        // When two adjacent terms have the same domain size and unit multiplicity
+        // (m = None), batch them into a single proxy witness commitment.
+        let mut i = 0;
+        while i < input.fxs.len() {
+            if i + 1 < input.fxs.len()
+                && input.mfxs[i].is_none()
+                && input.mfxs[i + 1].is_none()
+                && input.fxs[i].log_size() == input.fxs[i + 1].log_size()
+            {
+                Self::prove_generate_pair_subclaim(
+                    prover,
+                    input.fxs[i].clone(),
+                    input.fxs[i + 1].clone(),
+                    gamma,
+                )?;
+                i += 2;
+                continue;
+            }
+
             Self::prove_generate_subclaims(
                 prover,
                 input.fxs[i].clone(),
                 input.mfxs[i].clone(),
                 gamma,
             )?;
+            i += 1;
         }
 
-        for i in 0..input.gxs.len() {
+        let mut i = 0;
+        while i < input.gxs.len() {
+            if i + 1 < input.gxs.len()
+                && input.mgxs[i].is_none()
+                && input.mgxs[i + 1].is_none()
+                && input.gxs[i].log_size() == input.gxs[i + 1].log_size()
+            {
+                Self::prove_generate_pair_subclaim(
+                    prover,
+                    input.gxs[i].clone(),
+                    input.gxs[i + 1].clone(),
+                    gamma,
+                )?;
+                i += 2;
+                continue;
+            }
+
             Self::prove_generate_subclaims(
                 prover,
                 input.gxs[i].clone(),
                 input.mgxs[i].clone(),
                 gamma,
             )?;
+            i += 1;
         }
         Ok(())
     }
@@ -128,7 +164,26 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         let max_nv = max_nv_f.max(max_nv_g);
         let mut lhs_v: B::F = B::F::zero();
         let mut rhs_v: B::F = B::F::zero();
-        for i in 0..input.fxs.len() {
+        let mut i = 0;
+        while i < input.fxs.len() {
+            if i + 1 < input.fxs.len()
+                && input.mfxs[i].is_none()
+                && input.mfxs[i + 1].is_none()
+                && input.fxs[i].log_size() == input.fxs[i + 1].log_size()
+            {
+                let sum_claim_v = Self::verify_generate_pair_subclaim(
+                    verifier,
+                    input.fxs[i].clone(),
+                    input.fxs[i + 1].clone(),
+                    gamma,
+                )?;
+                let ratio = 2_usize.pow((max_nv - input.fxs[i].log_size()) as u32);
+                let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
+                lhs_v += sum_claim_v_adj;
+                i += 2;
+                continue;
+            }
+
             let sum_claim_v = Self::verify_generate_subclaims(
                 verifier,
                 input.fxs[i].clone(),
@@ -138,9 +193,29 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
             let ratio = 2_usize.pow((max_nv - input.fxs[i].log_size()) as u32);
             let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
             lhs_v += sum_claim_v_adj;
+            i += 1;
         }
 
-        for i in 0..input.gxs.len() {
+        let mut i = 0;
+        while i < input.gxs.len() {
+            if i + 1 < input.gxs.len()
+                && input.mgxs[i].is_none()
+                && input.mgxs[i + 1].is_none()
+                && input.gxs[i].log_size() == input.gxs[i + 1].log_size()
+            {
+                let sum_claim_v = Self::verify_generate_pair_subclaim(
+                    verifier,
+                    input.gxs[i].clone(),
+                    input.gxs[i + 1].clone(),
+                    gamma,
+                )?;
+                let ratio = 2_usize.pow((max_nv - input.gxs[i].log_size()) as u32);
+                let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
+                rhs_v += sum_claim_v_adj;
+                i += 2;
+                continue;
+            }
+
             let sum_claim_v = Self::verify_generate_subclaims(
                 verifier,
                 input.gxs[i].clone(),
@@ -150,6 +225,7 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
             let ratio = 2_usize.pow((max_nv - input.gxs[i].log_size()) as u32);
             let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
             rhs_v += sum_claim_v_adj;
+            i += 1;
         }
 
         // check that the values of claimed sums are equal
@@ -254,6 +330,53 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         Ok(())
     }
 
+    fn prove_generate_pair_subclaim(
+        tracker: &mut ArgProver<B>,
+        p1: TrackedPoly<B>,
+        p2: TrackedPoly<B>,
+        gamma: B::F,
+    ) -> SnarkResult<()> {
+        let nv = p1.log_size();
+        debug_assert_eq!(nv, p2.log_size());
+
+        // Build phat = 1/(p1-gamma) + 1/(p2-gamma).
+        let mut p1_minus_gamma: Vec<B::F> = p1
+            .evaluations()
+            .iter()
+            .map(|x| *x - gamma)
+            .collect();
+        let mut p2_minus_gamma: Vec<B::F> = p2
+            .evaluations()
+            .iter()
+            .map(|x| *x - gamma)
+            .collect();
+        ark_ff::fields::batch_inversion(p1_minus_gamma.as_mut_slice());
+        ark_ff::fields::batch_inversion(p2_minus_gamma.as_mut_slice());
+
+        let phat_evals = p1_minus_gamma
+            .iter()
+            .zip(p2_minus_gamma.iter())
+            .map(|(a, b)| *a + *b)
+            .collect::<Vec<_>>();
+        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals.clone());
+        let phat = tracker.track_and_commit_mat_mv_poly(&phat_mle)?;
+
+        // Sumcheck claim is over the paired contribution itself.
+        let v = phat_evals.iter().fold(B::F::zero(), |acc, x| acc + *x);
+
+        // Zerocheck:
+        // phat*(p1-gamma)*(p2-gamma) - ((p1-gamma) + (p2-gamma)) == 0
+        let p1_minus_gamma_poly = p1.clone().sub_scalar_poly(gamma);
+        let p2_minus_gamma_poly = p2.clone().sub_scalar_poly(gamma);
+        let lhs =
+            &(&(&phat * &p1_minus_gamma_poly) * &p2_minus_gamma_poly) - &p1_minus_gamma_poly;
+        let phat_check_poly = &lhs - &p2_minus_gamma_poly;
+
+        tracker.add_mv_sumcheck_claim(phat.id(), v)?;
+        tracker.add_mv_zerocheck_claim(phat_check_poly.id())?;
+        Ok(())
+    }
+
     fn verify_generate_subclaims(
         tracker: &mut ArgVerifier<B>,
         p: TrackedOracle<B>,
@@ -274,6 +397,28 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         // add the delayed prover claims to the tracker
         let sum_claim_v = tracker.prover_claimed_sum(sumcheck_challenge_comm.id())?;
         tracker.add_sumcheck_claim(sumcheck_challenge_comm.id(), sum_claim_v);
+        tracker.add_zerocheck_claim(phat_check_poly.id());
+
+        Ok(sum_claim_v)
+    }
+
+    fn verify_generate_pair_subclaim(
+        tracker: &mut ArgVerifier<B>,
+        p1: TrackedOracle<B>,
+        p2: TrackedOracle<B>,
+        gamma: B::F,
+    ) -> SnarkResult<B::F> {
+        let phat_id: TrackerID = tracker.peek_next_id();
+        let phat = tracker.track_mv_com_by_id(phat_id)?;
+
+        let p1_minus_gamma_oracle = p1.clone().sub_scalar_oracle(gamma);
+        let p2_minus_gamma_oracle = p2.clone().sub_scalar_oracle(gamma);
+        let lhs = &(&(&phat * &p1_minus_gamma_oracle) * &p2_minus_gamma_oracle)
+            - &p1_minus_gamma_oracle;
+        let phat_check_poly = &lhs - &p2_minus_gamma_oracle;
+
+        let sum_claim_v = tracker.prover_claimed_sum(phat.id())?;
+        tracker.add_sumcheck_claim(phat.id(), sum_claim_v);
         tracker.add_zerocheck_claim(phat_check_poly.id());
 
         Ok(sum_claim_v)
