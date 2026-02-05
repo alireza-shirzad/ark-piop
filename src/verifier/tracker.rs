@@ -79,12 +79,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub(crate) fn gen_id(&mut self) -> TrackerID {
         let id = self.state.num_tracked_polys;
         self.state.num_tracked_polys += 1;
-        TrackerID(id)
+        TrackerID::from_usize(id)
     }
 
     // Peek at the next TrackerID without incrementing the counter
     pub(crate) fn peek_next_id(&mut self) -> TrackerID {
-        TrackerID(self.state.num_tracked_polys)
+        TrackerID::from_usize(self.state.num_tracked_polys)
     }
 
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
@@ -280,12 +280,26 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         match self.proof.as_ref() {
             Some(proof) => {
                 let mv_queries_clone = proof.mv_pcs_subproof.query_map.clone();
+                let mv_points_clone = proof.mv_pcs_subproof.point_map.clone();
+                let mv_point_to_id: BTreeMap<Vec<B::F>, crate::structs::PointID> = mv_points_clone
+                    .iter()
+                    .map(|(point_id, point)| (point.clone(), *point_id))
+                    .collect();
 
                 let oracle =
                     Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
-                        let query_res = *mv_queries_clone.get(&(id, point.clone())).ok_or(
+                        let point_id = mv_point_to_id.get(&point).ok_or(
                             SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                                id.0,
+                                id.to_int(),
+                                f_vec_short_str(&point),
+                            )),
+                        )?;
+                        let query_res = *mv_queries_clone
+                            .get(&id)
+                            .and_then(|queries_by_point| queries_by_point.get(point_id))
+                            .ok_or(
+                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                                id.to_int(),
                                 f_vec_short_str(&point),
                             )),
                         )?;
@@ -333,9 +347,28 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         match self.proof.as_ref() {
             Some(proof) => {
                 let uv_queries_clone = proof.uv_pcs_subproof.query_map.clone();
+                let uv_points_clone = proof.uv_pcs_subproof.point_map.clone();
+                let uv_point_to_id: BTreeMap<B::F, crate::structs::PointID> = uv_points_clone
+                    .iter()
+                    .map(|(point_id, point)| (*point, *point_id))
+                    .collect();
                 let oracle =
                     Oracle::new_univariate(comm.log_size() as usize, move |point: B::F| {
-                        let query_res = uv_queries_clone.get(&(id, point)).unwrap();
+                        let point_id = uv_point_to_id.get(&point).ok_or(
+                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                                id.to_int(),
+                                point.to_string(),
+                            )),
+                        )?;
+                        let query_res = uv_queries_clone
+                            .get(&id)
+                            .and_then(|queries_by_point| queries_by_point.get(point_id))
+                            .ok_or(
+                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                                id.to_int(),
+                                point.to_string(),
+                            )),
+                        )?;
                         Ok(*query_res)
                     });
                 let mut terms = VirtualOracle::new();
@@ -1346,12 +1379,19 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     fn verify_mv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().mv_pcs_subproof.query_map;
+        let point_map = &self.proof.as_ref().unwrap().mv_pcs_subproof.point_map;
         // Prepare the input for calling the batch verify function
-        let (mat_coms, points): (Vec<_>, Vec<_>) = eval_claims
+        let (mat_coms, points, evals): (Vec<_>, Vec<_>, Vec<_>) = eval_claims
             .iter()
-            .map(|((id, point), _eval)| {
+            .flat_map(|(id, queries_by_point)| {
                 let com = self.state.mv_pcs_substate.materialized_comms[id].clone();
-                (com, point.clone())
+                queries_by_point.iter().map(move |(point_id, eval)| {
+                    let point = point_map
+                        .get(point_id)
+                        .expect("point id in query_map must exist in point_map")
+                        .clone();
+                    (com.clone(), point, *eval)
+                })
             })
             .multiunzip();
         // Invoke the batch verify function
@@ -1367,14 +1407,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &self.vk.mv_pcs_param,
                 &mat_coms[0],
                 &points[0],
-                self.proof
-                    .as_ref()
-                    .unwrap()
-                    .mv_pcs_subproof
-                    .query_map
-                    .values()
-                    .next()
-                    .unwrap(),
+                &evals[0],
                 opening_proof,
             )?;
         } else if mat_coms.len() > 1 {
@@ -1389,15 +1422,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &self.vk.mv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
-                &self
-                    .proof
-                    .as_ref()
-                    .unwrap()
-                    .mv_pcs_subproof
-                    .query_map
-                    .values()
-                    .cloned()
-                    .collect::<Vec<B::F>>(),
+                &evals,
                 opening_proof,
                 &mut self.state.transcript,
             )?;
@@ -1411,12 +1436,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     fn verify_uv_pcs_proof(&mut self) -> SnarkResult<bool> {
         // Fetch the evaluation claims in the verifier state
         let eval_claims = &self.proof.as_ref().unwrap().uv_pcs_subproof.query_map;
+        let point_map = &self.proof.as_ref().unwrap().uv_pcs_subproof.point_map;
         // Prepare the input for calling the batch verify function
         let (mat_coms, points, evals): (Vec<_>, Vec<_>, Vec<_>) = eval_claims
             .iter()
-            .map(|((id, point), eval)| {
+            .flat_map(|(id, queries_by_point)| {
                 let com = self.state.uv_pcs_substate.materialized_comms[id].clone();
-                (com, *point, *eval)
+                queries_by_point.iter().map(move |(point_id, eval)| {
+                    let point = *point_map
+                        .get(point_id)
+                        .expect("point id in query_map must exist in point_map");
+                    (com.clone(), point, *eval)
+                })
             })
             .multiunzip();
         // Invoke the batch verify function

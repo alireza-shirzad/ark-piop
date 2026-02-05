@@ -12,7 +12,8 @@ use ark_serialize::{
 use derivative::Derivative;
 use std::{collections::BTreeMap, fmt::Display};
 /////////// Types ///////////
-pub type QueryMap<F, PC> = BTreeMap<(TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point), F>;
+pub type QueryMap<F> = BTreeMap<TrackerID, BTreeMap<PointID, F>>;
+pub type PointMap<F, PC> = BTreeMap<PointID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point>;
 
 /////////// Structs ///////////
 /// A unique identifier for a polynomial, or a commitment to a polynomial.
@@ -29,10 +30,40 @@ pub type QueryMap<F, PC> = BTreeMap<(TrackerID, <<PC as PCS<F>>::Poly as Polynom
     CanonicalDeserialize,
     CanonicalSerialize,
 )]
-pub struct TrackerID(pub usize);
+pub struct TrackerID(pub u16);
 impl TrackerID {
+    pub fn from_usize(id: usize) -> Self {
+        Self(u16::try_from(id).expect("TrackerID overflow: exceeds u16::MAX"))
+    }
+
     pub fn to_int(self) -> usize {
-        self.0
+        usize::from(self.0)
+    }
+}
+
+/// A compact identifier for an evaluation point used in query maps.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    CanonicalDeserialize,
+    CanonicalSerialize,
+)]
+pub struct PointID(pub u16);
+
+impl PointID {
+    pub fn from_usize(id: usize) -> Self {
+        Self(u16::try_from(id).expect("PointID overflow: exceeds u16::MAX"))
+    }
+
+    pub fn to_int(self) -> usize {
+        usize::from(self.0)
     }
 }
 

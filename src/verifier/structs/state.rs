@@ -18,7 +18,7 @@ use crate::{
     pcs::PCS,
     prover::structs::proof::SNARKProof,
     structs::{
-        QueryMap, SumcheckSubproof, TrackerID,
+        PointMap, QueryMap, SumcheckSubproof, TrackerID,
         claim::{TrackerNoZerocheckClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
     transcript::Tr,
@@ -108,7 +108,8 @@ where
 {
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
-    pub query_map: Arc<QueryMap<F, PC>>,
+    pub point_map: Arc<PointMap<F, PC>>,
+    pub query_map: Arc<QueryMap<F>>,
 }
 
 impl<F, PC> ProcessedPCSSubproof<F, PC>
@@ -121,6 +122,7 @@ where
         Self {
             opening_proof: pcs_subproof.opening_proof.clone(),
             comitments: pcs_subproof.comitments.clone(),
+            point_map: Arc::new(pcs_subproof.point_map.clone()),
             query_map: Arc::new(pcs_subproof.query_map.clone()),
         }
     }

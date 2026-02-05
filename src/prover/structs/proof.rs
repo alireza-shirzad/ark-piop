@@ -4,7 +4,7 @@ use crate::SnarkBackend;
 use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
-    structs::{QueryMap, SumcheckSubproof, TrackerID},
+    structs::{PointMap, QueryMap, SumcheckSubproof, TrackerID},
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
@@ -38,5 +38,6 @@ where
 {
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
-    pub query_map: QueryMap<F, PC>,
+    pub point_map: PointMap<F, PC>,
+    pub query_map: QueryMap<F>,
 }
