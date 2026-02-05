@@ -1121,47 +1121,19 @@ where
                 "sumcheck degree reduction claim stats"
             );
 
-            // Pass 1: factor-aware contraction of virtual subpolys referenced in terms.
-            let mut virtual_ids: BTreeSet<TrackerID> = BTreeSet::new();
-            for ids in term_ids.iter() {
-                for id in ids.iter() {
-                    if tracker.mat_mv_poly(*id).is_none() {
-                        virtual_ids.insert(*id);
-                    }
-                }
-            }
-            for vid in virtual_ids.into_iter() {
-                // Only contract if the virtual poly is directly materializable
-                // (i.e., it is a sum of products of material polys).
-                let Some(vpoly) = tracker.virt_poly(vid) else {
-                    continue;
-                };
-                let is_material_only = vpoly
-                    .iter()
-                    .all(|(_, ids)| ids.iter().all(|id| tracker.mat_mv_poly(*id).is_some()));
-                if !is_material_only {
-                    continue;
-                }
-                if cache.contains_key(&vec![vid]) {
-                    continue;
-                }
-                // Materialize the virtual poly, commit it, and add zerocheck diff.
-                let mat = tracker.materialize_poly(vid);
-                let committed_id = tracker.track_and_commit_mat_mv_p(mat.as_ref())?;
-                cache.insert(vec![vid], committed_id);
-                let neg_committed = tracker.mul_scalar(committed_id, -B::F::one());
-                let diff_id = tracker.add_polys(vid, neg_committed);
-                extra_zero_claims.push(diff_id);
-                // Replace occurrences in term_ids.
-                for ids in term_ids.iter_mut() {
-                    for id in ids.iter_mut() {
-                        if *id == vid {
-                            *id = committed_id;
-                        }
-                    }
-                    ids.sort();
-                }
-            }
+            // Pass 1 intentionally preserves virtual linear factors (e.g., a+b).
+            // We do not contract them into standalone commitments here; reducing
+            // degree should only chunk oversized multiplicative terms.
+            let virtual_factor_refs = term_ids
+                .iter()
+                .flat_map(|ids| ids.iter())
+                .filter(|id| tracker.mat_mv_poly(**id).is_none())
+                .count();
+            debug!(
+                claim_id = ?poly_id,
+                virtual_factor_refs,
+                "sumcheck degree reduction kept virtual linear factors intact"
+            );
 
             // Pass 2: Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
             let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();

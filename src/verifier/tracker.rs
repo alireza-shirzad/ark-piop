@@ -17,7 +17,7 @@ use crate::{
 };
 use ark_std::{One, Zero};
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, collections::{BTreeMap, BTreeSet}, mem::take};
+use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
 use tracing::trace;
 use tracing::{debug, instrument};
 
@@ -1130,34 +1130,26 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 "sumcheck degree reduction claim stats"
             );
 
-            // Pass 1: factor-aware contraction of virtual oracles referenced in terms.
-            let mut virtual_ids: BTreeSet<TrackerID> = BTreeSet::new();
-            for ids in term_ids.iter() {
-                for id in ids.iter() {
-                    if !tracker.state.oracle_is_material.get(id).copied().unwrap_or(false) {
-                        virtual_ids.insert(*id);
-                    }
-                }
-            }
-            for vid in virtual_ids.into_iter() {
-                if cache.contains_key(&vec![vid]) {
-                    continue;
-                }
-                let committed_id = tracker.peek_next_id();
-                let _ = tracker.track_mv_com_by_id(committed_id)?;
-                cache.insert(vec![vid], committed_id);
-                let neg_committed = tracker.mul_scalar(committed_id, -B::F::one());
-                let diff_id = tracker.add_oracles(vid, neg_committed);
-                extra_zero_claims.push(diff_id);
-                for ids in term_ids.iter_mut() {
-                    for id in ids.iter_mut() {
-                        if *id == vid {
-                            *id = committed_id;
-                        }
-                    }
-                    ids.sort();
-                }
-            }
+            // Pass 1 intentionally preserves virtual linear factors (e.g., a+b).
+            // Verifier mirrors prover behavior and does not introduce standalone
+            // commitments for these virtual factors.
+            let virtual_factor_refs = term_ids
+                .iter()
+                .flat_map(|ids| ids.iter())
+                .filter(|id| {
+                    !tracker
+                        .state
+                        .oracle_is_material
+                        .get(*id)
+                        .copied()
+                        .unwrap_or(false)
+                })
+                .count();
+            debug!(
+                claim_id = ?poly_id,
+                virtual_factor_refs,
+                "sumcheck degree reduction kept virtual linear factors intact"
+            );
 
             // Pass 2: Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
             let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();
