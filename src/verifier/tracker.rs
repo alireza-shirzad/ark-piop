@@ -15,7 +15,9 @@ use crate::{
     },
     verifier::structs::oracle::InnerOracle,
 };
+use ark_ff::PrimeField;
 use ark_std::{One, Zero};
+use either::Either;
 use itertools::MultiUnzip;
 use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
 use tracing::trace;
@@ -785,6 +787,77 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             Some(poly) => Ok(poly.clone()),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
         }
+    }
+
+    pub fn get_or_build_contig_one_oracle(
+        &mut self,
+        nv: usize,
+        s: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        let label = format!("contig_one_nv{}_s{}", nv, s);
+        if let Some(oracle) = self.state.indexed_tracked_oracles.get(&label) {
+            return Ok(oracle.clone());
+        }
+
+        let total = 1usize << nv;
+        if s > total {
+            return Err(SnarkError::SetupError(NoRangePoly(format!(
+                "contig_one_oracle has s > 2^nv: s={}, nv={}",
+                s, nv
+            ))));
+        }
+
+        let oracle = if s == total {
+            Oracle::new_constant(nv, B::F::one())
+        } else {
+            let bits_msb: Vec<bool> = (0..nv)
+                .map(|i| ((s >> (nv - 1 - i)) & 1) == 1)
+                .collect();
+            Oracle::new_multivariate(nv, move |mut point: Vec<B::F>| {
+                if point.len() > nv {
+                    point.truncate(nv);
+                } else if point.len() < nv {
+                    point.resize(nv, B::F::zero());
+                }
+
+                let one = B::F::one();
+                let mut prefix = one;
+                let mut acc = B::F::zero();
+                for (i, bit) in bits_msb.iter().enumerate() {
+                    let xi = point[i];
+                    if *bit {
+                        acc += prefix * (one - xi);
+                        prefix *= xi;
+                    } else {
+                        prefix *= one - xi;
+                    }
+                }
+                Ok(acc)
+            })
+        };
+
+        let tracker_rc = self
+            .state
+            .indexed_tracked_oracles
+            .values()
+            .next()
+            .map(|oracle| oracle.tracker())
+            .ok_or_else(|| {
+                SnarkError::SetupError(NoRangePoly(
+                    "contig_one_oracle requires a tracker handle; indexed_tracked_oracles is empty"
+                        .to_string(),
+                ))
+            })?;
+
+        let oracle_id = self.track_oracle(oracle);
+        let tracked = TrackedOracle::new(Either::Left(oracle_id), tracker_rc, nv);
+        self.state
+            .indexed_tracked_oracles
+            .insert(label, tracked.clone());
+        Ok(tracked)
     }
 
     pub fn prover_comm(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {

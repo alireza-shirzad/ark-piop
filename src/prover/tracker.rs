@@ -40,6 +40,7 @@ use ark_std::One;
 use ark_std::Zero;
 use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
+use either::Either;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -817,6 +818,14 @@ where
         self.state.miscellaneous_field_elements.insert(key, field);
     }
 
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
+        self.state
+            .miscellaneous_field_elements
+            .get(label)
+            .cloned()
+            .ok_or(SnarkError::DummyError)
+    }
+
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate
@@ -1057,6 +1066,49 @@ where
         Ok((sc_proof, sc_aux_info))
     }
 
+    pub fn get_or_build_contig_one_poly(
+        &mut self,
+        nv: usize,
+        s: usize,
+    ) -> SnarkResult<TrackedPoly<B>> {
+        let label = format!("contig_one_nv{}_s{}", nv, s);
+        if let Some(poly) = self.state.indexed_tracked_polys.get(&label) {
+            return Ok(poly.clone());
+        }
+
+        let total = 1usize << nv;
+        if s > total {
+            return Err(SnarkError::SetupError(NoRangePoly(format!(
+                "contig_one_poly has s > 2^nv: s={}, nv={}",
+                s, nv
+            ))));
+        }
+
+        let mut evals = vec![B::F::zero(); total];
+        evals[..s].fill(B::F::one());
+        let mle = MLE::from_evaluations_vec(nv, evals);
+        let poly_id = self.track_mat_mv_poly(mle);
+
+        let tracker_rc = self
+            .state
+            .indexed_tracked_polys
+            .values()
+            .next()
+            .map(|poly| poly.tracker())
+            .ok_or_else(|| {
+                SnarkError::SetupError(NoRangePoly(
+                    "contig_one_poly requires a tracker handle; indexed_tracked_polys is empty"
+                        .to_string(),
+                ))
+            })?;
+
+        let tracked = TrackedPoly::new(Either::Left(poly_id), nv, tracker_rc);
+        self.state
+            .indexed_tracked_polys
+            .insert(label, tracked.clone());
+        Ok(tracked)
+    }
+
     /// Deterministically reduces the degree of the single aggregated sumcheck claim.
     ///
     /// Algorithm:
@@ -1110,10 +1162,7 @@ where
                 true
             } else if let Some(vpoly) = tracker.virt_poly(id) {
                 vpoly.iter().all(|(_, term)| {
-                    term.len() <= 1
-                        && term
-                            .iter()
-                            .all(|child| is_atom(tracker, *child, memo))
+                    term.len() <= 1 && term.iter().all(|child| is_atom(tracker, *child, memo))
                 })
             } else {
                 false
@@ -1232,13 +1281,13 @@ where
                 None => return Ok(poly_id),
             };
 
-            let mut expand_memo: BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>> =
-                BTreeMap::new();
+            let mut expand_memo: BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>> = BTreeMap::new();
             let mut terms: Vec<(B::F, Vec<TrackerID>)> = Vec::new();
             for (coeff, ids) in virt_poly.iter() {
                 let mut acc: Vec<(B::F, Vec<TrackerID>)> = vec![(B::F::one(), Vec::new())];
                 for factor_id in ids.iter().copied() {
-                    let expanded = expand_to_atoms(tracker, factor_id, atom_cache, &mut expand_memo);
+                    let expanded =
+                        expand_to_atoms(tracker, factor_id, atom_cache, &mut expand_memo);
                     let mut next: Vec<(B::F, Vec<TrackerID>)> =
                         Vec::with_capacity(acc.len() * expanded.len());
                     for (lhs_coeff, lhs_ids) in acc.into_iter() {
@@ -1355,7 +1404,10 @@ where
                 )?;
 
                 let mut replaced_in_round = 0usize;
-                for (_, ids) in terms.iter_mut().filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE) {
+                for (_, ids) in terms
+                    .iter_mut()
+                    .filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                {
                     while ids.len() > MAX_TERM_DEGREE {
                         let Some(pos) = find_subslice(ids, &chosen) else {
                             break;
@@ -1365,8 +1417,9 @@ where
                     }
                 }
                 if replaced_in_round == 0 {
-                    if let Some((_, ids)) =
-                        terms.iter_mut().find(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                    if let Some((_, ids)) = terms
+                        .iter_mut()
+                        .find(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
                     {
                         ids.splice(0..MAX_TERM_DEGREE, [committed_id]);
                         replaced_in_round = 1;

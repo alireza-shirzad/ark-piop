@@ -9,12 +9,17 @@ use structs::oracle::{Oracle, TrackedOracle};
 use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
-    SnarkBackend, errors::SnarkResult, pcs::PolynomialCommitment, prover::structs::proof::SNARKProof,
+    SnarkBackend,
+    errors::SnarkResult,
+    pcs::PolynomialCommitment,
     piop::{PIOP, lookup_check},
-    setup::structs::SNARKVk, structs::TrackerID,
+    prover::structs::proof::SNARKProof,
+    setup::structs::SNARKVk,
+    structs::TrackerID,
 };
 
 use crate::pcs::PCS;
+use ark_ff::PrimeField;
 use derivative::Derivative;
 
 use tracker::VerifierTracker;
@@ -134,6 +139,19 @@ where
         )
     }
 
+    pub fn get_or_build_contig_one_oracle(
+        &mut self,
+        nv: usize,
+        s: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        self.tracker_rc
+            .borrow_mut()
+            .get_or_build_contig_one_oracle(nv, s)
+    }
+
     #[instrument(level = "debug", skip_all)]
     pub fn peek_next_id(&mut self) -> TrackerID {
         self.tracker_rc.borrow_mut().peek_next_id()
@@ -189,7 +207,9 @@ where
         super_id: TrackerID,
         sub_id: TrackerID,
     ) -> SnarkResult<()> {
-        self.tracker_rc.borrow_mut().add_mv_lookup_claim(super_id, sub_id)
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_lookup_claim(super_id, sub_id)
     }
 
     #[instrument(level = "debug", skip(self))]

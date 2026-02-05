@@ -280,6 +280,10 @@ where
         Ok(())
     }
 
+    pub fn miscellaneous_field_element(&self, key: &str) -> SnarkResult<B::F> {
+        self.tracker_rc.borrow().miscellaneous_field_element(key)
+    }
+
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
@@ -397,6 +401,16 @@ where
         }
 
         Ok(())
+    }
+
+    pub fn get_or_build_contig_one_poly(
+        &mut self,
+        nv: usize,
+        s: usize,
+    ) -> SnarkResult<TrackedPoly<B>> {
+        self.tracker_rc
+            .borrow_mut()
+            .get_or_build_contig_one_poly(nv, s)
     }
 
     /// Build the zkSQL proof from the claims and comitments
