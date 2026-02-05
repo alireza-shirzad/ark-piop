@@ -1101,15 +1101,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Reduce high-degree product terms in the single aggregated sumcheck oracle.
+    /// Deterministically reduces the degree of the single aggregated sumcheck claim.
     ///
-    /// Deterministic two-pass reduction:
-    /// 1) Factor-aware contraction: if a term references a virtual oracle
-    ///    directly, track its commitment and replace its id. This preserves
-    ///    factorized structure when present.
-    /// 2) Reuse-first chunking on remaining oversized terms.
+    /// Verifier mirrors prover-side degree reduction:
+    /// 1) Expand each claim term only until factors are *atoms* (linear or material).
+    /// 2) Repeatedly pick the most frequent contiguous size-`LIMIT` chunk across
+    ///    oversized terms.
+    /// 3) Track a fresh commitment id for that chunk, replace chunk occurrences,
+    ///    and add zerocheck links.
     ///
-    /// This keeps the process deterministic, fast, and in sync with the prover.
+    /// The same tie-breaking/order is used to keep this fully deterministic.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
         const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
 
@@ -1123,38 +1124,154 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             "reduce_sumcheck_dgree expects exactly one sumcheck claim"
         );
 
-        let mut cache: BTreeMap<Vec<TrackerID>, TrackerID> = BTreeMap::new();
+        let mut chunk_cache: BTreeMap<Vec<TrackerID>, TrackerID> = BTreeMap::new();
+        let mut atom_cache: BTreeMap<TrackerID, bool> = BTreeMap::new();
         let mut extra_zero_claims: Vec<TrackerID> = Vec::new();
         let mut committed_chunks: usize = 0;
         let mut oversized_terms_reduced: usize = 0;
         let mut claims_reduced: usize = 0;
+        let mut rounds: usize = 0;
+        let mut replacements: usize = 0;
+        let mut expanded_terms_total: usize = 0;
+        let mut expanded_oversized_terms: usize = 0;
         let mut total_terms: usize = 0;
+
+        fn is_atom<B: SnarkBackend>(
+            tracker: &VerifierTracker<B>,
+            id: TrackerID,
+            memo: &mut BTreeMap<TrackerID, bool>,
+        ) -> bool {
+            if let Some(v) = memo.get(&id) {
+                return *v;
+            }
+            let ans = tracker
+                .state
+                .oracle_is_material
+                .get(&id)
+                .copied()
+                .unwrap_or(false)
+                || tracker
+                    .state
+                    .virtual_oracles
+                    .get(&id)
+                    .map(|voracle| {
+                        voracle.iter().all(|(_, term)| {
+                            term.len() <= 1
+                                && term.iter().all(|child| is_atom(tracker, *child, memo))
+                        })
+                    })
+                    .unwrap_or(false);
+            memo.insert(id, ans);
+            ans
+        }
+
+        fn expand_to_atoms<B: SnarkBackend>(
+            tracker: &VerifierTracker<B>,
+            id: TrackerID,
+            atom_memo: &mut BTreeMap<TrackerID, bool>,
+            expand_memo: &mut BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>>,
+        ) -> Vec<(B::F, Vec<TrackerID>)> {
+            if let Some(cached) = expand_memo.get(&id) {
+                return cached.clone();
+            }
+            if is_atom(tracker, id, atom_memo)
+                || tracker
+                    .state
+                    .oracle_is_material
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(false)
+            {
+                return vec![(B::F::one(), vec![id])];
+            }
+            let Some(voracle) = tracker.state.virtual_oracles.get(&id) else {
+                return vec![(B::F::one(), vec![id])];
+            };
+
+            let mut out: Vec<(B::F, Vec<TrackerID>)> = Vec::new();
+            for (coeff, factors) in voracle.iter() {
+                let mut acc: Vec<(B::F, Vec<TrackerID>)> = vec![(B::F::one(), Vec::new())];
+                for factor_id in factors.iter().copied() {
+                    let factor_terms =
+                        expand_to_atoms(tracker, factor_id, atom_memo, expand_memo);
+                    let mut next: Vec<(B::F, Vec<TrackerID>)> =
+                        Vec::with_capacity(acc.len() * factor_terms.len());
+                    for (lhs_coeff, lhs_ids) in acc.into_iter() {
+                        for (rhs_coeff, rhs_ids) in factor_terms.iter() {
+                            let mut ids = lhs_ids.clone();
+                            ids.extend_from_slice(rhs_ids);
+                            next.push((lhs_coeff * *rhs_coeff, ids));
+                        }
+                    }
+                    acc = next;
+                }
+                for (acc_coeff, ids) in acc.into_iter() {
+                    out.push((*coeff * acc_coeff, ids));
+                }
+            }
+            expand_memo.insert(id, out.clone());
+            out
+        }
+
+        fn find_subslice(haystack: &[TrackerID], needle: &[TrackerID]) -> Option<usize> {
+            if needle.is_empty() || haystack.len() < needle.len() {
+                return None;
+            }
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
 
         fn reduce_poly<B: SnarkBackend>(
             tracker: &mut VerifierTracker<B>,
             poly_id: TrackerID,
-            cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
+            chunk_cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
+            atom_cache: &mut BTreeMap<TrackerID, bool>,
             extra_zero_claims: &mut Vec<TrackerID>,
             committed_chunks: &mut usize,
             oversized_terms_reduced: &mut usize,
+            rounds: &mut usize,
+            replacements: &mut usize,
+            expanded_terms_total: &mut usize,
+            expanded_oversized_terms: &mut usize,
         ) -> SnarkResult<TrackerID> {
             let terms = match tracker.state.virtual_oracles.get(&poly_id) {
                 Some(terms) => terms.clone(),
                 None => return Ok(poly_id),
             };
 
-            let mut term_ids: Vec<Vec<TrackerID>> =
-                terms.iter().map(|(_, ids)| ids.clone()).collect();
-            for ids in term_ids.iter_mut() {
-                ids.sort();
+            let mut expand_memo: BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>> =
+                BTreeMap::new();
+            let mut expanded_terms: Vec<(B::F, Vec<TrackerID>)> = Vec::new();
+            for (coeff, ids) in terms.iter() {
+                let mut acc: Vec<(B::F, Vec<TrackerID>)> = vec![(B::F::one(), Vec::new())];
+                for factor_id in ids.iter().copied() {
+                    let expanded = expand_to_atoms(tracker, factor_id, atom_cache, &mut expand_memo);
+                    let mut next: Vec<(B::F, Vec<TrackerID>)> =
+                        Vec::with_capacity(acc.len() * expanded.len());
+                    for (lhs_coeff, lhs_ids) in acc.into_iter() {
+                        for (rhs_coeff, rhs_ids) in expanded.iter() {
+                            let mut joined = lhs_ids.clone();
+                            joined.extend_from_slice(rhs_ids);
+                            next.push((lhs_coeff * *rhs_coeff, joined));
+                        }
+                    }
+                    acc = next;
+                }
+                for (acc_coeff, acc_ids) in acc.into_iter() {
+                    let c = *coeff * acc_coeff;
+                    if !c.is_zero() {
+                        expanded_terms.push((c, acc_ids));
+                    }
+                }
             }
-            let claim_term_count = term_ids.len();
-            let claim_oversized = term_ids
+            let claim_term_count = expanded_terms.len();
+            let claim_oversized = expanded_terms
                 .iter()
-                .filter(|ids| ids.len() > MAX_TERM_DEGREE)
+                .filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
                 .count();
-            let claim_max_degree = term_ids.iter().map(|ids| ids.len()).max().unwrap_or(0);
+            let claim_max_degree = expanded_terms.iter().map(|(_, ids)| ids.len()).max().unwrap_or(0);
             *oversized_terms_reduced += claim_oversized;
+            *expanded_terms_total += claim_term_count;
+            *expanded_oversized_terms += claim_oversized;
             debug!(
                 claim_id = ?poly_id,
                 claim_term_count,
@@ -1163,107 +1280,41 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 "sumcheck degree reduction claim stats"
             );
 
-            // Pass 1 intentionally preserves virtual linear factors (e.g., a+b).
-            // Verifier mirrors prover behavior and does not introduce standalone
-            // commitments for these virtual factors.
-            let virtual_factor_refs = term_ids
+            let atom_refs = expanded_terms
                 .iter()
-                .flat_map(|ids| ids.iter())
-                .filter(|id| {
-                    !tracker
-                        .state
-                        .oracle_is_material
-                        .get(*id)
-                        .copied()
-                        .unwrap_or(false)
-                })
+                .flat_map(|(_, ids)| ids.iter())
+                .filter(|id| is_atom(tracker, **id, atom_cache))
                 .count();
             debug!(
                 claim_id = ?poly_id,
-                virtual_factor_refs,
-                "sumcheck degree reduction kept virtual linear factors intact"
+                atom_refs,
+                "sumcheck degree reduction atomized claim"
             );
 
-            // Pass 2: Build a global frequency map of size-MAX_TERM_DEGREE chunks across oversized terms.
-            let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();
-            for ids in term_ids.iter() {
-                if ids.len() <= MAX_TERM_DEGREE {
-                    continue;
-                }
-                for window in ids.windows(MAX_TERM_DEGREE) {
-                    let key = window.to_vec();
-                    *freq.entry(key).or_insert(0) += 1;
-                }
-            }
-
-            // Order candidates by descending frequency, then lexicographic order.
-            let mut candidates: Vec<(Vec<TrackerID>, usize)> = freq.into_iter().collect();
-            candidates.sort_by(|(a_ids, a_cnt), (b_ids, b_cnt)| {
-                b_cnt.cmp(a_cnt).then_with(|| a_ids.cmp(b_ids))
-            });
-
-            // Helper: find the first candidate chunk that is a subset of `ids`.
-            fn find_best_chunk(
-                ids: &[TrackerID],
-                candidates: &[(Vec<TrackerID>, usize)],
-            ) -> Option<Vec<TrackerID>> {
-                for (chunk, _) in candidates.iter() {
-                    // Two-pointer subset check (both sorted).
-                    let mut i = 0usize;
-                    let mut j = 0usize;
-                    while i < ids.len() && j < chunk.len() {
-                        if ids[i] == chunk[j] {
-                            i += 1;
-                            j += 1;
-                        } else if ids[i] < chunk[j] {
-                            i += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    if j == chunk.len() {
-                        return Some(chunk.clone());
-                    }
-                }
-                None
-            }
-
-            // Helper: remove the first occurrence of each element in `chunk` from `ids`.
-            fn remove_chunk(ids: &mut Vec<TrackerID>, chunk: &[TrackerID]) {
-                let mut write = 0usize;
-                let mut j = 0usize;
-                for i in 0..ids.len() {
-                    if j < chunk.len() && ids[i] == chunk[j] {
-                        j += 1;
-                    } else {
-                        ids[write] = ids[i];
-                        write += 1;
-                    }
-                }
-                ids.truncate(write);
-            }
-
-            // Track a committed chunk (if needed) and register its zerocheck constraint.
             fn track_chunk<B: SnarkBackend>(
                 tracker: &mut VerifierTracker<B>,
                 chunk: &[TrackerID],
-                cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
+                chunk_cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
                 extra_zero_claims: &mut Vec<TrackerID>,
                 committed_chunks: &mut usize,
             ) -> SnarkResult<TrackerID> {
-                if let Some(id) = cache.get(chunk).copied() {
+                if let Some(id) = chunk_cache.get(chunk).copied() {
                     return Ok(id);
                 }
 
                 let chunk_len = chunk.len();
-                let chunk_log_size = chunk
-                    .iter()
-                    .filter_map(|id| tracker.state.oracle_log_sizes.get(id).copied())
+                // Mirror prover-side behavior: chunk commitments are tracked at the
+                // global max multivariate log-size so reduced terms never mix domains.
+                let chunk_log_size = tracker
+                    .state
+                    .oracle_log_sizes
+                    .values()
+                    .copied()
                     .max()
                     .unwrap_or(0);
                 let new_id = tracker.peek_next_id();
                 let _ = tracker.track_mv_com_by_id(new_id)?;
-                cache.insert(chunk.to_vec(), new_id);
+                chunk_cache.insert(chunk.to_vec(), new_id);
                 *committed_chunks += 1;
 
                 // Add zerocheck: committed - product(chunk) == 0.
@@ -1288,34 +1339,80 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 Ok(new_id)
             }
 
-            // Greedily reduce each term using globally frequent chunks.
-            for ids in term_ids.iter_mut() {
-                while ids.len() > MAX_TERM_DEGREE {
-                    // Pick the most frequent matching chunk; otherwise fallback to the
-                    // lexicographically smallest size-MAX chunk from this term.
-                    let chunk = find_best_chunk(ids, &candidates)
-                        .or_else(|| ids.get(..MAX_TERM_DEGREE).map(|s| s.to_vec()))
-                        .expect("term must be non-empty");
-
-                    let committed_id =
-                        track_chunk(tracker, &chunk, cache, extra_zero_claims, committed_chunks)?;
-                    remove_chunk(ids, &chunk);
-                    let insert_at = ids.binary_search(&committed_id).unwrap_or_else(|i| i);
-                    ids.insert(insert_at, committed_id);
+            while expanded_terms
+                .iter()
+                .any(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+            {
+                *rounds += 1;
+                let mut freq: BTreeMap<Vec<TrackerID>, usize> = BTreeMap::new();
+                for (_, ids) in expanded_terms
+                    .iter()
+                    .filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                {
+                    for window in ids.windows(MAX_TERM_DEGREE) {
+                        *freq.entry(window.to_vec()).or_insert(0) += 1;
+                    }
                 }
+                let mut candidates: Vec<(Vec<TrackerID>, usize)> = freq.into_iter().collect();
+                candidates.sort_by(|(a_ids, a_cnt), (b_ids, b_cnt)| {
+                    b_cnt.cmp(a_cnt).then_with(|| a_ids.cmp(b_ids))
+                });
+                let chosen = if let Some((chunk, _)) = candidates.first() {
+                    chunk.clone()
+                } else {
+                    expanded_terms
+                        .iter()
+                        .find(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                        .and_then(|(_, ids)| ids.get(0..MAX_TERM_DEGREE).map(|s| s.to_vec()))
+                        .expect("at least one oversized term must exist")
+                };
+
+                let committed_id = track_chunk(
+                    tracker,
+                    &chosen,
+                    chunk_cache,
+                    extra_zero_claims,
+                    committed_chunks,
+                )?;
+
+                let mut replaced_in_round = 0usize;
+                for (_, ids) in expanded_terms
+                    .iter_mut()
+                    .filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                {
+                    while ids.len() > MAX_TERM_DEGREE {
+                        let Some(pos) = find_subslice(ids, &chosen) else {
+                            break;
+                        };
+                        ids.splice(pos..pos + chosen.len(), [committed_id]);
+                        replaced_in_round += 1;
+                    }
+                }
+                if replaced_in_round == 0 {
+                    if let Some((_, ids)) = expanded_terms
+                        .iter_mut()
+                        .find(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
+                    {
+                        ids.splice(0..MAX_TERM_DEGREE, [committed_id]);
+                        replaced_in_round = 1;
+                    }
+                }
+                *replacements += replaced_in_round;
             }
 
-            let new_log_size = term_ids
+            let new_log_size = expanded_terms
                 .iter()
-                .flat_map(|ids| {
+                .flat_map(|(_, ids)| {
                     ids.iter()
                         .filter_map(|id| tracker.state.oracle_log_sizes.get(id).copied())
                 })
                 .max()
                 .unwrap_or(0);
             let mut new_terms = VirtualOracle::new();
-            for ((coeff, _old_ids), ids) in terms.iter().zip(term_ids.into_iter()) {
-                new_terms.push((*coeff, ids));
+            for (coeff, ids) in expanded_terms.into_iter() {
+                if !coeff.is_zero() {
+                    new_terms.push((coeff, ids));
+                }
             }
             let new_id = tracker.gen_id();
             tracker.state.virtual_oracles.insert(new_id, new_terms);
@@ -1344,10 +1441,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             let new_id = reduce_poly(
                 self,
                 claim.id(),
-                &mut cache,
+                &mut chunk_cache,
+                &mut atom_cache,
                 &mut extra_zero_claims,
                 &mut committed_chunks,
                 &mut oversized_terms_reduced,
+                &mut rounds,
+                &mut replacements,
+                &mut expanded_terms_total,
+                &mut expanded_oversized_terms,
             )?;
             self.state
                 .mv_pcs_substate
@@ -1367,6 +1469,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             committed_chunks,
             extra_zerochecks_added = extra_zero_claims_len,
             oversized_terms_reduced,
+            rounds,
+            replacements,
+            expanded_terms_total,
+            expanded_oversized_terms,
             claims_reduced,
             total_terms,
             "sumcheck degree reduction stats"
