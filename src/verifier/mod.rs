@@ -66,6 +66,9 @@ where
 
     #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker_rc(tracker_rc: Rc<RefCell<VerifierTracker<B>>>) -> Self {
+        tracker_rc
+            .borrow_mut()
+            .set_self_rc(Rc::downgrade(&tracker_rc));
         Self { tracker_rc }
     }
 

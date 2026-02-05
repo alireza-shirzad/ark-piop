@@ -45,9 +45,12 @@ use either::Either;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem::take,
     panic,
+    rc::Rc,
+    rc::Weak,
     sync::Arc,
 };
 use tracing::{debug, instrument, trace};
@@ -73,6 +76,7 @@ where
 {
     pub pk: ProcessedSNARKPk<B>,
     pub state: ProverState<B>,
+    self_rc: Option<Weak<RefCell<ProverTracker<B>>>>,
 }
 
 impl<B> ProverTracker<B>
@@ -83,9 +87,14 @@ where
         let mut tracker = Self {
             pk: ProcessedSNARKPk::new_from_pk(&pk),
             state: ProverState::default(),
+            self_rc: None,
         };
         tracker.add_vk_to_transcript(pk.vk.clone());
         tracker
+    }
+
+    pub fn set_self_rc(&mut self, self_rc: Weak<RefCell<ProverTracker<B>>>) {
+        self.self_rc = Some(self_rc);
     }
 
     fn add_vk_to_transcript(&mut self, vk: SNARKVk<B>) {
@@ -1089,18 +1098,21 @@ where
         let mle = MLE::from_evaluations_vec(nv, evals);
         let poly_id = self.track_mat_mv_poly(mle);
 
-        let tracker_rc = self
-            .state
-            .indexed_tracked_polys
-            .values()
-            .next()
-            .map(|poly| poly.tracker())
-            .ok_or_else(|| {
-                SnarkError::SetupError(NoRangePoly(
-                    "contig_one_poly requires a tracker handle; indexed_tracked_polys is empty"
-                        .to_string(),
-                ))
-            })?;
+        let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {
+            poly.tracker()
+        } else if let Some(self_rc) = &self.self_rc {
+            let tracker_rc: Rc<RefCell<ProverTracker<B>>> =
+                Weak::upgrade(self_rc).ok_or_else(|| {
+                    SnarkError::SetupError(NoRangePoly(
+                        "contig_one_poly requires a tracker handle; self_rc is dead".to_string(),
+                    ))
+                })?;
+            tracker_rc
+        } else {
+            return Err(SnarkError::SetupError(NoRangePoly(
+                "contig_one_poly requires a tracker handle; none available".to_string(),
+            )));
+        };
 
         let tracked = TrackedPoly::new(Either::Left(poly_id), nv, tracker_rc);
         self.state

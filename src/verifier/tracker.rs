@@ -19,7 +19,7 @@ use ark_ff::PrimeField;
 use ark_std::{One, Zero};
 use either::Either;
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, collections::BTreeMap, mem::take};
+use std::{borrow::BorrowMut, cell::RefCell, collections::BTreeMap, mem::take, rc::{Rc, Weak}};
 use tracing::trace;
 use tracing::{debug, instrument};
 
@@ -51,6 +51,7 @@ pub struct VerifierTracker<B: SnarkBackend> {
     vk: ProcessedSNARKVk<B>,
     state: VerifierState<B>,
     proof: Option<ProcessedProof<B>>,
+    self_rc: Option<Weak<RefCell<VerifierTracker<B>>>>,
 }
 
 impl<B: SnarkBackend> VerifierTracker<B> {
@@ -60,9 +61,14 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             vk: ProcessedSNARKVk::new_from_vk(&vk),
             state: VerifierState::default(),
             proof: None,
+            self_rc: None,
         };
         tracker.add_vk_to_transcript(vk);
         tracker
+    }
+
+    pub fn set_self_rc(&mut self, self_rc: Weak<RefCell<VerifierTracker<B>>>) {
+        self.self_rc = Some(self_rc);
     }
 
     fn add_vk_to_transcript(&mut self, vk: SNARKVk<B>) {
@@ -839,18 +845,21 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             })
         };
 
-        let tracker_rc = self
-            .state
-            .indexed_tracked_oracles
-            .values()
-            .next()
-            .map(|oracle| oracle.tracker())
-            .ok_or_else(|| {
-                SnarkError::SetupError(NoRangePoly(
-                    "contig_one_oracle requires a tracker handle; indexed_tracked_oracles is empty"
-                        .to_string(),
-                ))
-            })?;
+        let tracker_rc = if let Some(oracle) = self.state.indexed_tracked_oracles.values().next() {
+            oracle.tracker()
+        } else if let Some(self_rc) = &self.self_rc {
+            let tracker_rc: Rc<RefCell<VerifierTracker<B>>> =
+                Weak::upgrade(self_rc).ok_or_else(|| {
+                    SnarkError::SetupError(NoRangePoly(
+                        "contig_one_oracle requires a tracker handle; self_rc is dead".to_string(),
+                    ))
+                })?;
+            tracker_rc
+        } else {
+            return Err(SnarkError::SetupError(NoRangePoly(
+                "contig_one_oracle requires a tracker handle; none available".to_string(),
+            )));
+        };
 
         let oracle_id = self.track_oracle(oracle);
         let tracked = TrackedOracle::new(Either::Left(oracle_id), tracker_rc, nv);

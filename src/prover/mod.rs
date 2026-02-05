@@ -83,6 +83,9 @@ where
     /// Create a prover from the tracker rc
     #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker_rc(prover_tracker: Rc<RefCell<ProverTracker<B>>>) -> Self {
+        prover_tracker
+            .borrow_mut()
+            .set_self_rc(Rc::downgrade(&prover_tracker));
         Self {
             tracker_rc: prover_tracker,
         }
