@@ -69,6 +69,16 @@ where
         Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
     }
 
+    /// Create an independent verifier handle by deep-cloning the underlying tracker state.
+    ///
+    /// Unlike `Clone`, this does not share the internal `Rc<RefCell<_>>`, so mutations in one
+    /// verifier handle do not leak into another.
+    #[instrument(level = "debug", skip_all)]
+    pub fn fork(&self) -> Self {
+        let tracker = self.tracker_rc.borrow().clone();
+        Self::new_from_tracker(tracker)
+    }
+
     /// Get the range tracked oracle given the label
     #[instrument(level = "debug", skip_all)]
     pub fn indexed_oracle(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
@@ -137,6 +147,11 @@ where
     #[instrument(level = "debug", skip_all)]
     pub fn set_proof(&mut self, proof: SNARKProof<B>) {
         self.tracker_rc.borrow_mut().set_proof(proof);
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
+        self.tracker_rc.borrow_mut().set_proof_ref(proof);
     }
 
     #[instrument(level = "debug", skip(self))]

@@ -72,7 +72,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     // Set the proof for the tracker
     pub fn set_proof(&mut self, proof: SNARKProof<B>) {
-        self.proof = Some(ProcessedProof::new_from_proof(&proof));
+        self.set_proof_ref(&proof);
+    }
+
+    // Set the proof for the tracker from a borrowed proof
+    pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
+        self.proof = Some(ProcessedProof::new_from_proof(proof));
     }
 
     // Generate a new TrackerID
