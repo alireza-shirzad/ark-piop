@@ -819,9 +819,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let oracle = if s == total {
             Oracle::new_constant(nv, B::F::one())
         } else {
-            let bits_msb: Vec<bool> = (0..nv)
-                .map(|i| ((s >> (nv - 1 - i)) & 1) == 1)
-                .collect();
+            // MLE evaluation order is little-endian (x_0 is LSB). We compare
+            // idx(x) < s using MSB-first logic, so we iterate variables from
+            // x_{nv-1} down to x_0 while using per-variable bits from `s`.
+            let bits_lsb: Vec<bool> = (0..nv).map(|i| ((s >> i) & 1) == 1).collect();
             Oracle::new_multivariate(nv, move |mut point: Vec<B::F>| {
                 if point.len() > nv {
                     point.truncate(nv);
@@ -832,9 +833,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 let one = B::F::one();
                 let mut prefix = one;
                 let mut acc = B::F::zero();
-                for (i, bit) in bits_msb.iter().enumerate() {
+                for i in (0..nv).rev() {
+                    let bit = bits_lsb[i];
                     let xi = point[i];
-                    if *bit {
+                    if bit {
                         acc += prefix * (one - xi);
                         prefix *= xi;
                     } else {
@@ -956,8 +958,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
 
             // Track the committed chunk product and link it via a zerocheck.
-            let chunk_comm_id = self.peek_next_id();
-            let _ = self.track_mv_com_by_id(chunk_comm_id)?;
+        let chunk_comm_id = self.peek_next_id();
+        let _ = self.track_mv_com_by_id(chunk_comm_id)?;
             let diff_id = self.sub_oracles(chunk_comm_id, chunk_prod_id);
             self.add_mv_zerocheck_claim(diff_id);
 
@@ -1106,7 +1108,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     #[instrument(level = "debug", skip_all)]
     fn perform_eval_check(&mut self) -> SnarkResult<()> {
         for ((id, point), expected_eval) in &self.state.mv_pcs_substate.eval_claims {
-            if self.query_mv(*id, point.clone()).unwrap() != *expected_eval {
+            if self.query_mv(*id, point.clone())? != *expected_eval {
                 return Err(SnarkError::VerifierError(
                     crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
                         "Evaluation check failed for id: {}, point: {:?}, expected eval: {:?}",
@@ -1388,7 +1390,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 let _ = tracker.track_mv_com_by_id(new_id)?;
                 chunk_cache.insert(chunk.to_vec(), new_id);
                 *committed_chunks += 1;
-
                 // Add zerocheck: committed - product(chunk) == 0.
                 let prod_id = {
                     let id = tracker.gen_id();

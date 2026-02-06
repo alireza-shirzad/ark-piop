@@ -862,9 +862,9 @@ where
         let first_id = poly[0].1[0];
         let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
 
-        // Optimize away linear combinations of committed polynomials by materializing
-        // them into fresh MLEs (no new commitments). Identical linear combos are
-        // deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
+        // Optimize away linear combinations of committed polynomials by
+        // materializing them into fresh MLEs (no new commitments). Identical
+        // linear combos are deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
         let (poly_terms, optimized_terms) = self.optimize_linear_terms(poly, nv);
 
         let mut arith_virt_poly: HPVirtualPolynomial<B::F> = HPVirtualPolynomial::new(nv);
@@ -902,6 +902,7 @@ where
         let mut optimized_terms: Vec<(B::F, Vec<Arc<MLE<B::F>>>)> = Vec::new();
 
         // context -> [(term_idx, factor_id, coeff)]
+        // We pick a single, deterministic split per term to avoid double counting.
         let mut context_map: BTreeMap<Vec<TrackerID>, Vec<(usize, TrackerID, B::F)>> =
             BTreeMap::new();
 
@@ -914,22 +915,22 @@ where
 
             let mut sorted_prod = prod.clone();
             sorted_prod.sort();
-            for pos in 0..sorted_prod.len() {
-                let factor = sorted_prod[pos];
-                let mut context = sorted_prod.clone();
-                context.remove(pos);
-                context_map
-                    .entry(context)
-                    .or_default()
-                    .push((idx, factor, *coeff));
-            }
+
+            // Deterministically choose the linear factor as the smallest id.
+            let factor = sorted_prod[0];
+            let context = sorted_prod[1..].to_vec();
+
+            context_map
+                .entry(context)
+                .or_default()
+                .push((idx, factor, *coeff));
         }
 
         // Cache linear combos to deduplicate across different contexts.
         let mut linear_cache: Vec<(Vec<(TrackerID, B::F)>, Arc<MLE<B::F>>)> = Vec::new();
 
         for (context, entries) in context_map.into_iter() {
-            let mut active_entries: Vec<(usize, TrackerID, B::F)> = entries
+            let active_entries: Vec<(usize, TrackerID, B::F)> = entries
                 .into_iter()
                 .filter(|(idx, _, _)| !term_used[*idx])
                 .collect();
@@ -943,7 +944,8 @@ where
                 *signature_map.entry(*factor).or_insert_with(B::F::zero) += *coeff;
             }
             signature_map.retain(|_, c| !c.is_zero());
-            if signature_map.len() <= 1 && constant.is_zero() {
+            // Skip single-MLE linear terms (a) or degenerate combos.
+            if signature_map.len() <= 1 {
                 continue;
             }
 
@@ -957,7 +959,6 @@ where
             }
 
             let signature: Vec<(TrackerID, B::F)> = signature_map.into_iter().collect();
-            let include_constant = context.is_empty() && !constant.is_zero();
 
             // Reuse or build the linear combo MLE.
             let linear_mle = if let Some((_, mle)) =
@@ -971,10 +972,6 @@ where
                     cfg_iter_mut!(evals)
                         .zip(mle.evaluations())
                         .for_each(|(acc, v)| *acc += *coeff * v);
-                }
-                if include_constant {
-                    cfg_iter_mut!(evals).for_each(|acc| *acc += constant);
-                    constant = B::F::zero();
                 }
                 let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
                 linear_cache.push((signature.clone(), mle.clone()));
@@ -1512,7 +1509,6 @@ where
                 chunk_cache.insert(chunk.to_vec(), committed_id);
                 *committed_chunks += 1;
                 eval_cache.insert((committed_id, nv), evals);
-
                 let mut chunk_poly = VirtualPoly::new();
                 chunk_poly.push((B::F::one(), chunk.to_vec()));
                 let chunk_id = tracker.track_virt_poly(chunk_poly);
