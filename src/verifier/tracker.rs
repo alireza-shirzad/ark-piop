@@ -1075,21 +1075,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
-        if let Some(terms) = self.state.virtual_oracles.get(&sumcheck_aggr_claim.id()) {
-            let degree = self.virt_oracle_degree(sumcheck_aggr_claim.id());
-            let num_vars = self
-                .state
-                .oracle_log_sizes
-                .get(&sumcheck_aggr_claim.id())
-                .copied()
-                .unwrap_or(0);
-            debug!(
-                "Sumcheck oracle stats (verifier): terms={}, degree={}, num_vars={}",
-                terms.len(),
-                degree,
-                num_vars
-            );
-        }
 
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
