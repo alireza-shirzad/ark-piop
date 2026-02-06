@@ -862,8 +862,13 @@ where
         let first_id = poly[0].1[0];
         let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
 
+        // Optimize away linear combinations of committed polynomials by materializing
+        // them into fresh MLEs (no new commitments). Identical linear combos are
+        // deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
+        let (poly_terms, optimized_terms) = self.optimize_linear_terms(poly, nv);
+
         let mut arith_virt_poly: HPVirtualPolynomial<B::F> = HPVirtualPolynomial::new(nv);
-        for (prod_coef, prod) in poly.iter() {
+        for (prod_coef, prod) in poly_terms.iter() {
             let prod_mle_list = prod
                 .iter()
                 .map(|poly_id| self.mat_mv_poly(*poly_id).unwrap().clone())
@@ -873,7 +878,140 @@ where
                 .unwrap();
         }
 
+        for (coef, mles) in optimized_terms {
+            arith_virt_poly.add_mle_list(mles, coef).unwrap();
+        }
+
         arith_virt_poly
+    }
+
+    /// Pulls out linear terms (single committed MLEs and constants) from a virtual
+    /// polynomial and materializes them into fresh MLEs. Identical linear combos
+    /// are deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
+    fn optimize_linear_terms(
+        &self,
+        poly: &VirtualPoly<B::F>,
+        nv: usize,
+    ) -> (
+        Vec<(B::F, Vec<TrackerID>)>,
+        Vec<(B::F, Vec<Arc<MLE<B::F>>>)>,
+    ) {
+        let mut constant = B::F::zero();
+        let mut term_used = vec![false; poly.len()];
+        let mut other_terms: Vec<(B::F, Vec<TrackerID>)> = Vec::new();
+        let mut optimized_terms: Vec<(B::F, Vec<Arc<MLE<B::F>>>)> = Vec::new();
+
+        // context -> [(term_idx, factor_id, coeff)]
+        let mut context_map: BTreeMap<Vec<TrackerID>, Vec<(usize, TrackerID, B::F)>> =
+            BTreeMap::new();
+
+        for (idx, (coeff, prod)) in poly.iter().enumerate() {
+            if prod.is_empty() {
+                constant += *coeff;
+                term_used[idx] = true;
+                continue;
+            }
+
+            let mut sorted_prod = prod.clone();
+            sorted_prod.sort();
+            for pos in 0..sorted_prod.len() {
+                let factor = sorted_prod[pos];
+                let mut context = sorted_prod.clone();
+                context.remove(pos);
+                context_map
+                    .entry(context)
+                    .or_default()
+                    .push((idx, factor, *coeff));
+            }
+        }
+
+        // Cache linear combos to deduplicate across different contexts.
+        let mut linear_cache: Vec<(Vec<(TrackerID, B::F)>, Arc<MLE<B::F>>)> = Vec::new();
+
+        for (context, entries) in context_map.into_iter() {
+            let mut active_entries: Vec<(usize, TrackerID, B::F)> = entries
+                .into_iter()
+                .filter(|(idx, _, _)| !term_used[*idx])
+                .collect();
+            if active_entries.len() < 2 {
+                continue;
+            }
+
+            // Build linear combo signature for this context.
+            let mut signature_map: BTreeMap<TrackerID, B::F> = BTreeMap::new();
+            for (_, factor, coeff) in &active_entries {
+                *signature_map.entry(*factor).or_insert_with(B::F::zero) += *coeff;
+            }
+            signature_map.retain(|_, c| !c.is_zero());
+            if signature_map.len() <= 1 && constant.is_zero() {
+                continue;
+            }
+
+            // Ensure all factors have matching nv.
+            if signature_map.iter().any(|(id, _)| {
+                self.mat_mv_poly(*id)
+                    .map(|mle| mle.num_vars() != nv)
+                    .unwrap_or(true)
+            }) {
+                continue;
+            }
+
+            let signature: Vec<(TrackerID, B::F)> = signature_map.into_iter().collect();
+            let include_constant = context.is_empty() && !constant.is_zero();
+
+            // Reuse or build the linear combo MLE.
+            let linear_mle = if let Some((_, mle)) =
+                linear_cache.iter().find(|(sig, _)| *sig == signature)
+            {
+                mle.clone()
+            } else {
+                let mut evals = vec![B::F::zero(); 1 << nv];
+                for (id, coeff) in &signature {
+                    let mle = self.mat_mv_poly(*id).unwrap();
+                    cfg_iter_mut!(evals)
+                        .zip(mle.evaluations())
+                        .for_each(|(acc, v)| *acc += *coeff * v);
+                }
+                if include_constant {
+                    cfg_iter_mut!(evals).for_each(|acc| *acc += constant);
+                    constant = B::F::zero();
+                }
+                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
+                linear_cache.push((signature.clone(), mle.clone()));
+                mle
+            };
+
+            // Mark terms as used.
+            for (idx, _, _) in &active_entries {
+                term_used[*idx] = true;
+            }
+
+            // Build product: linear_mle * context_mles
+            let mut mles: Vec<Arc<MLE<B::F>>> = Vec::with_capacity(1 + context.len());
+            mles.push(linear_mle);
+            for id in &context {
+                mles.push(self.mat_mv_poly(*id).unwrap().clone());
+            }
+            optimized_terms.push((B::F::one(), mles));
+        }
+
+        // Add remaining unused terms as-is.
+        for (idx, (coeff, prod)) in poly.iter().enumerate() {
+            if !term_used[idx] {
+                other_terms.push((*coeff, prod.clone()));
+            }
+        }
+
+        // If a constant remains, materialize it as a standalone MLE.
+        if !constant.is_zero() {
+            let evals = vec![constant; 1 << nv];
+            optimized_terms.push((
+                B::F::one(),
+                vec![Arc::new(MLE::from_evaluations_vec(nv, evals))],
+            ));
+        }
+
+        (other_terms, optimized_terms)
     }
 
     /// Iterates through the materialized polynomials and increases the number
