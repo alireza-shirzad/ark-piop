@@ -75,6 +75,7 @@ where
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub num_vars: BTreeMap<TrackerID, usize>,
+    pub bench_lookup_claims_pre_reduction: usize,
 }
 
 #[derive(Derivative)]

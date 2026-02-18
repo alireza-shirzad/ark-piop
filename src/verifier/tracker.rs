@@ -19,7 +19,13 @@ use ark_ff::PrimeField;
 use ark_std::{One, Zero};
 use either::Either;
 use itertools::MultiUnzip;
-use std::{borrow::BorrowMut, cell::RefCell, collections::BTreeMap, mem::take, rc::{Rc, Weak}};
+use std::{
+    borrow::BorrowMut,
+    cell::RefCell,
+    collections::BTreeMap,
+    mem::take,
+    rc::{Rc, Weak},
+};
 use tracing::trace;
 use tracing::{debug, instrument};
 
@@ -310,12 +316,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                         let query_res = *mv_queries_clone
                             .get(&id)
                             .and_then(|queries_by_point| queries_by_point.get(point_id))
-                            .ok_or(
-                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                                id.to_int(),
-                                f_vec_short_str(&point),
-                            )),
-                        )?;
+                            .ok_or(SnarkError::VerifierError(
+                                VerifierError::OracleEvalNotProvided(
+                                    id.to_int(),
+                                    f_vec_short_str(&point),
+                                ),
+                            ))?;
                         Ok(query_res)
                     });
                 let mut terms = VirtualOracle::new();
@@ -376,12 +382,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                         let query_res = uv_queries_clone
                             .get(&id)
                             .and_then(|queries_by_point| queries_by_point.get(point_id))
-                            .ok_or(
-                            SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                                id.to_int(),
-                                point.to_string(),
-                            )),
-                        )?;
+                            .ok_or(SnarkError::VerifierError(
+                                VerifierError::OracleEvalNotProvided(
+                                    id.to_int(),
+                                    point.to_string(),
+                                ),
+                            ))?;
                         Ok(*query_res)
                     });
                 let mut terms = VirtualOracle::new();
@@ -958,8 +964,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
 
             // Track the committed chunk product and link it via a zerocheck.
-        let chunk_comm_id = self.peek_next_id();
-        let _ = self.track_mv_com_by_id(chunk_comm_id)?;
+            let chunk_comm_id = self.peek_next_id();
+            let _ = self.track_mv_com_by_id(chunk_comm_id)?;
             let diff_id = self.sub_oracles(chunk_comm_id, chunk_prod_id);
             self.add_mv_zerocheck_claim(diff_id);
 
@@ -1186,7 +1192,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     ///
     /// The same tie-breaking/order is used to keep this fully deterministic.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
-        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
+        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT - 1;
 
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
@@ -1266,8 +1272,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             for (coeff, factors) in voracle.iter() {
                 let mut acc: Vec<(B::F, Vec<TrackerID>)> = vec![(B::F::one(), Vec::new())];
                 for factor_id in factors.iter().copied() {
-                    let factor_terms =
-                        expand_to_atoms(tracker, factor_id, atom_memo, expand_memo);
+                    let factor_terms = expand_to_atoms(tracker, factor_id, atom_memo, expand_memo);
                     let mut next: Vec<(B::F, Vec<TrackerID>)> =
                         Vec::with_capacity(acc.len() * factor_terms.len());
                     for (lhs_coeff, lhs_ids) in acc.into_iter() {
@@ -1312,13 +1317,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 None => return Ok(poly_id),
             };
 
-            let mut expand_memo: BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>> =
-                BTreeMap::new();
+            let mut expand_memo: BTreeMap<TrackerID, Vec<(B::F, Vec<TrackerID>)>> = BTreeMap::new();
             let mut expanded_terms: Vec<(B::F, Vec<TrackerID>)> = Vec::new();
             for (coeff, ids) in terms.iter() {
                 let mut acc: Vec<(B::F, Vec<TrackerID>)> = vec![(B::F::one(), Vec::new())];
                 for factor_id in ids.iter().copied() {
-                    let expanded = expand_to_atoms(tracker, factor_id, atom_cache, &mut expand_memo);
+                    let expanded =
+                        expand_to_atoms(tracker, factor_id, atom_cache, &mut expand_memo);
                     let mut next: Vec<(B::F, Vec<TrackerID>)> =
                         Vec::with_capacity(acc.len() * expanded.len());
                     for (lhs_coeff, lhs_ids) in acc.into_iter() {
@@ -1342,7 +1347,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .iter()
                 .filter(|(_, ids)| ids.len() > MAX_TERM_DEGREE)
                 .count();
-            let claim_max_degree = expanded_terms.iter().map(|(_, ids)| ids.len()).max().unwrap_or(0);
+            let claim_max_degree = expanded_terms
+                .iter()
+                .map(|(_, ids)| ids.len())
+                .max()
+                .unwrap_or(0);
             *oversized_terms_reduced += claim_oversized;
             *expanded_terms_total += claim_term_count;
             *expanded_oversized_terms += claim_oversized;

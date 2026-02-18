@@ -362,7 +362,12 @@ where
 
     #[instrument(level = "debug", skip_all)]
     fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
-        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
+        let lookup_claims = {
+            let mut tracker = self.tracker_rc.borrow_mut();
+            let claims = tracker.take_lookup_claims();
+            tracker.state.bench_lookup_claims_pre_reduction = claims.len();
+            claims
+        };
         if lookup_claims.is_empty() {
             return Ok(());
         }

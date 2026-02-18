@@ -52,8 +52,22 @@ use std::{
     rc::Rc,
     rc::Weak,
     sync::Arc,
+    time::Instant,
 };
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace};
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ReduceSumcheckDegreeStats {
+    max_degree: usize,
+    num_committed: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SumcheckInvocationStats {
+    degree: usize,
+    num_terms: usize,
+    prove_time_s: f64,
+}
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
 ///  1) Recording the structure of virtual polynomials and
@@ -961,22 +975,21 @@ where
             let signature: Vec<(TrackerID, B::F)> = signature_map.into_iter().collect();
 
             // Reuse or build the linear combo MLE.
-            let linear_mle = if let Some((_, mle)) =
-                linear_cache.iter().find(|(sig, _)| *sig == signature)
-            {
-                mle.clone()
-            } else {
-                let mut evals = vec![B::F::zero(); 1 << nv];
-                for (id, coeff) in &signature {
-                    let mle = self.mat_mv_poly(*id).unwrap();
-                    cfg_iter_mut!(evals)
-                        .zip(mle.evaluations())
-                        .for_each(|(acc, v)| *acc += *coeff * v);
-                }
-                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
-                linear_cache.push((signature.clone(), mle.clone()));
-                mle
-            };
+            let linear_mle =
+                if let Some((_, mle)) = linear_cache.iter().find(|(sig, _)| *sig == signature) {
+                    mle.clone()
+                } else {
+                    let mut evals = vec![B::F::zero(); 1 << nv];
+                    for (id, coeff) in &signature {
+                        let mle = self.mat_mv_poly(*id).unwrap();
+                        cfg_iter_mut!(evals)
+                            .zip(mle.evaluations())
+                            .for_each(|(acc, v)| *acc += *coeff * v);
+                    }
+                    let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
+                    linear_cache.push((signature.clone(), mle.clone()));
+                    mle
+                };
 
             // Mark terms as used.
             for (idx, _, _) in &active_entries {
@@ -1184,7 +1197,13 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
+    fn perform_single_sumcheck(
+        &mut self,
+    ) -> SnarkResult<(
+        SumcheckProof<B::F>,
+        VPAuxInfo<B::F>,
+        SumcheckInvocationStats,
+    )> {
         assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
 
         // Get the sumcheck claim polynomial id
@@ -1205,9 +1224,15 @@ where
             sc_avp.aux_info.num_variables
         );
         let sc_aux_info = sc_avp.aux_info.clone();
+        let sc_prove_started = Instant::now();
         let sc_proof = SumCheck::prove(&sc_avp, &mut self.state.transcript)?;
+        let sumcheck_stats = SumcheckInvocationStats {
+            degree: sc_avp.aux_info.max_degree,
+            num_terms: sc_avp.products.len(),
+            prove_time_s: sc_prove_started.elapsed().as_secs_f64(),
+        };
         let _ = self.add_mv_eval_claim(sumcheck_aggr_id, &sc_proof.point);
-        Ok((sc_proof, sc_aux_info))
+        Ok((sc_proof, sc_aux_info, sumcheck_stats))
     }
 
     pub fn get_or_build_contig_one_poly(
@@ -1271,8 +1296,8 @@ where
     ///
     /// The procedure is fully deterministic (stable ordering/tie-breaks) and
     /// mirrors verifier-side reduction.
-    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
-        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT;
+    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<ReduceSumcheckDegreeStats> {
+        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT-1;
 
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
@@ -1631,7 +1656,10 @@ where
             "sumcheck degree reduction stats"
         );
 
-        Ok(())
+        Ok(ReduceSumcheckDegreeStats {
+            max_degree: crate::SUMCHECK_TERM_DEGREE_LIMIT,
+            num_committed: committed_chunks,
+        })
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -1735,6 +1763,28 @@ where
         &mut self,
         max_nv: usize,
     ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        let nonzerocheck_degrees = self
+            .state
+            .mv_pcs_substate
+            .no_zero_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+        let zerocheck_degrees = self
+            .state
+            .mv_pcs_substate
+            .zero_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+        let sumcheck_degrees = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+
         self.batch_nozero_check_claims()?;
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
@@ -1744,11 +1794,28 @@ where
         let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove",);
+            info!(
+                target: "bench_stats",
+                phase = "compile_sc_subproof_pre_batch",
+                nonzerocheck_claims = nonzerocheck_degrees.len(),
+                nonzerocheck_degree_distribution = ?nonzerocheck_degrees,
+                zerocheck_claims = zerocheck_degrees.len(),
+                zerocheck_degree_distribution = ?zerocheck_degrees,
+                sumcheck_claims = sumcheck_degrees.len(),
+                sumcheck_degree_distribution = ?sumcheck_degrees,
+                lookup_claims = self.state.bench_lookup_claims_pre_reduction,
+                reduce_degree_max_degree = 0,
+                reduce_degree_num_commited = 0,
+                sumcheck_degree = 0,
+                sumcheck_num_terms = 0,
+                sumcheck_prove_time_s = 0.0,
+                "sc_claim_counts"
+            );
             return Ok(None);
         }
 
         // Reduce high-degree terms deterministically before sumcheck.
-        self.reduce_sumcheck_dgree()?;
+        let reduce_stats = self.reduce_sumcheck_dgree()?;
 
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
@@ -1764,7 +1831,24 @@ where
         //     return Ok(None);
         // }
         // Perform the one batched sumcheck
-        let (sc_proof, sc_aux_info) = self.perform_single_sumcheck()?;
+        let (sc_proof, sc_aux_info, sumcheck_stats) = self.perform_single_sumcheck()?;
+        info!(
+            target: "bench_stats",
+            phase = "compile_sc_subproof_pre_batch",
+            nonzerocheck_claims = nonzerocheck_degrees.len(),
+            nonzerocheck_degree_distribution = ?nonzerocheck_degrees,
+            zerocheck_claims = zerocheck_degrees.len(),
+            zerocheck_degree_distribution = ?zerocheck_degrees,
+            sumcheck_claims = sumcheck_degrees.len(),
+            sumcheck_degree_distribution = ?sumcheck_degrees,
+            lookup_claims = self.state.bench_lookup_claims_pre_reduction,
+            reduce_degree_max_degree = reduce_stats.max_degree,
+            reduce_degree_num_commited = reduce_stats.num_committed,
+            sumcheck_degree = sumcheck_stats.degree,
+            sumcheck_num_terms = sumcheck_stats.num_terms,
+            sumcheck_prove_time_s = sumcheck_stats.prove_time_s,
+            "sc_claim_counts"
+        );
         // Assemble the sumcheck subproof of the prover
         let sc_subproof = SumcheckSubproof::new(
             sc_proof.clone(),
