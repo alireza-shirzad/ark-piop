@@ -1,6 +1,5 @@
 use crate::prover::structs::polynomial::TrackedPoly;
 use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
-use ark_ff::Zero;
 
 // TODO: Check if it can be optimized. Also, put in the paper
 /// Given a super column and a set of included columns, output an MLE
@@ -19,7 +18,23 @@ where
         .collect::<Vec<_>>();
     let super_col_evals = super_col.evaluations();
 
-    let super_col_nv = super_col.log_size();
+    calc_inclusion_multiplicity_from_evals::<B>(
+        &included_col_evals,
+        &super_col_evals,
+        super_col.log_size(),
+    )
+}
+
+/// Same as [`calc_inclusion_multiplicity`], but operates directly on evaluation vectors.
+/// This allows callers to pre-extract evaluations and run the computation in parallel.
+pub fn calc_inclusion_multiplicity_from_evals<B>(
+    included_col_evals: &[Vec<B::F>],
+    super_col_evals: &[B::F],
+    super_col_nv: usize,
+) -> MLE<B::F>
+where
+    B: SnarkBackend,
+{
     let super_col_len = super_col_evals.len();
 
     let included_col_mults_map = included_col_evals

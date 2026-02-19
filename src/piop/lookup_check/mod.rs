@@ -13,9 +13,8 @@ use crate::{
 };
 use ark_ff::One;
 use derivative::Derivative;
-use rayon::vec;
 use std::marker::PhantomData;
-use utils::calc_inclusion_multiplicity;
+pub use utils::{calc_inclusion_multiplicity, calc_inclusion_multiplicity_from_evals};
 
 use super::keyed_sumcheck::{KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput};
 

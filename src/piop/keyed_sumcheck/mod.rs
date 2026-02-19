@@ -266,9 +266,7 @@ fn format_tracked_oracle_ids<B: SnarkBackend>(oracles: &[TrackedOracle<B>]) -> S
     out
 }
 
-fn format_tracked_oracle_opt_ids<B: SnarkBackend>(
-    oracles: &[Option<TrackedOracle<B>>],
-) -> String {
+fn format_tracked_oracle_opt_ids<B: SnarkBackend>(oracles: &[Option<TrackedOracle<B>>]) -> String {
     let mut out = String::from("[");
     for (i, oracle) in oracles.iter().enumerate() {
         if i > 0 {
@@ -340,16 +338,8 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         debug_assert_eq!(nv, p2.log_size());
 
         // Build phat = 1/(p1-gamma) + 1/(p2-gamma).
-        let mut p1_minus_gamma: Vec<B::F> = p1
-            .evaluations()
-            .iter()
-            .map(|x| *x - gamma)
-            .collect();
-        let mut p2_minus_gamma: Vec<B::F> = p2
-            .evaluations()
-            .iter()
-            .map(|x| *x - gamma)
-            .collect();
+        let mut p1_minus_gamma: Vec<B::F> = p1.evaluations().iter().map(|x| *x - gamma).collect();
+        let mut p2_minus_gamma: Vec<B::F> = p2.evaluations().iter().map(|x| *x - gamma).collect();
         ark_ff::fields::batch_inversion(p1_minus_gamma.as_mut_slice());
         ark_ff::fields::batch_inversion(p2_minus_gamma.as_mut_slice());
 
@@ -368,8 +358,7 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         // phat*(p1-gamma)*(p2-gamma) - ((p1-gamma) + (p2-gamma)) == 0
         let p1_minus_gamma_poly = p1.clone().sub_scalar_poly(gamma);
         let p2_minus_gamma_poly = p2.clone().sub_scalar_poly(gamma);
-        let lhs =
-            &(&(&phat * &p1_minus_gamma_poly) * &p2_minus_gamma_poly) - &p1_minus_gamma_poly;
+        let lhs = &(&(&phat * &p1_minus_gamma_poly) * &p2_minus_gamma_poly) - &p1_minus_gamma_poly;
         let phat_check_poly = &lhs - &p2_minus_gamma_poly;
 
         tracker.add_mv_sumcheck_claim(phat.id(), v)?;
@@ -413,8 +402,8 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
 
         let p1_minus_gamma_oracle = p1.clone().sub_scalar_oracle(gamma);
         let p2_minus_gamma_oracle = p2.clone().sub_scalar_oracle(gamma);
-        let lhs = &(&(&phat * &p1_minus_gamma_oracle) * &p2_minus_gamma_oracle)
-            - &p1_minus_gamma_oracle;
+        let lhs =
+            &(&(&phat * &p1_minus_gamma_oracle) * &p2_minus_gamma_oracle) - &p1_minus_gamma_oracle;
         let phat_check_poly = &lhs - &p2_minus_gamma_oracle;
 
         let sum_claim_v = tracker.prover_claimed_sum(phat.id())?;

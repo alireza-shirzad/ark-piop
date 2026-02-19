@@ -298,9 +298,9 @@ fn u64_factorial(a: usize) -> u64 {
 mod test {
     use super::interpolate_uni_poly;
     use crate::{arithmetic::mat_poly::lde::LDE, piop::errors::PolyIOPErrors};
+    use ark_bn254::Fr;
     use ark_poly::{DenseUVPolynomial, Polynomial};
     use ark_std::{self, UniformRand, vec::Vec};
-    use ark_bn254::Fr;
     #[test]
     fn test_interpolation() -> Result<(), PolyIOPErrors> {
         let mut prng = ark_std::test_rng();

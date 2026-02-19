@@ -232,9 +232,9 @@ fn skip_leading_zeros<F: PrimeField, P: DenseUVPolynomial<F>>(p: &P) -> (usize, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_bn254::Bn254;
     use ark_std::UniformRand;
     use ark_std::test_rng;
-    use ark_bn254::Bn254;
     fn end_to_end_test_template<E>() -> SnarkResult<()>
     where
         E: Pairing,

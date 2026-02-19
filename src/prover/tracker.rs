@@ -1297,7 +1297,7 @@ where
     /// The procedure is fully deterministic (stable ordering/tie-breaks) and
     /// mirrors verifier-side reduction.
     fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<ReduceSumcheckDegreeStats> {
-        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT-1;
+        const MAX_TERM_DEGREE: usize = crate::SUMCHECK_TERM_DEGREE_LIMIT - 1;
 
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),

@@ -21,9 +21,12 @@ use crate::{
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
+use ark_std::cfg_into_iter;
 use derivative::Derivative;
 use either::Either;
 use indexmap::IndexMap;
+#[cfg(feature = "parallel")]
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tracing::{Span, field::debug, info, instrument, trace};
 
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
@@ -388,6 +391,9 @@ where
             );
         }
 
+        let mut hinted_inputs = Vec::with_capacity(by_super.len());
+        let mut multiplicity_jobs = Vec::with_capacity(by_super.len());
+
         for (super_id, sub_ids) in by_super {
             let super_nv = self.tracker_rc.borrow().poly_nv(super_id);
             let super_col =
@@ -401,11 +407,51 @@ where
                 })
                 .collect::<Vec<_>>();
 
-            let lookup_prover_input = lookup_check::LookupCheckProverInput {
+            let super_col_evals = super_col.evaluations();
+            let included_col_evals = included_cols
+                .iter()
+                .map(TrackedPoly::evaluations)
+                .collect::<Vec<_>>();
+
+            hinted_inputs.push((included_cols, super_col));
+            multiplicity_jobs.push((super_nv, included_col_evals, super_col_evals));
+        }
+
+        let mv_pcs_prover_param = self.mv_pcs_prover_param();
+        let super_col_m_polys_and_commitments = cfg_into_iter!(multiplicity_jobs)
+            .map(|(super_col_nv, included_col_evals, super_col_evals)| {
+                let super_col_m_mle =
+                    Arc::new(lookup_check::calc_inclusion_multiplicity_from_evals::<B>(
+                        &included_col_evals,
+                        &super_col_evals,
+                        super_col_nv,
+                    ));
+                let super_col_m_commitment =
+                    B::MvPCS::commit(mv_pcs_prover_param.as_ref(), &super_col_m_mle)?;
+                Ok::<(Arc<MLE<B::F>>, <B::MvPCS as PCS<B::F>>::Commitment), _>((
+                    super_col_m_mle,
+                    super_col_m_commitment,
+                ))
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect::<SnarkResult<Vec<_>>>()?;
+
+        for ((included_cols, super_col), (super_col_m_mle, super_col_m_commitment)) in hinted_inputs
+            .into_iter()
+            .zip(super_col_m_polys_and_commitments)
+        {
+            let super_col_multiplicity = self.track_mat_mv_poly_with_commitment(
+                super_col_m_mle.as_ref(),
+                super_col_m_commitment,
+            )?;
+
+            let lookup_prover_input = lookup_check::HintedLookupCheckProverInput {
                 included_cols,
                 super_col,
+                super_col_multiplicity,
             };
-            lookup_check::LookupCheckPIOP::prove(self, lookup_prover_input)?;
+            lookup_check::HintedLookupCheckPIOP::prove(self, lookup_prover_input)?;
         }
 
         Ok(())

@@ -141,11 +141,8 @@ pub fn init_subscriber() {
             );
         }
         if !rust_log.contains("sqlparser") {
-            env_filter = env_filter.add_directive(
-                "sqlparser=off"
-                    .parse()
-                    .expect("parse sqlparser directive"),
-            );
+            env_filter = env_filter
+                .add_directive("sqlparser=off".parse().expect("parse sqlparser directive"));
         }
 
         // Layer 1: tree test output to stdout (test writer)

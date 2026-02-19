@@ -1,18 +1,21 @@
 use crate::{
-    SnarkBackend, errors::SnarkResult, pcs::PCS, structs::TrackerID,
+    SnarkBackend,
+    errors::SnarkResult,
+    pcs::PCS,
+    structs::TrackerID,
     verifier::{ArgVerifier, tracker::VerifierTracker},
 };
 use ark_ff::{Field, PrimeField};
-use ark_std::{One, Zero};
 use ark_std::fmt::Debug;
+use ark_std::{One, Zero};
 use derivative::Derivative;
 use either::Either;
 use std::ops::MulAssign;
 use std::{
     cell::RefCell,
-    slice,
     ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign},
     rc::Rc,
+    slice,
     sync::Arc,
 };
 
@@ -369,7 +372,6 @@ where
             Either::Right(c) => Either::Right(*c * scalar),
         }
     }
-
 }
 
 // ====================== Operator Trait Implementations ======================
@@ -402,7 +404,6 @@ impl<'a, 'b, B: SnarkBackend> Mul<&'b TrackedOracle<B>> for &'a TrackedOracle<B>
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 }
-
 
 impl<B: SnarkBackend> Add<B::F> for TrackedOracle<B> {
     type Output = TrackedOracle<B>;

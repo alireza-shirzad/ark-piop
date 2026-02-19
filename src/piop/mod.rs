@@ -12,10 +12,10 @@ use crate::{
     verifier::ArgVerifier,
 };
 pub mod errors;
-pub mod structs;
-pub mod sum_check;
 pub mod keyed_sumcheck;
 pub mod lookup_check;
+pub mod structs;
+pub mod sum_check;
 /// Any PIOP must implement this trait.
 /// Helper to get a type name without generic parameters.
 #[inline]

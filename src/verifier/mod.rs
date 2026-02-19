@@ -291,11 +291,16 @@ where
                 .into_iter()
                 .map(|sub_id| self.tracked_oracle_from_id(sub_id))
                 .collect::<SnarkResult<Vec<_>>>()?;
-            let lookup_verifier_input = lookup_check::LookupCheckVerifierInput {
+
+            let super_col_multiplicity_id = self.peek_next_id();
+            let super_col_multiplicity = self.track_mv_com_by_id(super_col_multiplicity_id)?;
+
+            let lookup_verifier_input = lookup_check::HintedLookupCheckVerifierInput {
                 included_tracked_col_oracles: included_cols,
                 super_tracked_col_oracle: super_col,
+                super_col_multiplicity,
             };
-            lookup_check::LookupCheckPIOP::verify(self, lookup_verifier_input)?;
+            lookup_check::HintedLookupCheckPIOP::verify(self, lookup_verifier_input)?;
         }
 
         Ok(())
