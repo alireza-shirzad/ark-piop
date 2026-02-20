@@ -460,11 +460,20 @@ where
     pub fn get_or_build_contig_one_poly(
         &mut self,
         nv: usize,
+        n: usize,
+    ) -> SnarkResult<TrackedPoly<B>> {
+        self.get_or_build_contig_skipped_one_poly(nv, n, 0)
+    }
+
+    pub fn get_or_build_contig_skipped_one_poly(
+        &mut self,
+        nv: usize,
+        n: usize,
         s: usize,
     ) -> SnarkResult<TrackedPoly<B>> {
         self.tracker_rc
             .borrow_mut()
-            .get_or_build_contig_one_poly(nv, s)
+            .get_or_build_contig_skipped_one_poly(nv, n, s)
     }
 
     /// Build the zkSQL proof from the claims and comitments

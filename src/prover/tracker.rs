@@ -1238,23 +1238,38 @@ where
     pub fn get_or_build_contig_one_poly(
         &mut self,
         nv: usize,
+        n: usize,
+    ) -> SnarkResult<TrackedPoly<B>> {
+        self.get_or_build_contig_skipped_one_poly(nv, n, 0)
+    }
+
+    pub fn get_or_build_contig_skipped_one_poly(
+        &mut self,
+        nv: usize,
+        n: usize,
         s: usize,
     ) -> SnarkResult<TrackedPoly<B>> {
-        let label = format!("contig_one_nv{}_s{}", nv, s);
+        let label = format!("contig_one_nv{}_skip{}_n{}", nv, s, n);
         if let Some(poly) = self.state.indexed_tracked_polys.get(&label) {
             return Ok(poly.clone());
         }
 
         let total = 1usize << nv;
-        if s > total {
+        let end = s.checked_add(n).ok_or_else(|| {
+            SnarkError::SetupError(NoRangePoly(format!(
+                "contig_one_poly has overflow in s + n: s={}, n={}, nv={}",
+                s, n, nv
+            )))
+        })?;
+        if end > total {
             return Err(SnarkError::SetupError(NoRangePoly(format!(
-                "contig_one_poly has s > 2^nv: s={}, nv={}",
-                s, nv
+                "contig_one_poly has s + n > 2^nv: s={}, n={}, nv={}",
+                s, n, nv
             ))));
         }
 
         let mut evals = vec![B::F::zero(); total];
-        evals[..s].fill(B::F::one());
+        evals[s..end].fill(B::F::one());
         let mle = MLE::from_evaluations_vec(nv, evals);
         let poly_id = self.track_mat_mv_poly(mle);
 
