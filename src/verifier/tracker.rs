@@ -41,6 +41,25 @@ use super::{
 use derivative::Derivative;
 use indexmap::IndexMap;
 
+fn eval_lt_bound<F: PrimeField>(point: &[F], bits_lsb: &[bool], nv: usize) -> F {
+    debug_assert_eq!(point.len(), nv);
+    debug_assert_eq!(bits_lsb.len(), nv);
+    let one = F::one();
+    let mut prefix = one;
+    let mut acc = F::zero();
+    for i in (0..nv).rev() {
+        let bit = bits_lsb[i];
+        let xi = point[i];
+        if bit {
+            acc += prefix * (one - xi);
+            prefix *= xi;
+        } else {
+            prefix *= one - xi;
+        }
+    }
+    acc
+}
+
 /// The Tracker is a data structure for creating and managing virtual
 /// commnomials and their comitments. It is in charge of  
 ///                      1) Recording the structure of virtual commnomials and
@@ -804,31 +823,53 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn get_or_build_contig_one_oracle(
         &mut self,
         nv: usize,
+        n: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        self.get_or_build_contig_skipped_one_oracle(nv, n, 0)
+    }
+
+    pub fn get_or_build_contig_skipped_one_oracle(
+        &mut self,
+        nv: usize,
+        n: usize,
         s: usize,
     ) -> SnarkResult<TrackedOracle<B>>
     where
         B::F: PrimeField,
     {
-        let label = format!("contig_one_nv{}_s{}", nv, s);
+        let label = format!("contig_one_nv{}_skip{}_n{}", nv, s, n);
         if let Some(oracle) = self.state.indexed_tracked_oracles.get(&label) {
             return Ok(oracle.clone());
         }
 
         let total = 1usize << nv;
-        if s > total {
+        let end = s.checked_add(n).ok_or_else(|| {
+            SnarkError::SetupError(NoRangePoly(format!(
+                "contig_one_oracle has overflow in s + n: s={}, n={}, nv={}",
+                s, n, nv
+            )))
+        })?;
+        if end > total {
             return Err(SnarkError::SetupError(NoRangePoly(format!(
-                "contig_one_oracle has s > 2^nv: s={}, nv={}",
-                s, nv
+                "contig_one_oracle has s + n > 2^nv: s={}, n={}, nv={}",
+                s, n, nv
             ))));
         }
 
-        let oracle = if s == total {
+        let oracle = if n == 0 {
+            Oracle::new_constant(nv, B::F::zero())
+        } else if s == 0 && n == total {
             Oracle::new_constant(nv, B::F::one())
         } else {
             // MLE evaluation order is little-endian (x_0 is LSB). We compare
-            // idx(x) < s using MSB-first logic, so we iterate variables from
-            // x_{nv-1} down to x_0 while using per-variable bits from `s`.
-            let bits_lsb: Vec<bool> = (0..nv).map(|i| ((s >> i) & 1) == 1).collect();
+            // idx(x) < bound using MSB-first logic, so we iterate x_{nv-1}..x_0.
+            let start_bits_lsb: Vec<bool> = (0..nv).map(|i| ((s >> i) & 1) == 1).collect();
+            let end_bits_lsb: Vec<bool> = (0..nv).map(|i| ((end >> i) & 1) == 1).collect();
+            let start_is_zero = s == 0;
+            let end_is_total = end == total;
             Oracle::new_multivariate(nv, move |mut point: Vec<B::F>| {
                 if point.len() > nv {
                     point.truncate(nv);
@@ -836,20 +877,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     point.resize(nv, B::F::zero());
                 }
 
-                let one = B::F::one();
-                let mut prefix = one;
-                let mut acc = B::F::zero();
-                for i in (0..nv).rev() {
-                    let bit = bits_lsb[i];
-                    let xi = point[i];
-                    if bit {
-                        acc += prefix * (one - xi);
-                        prefix *= xi;
-                    } else {
-                        prefix *= one - xi;
-                    }
-                }
-                Ok(acc)
+                let lt_end = if end_is_total {
+                    B::F::one()
+                } else {
+                    eval_lt_bound::<B::F>(&point, &end_bits_lsb, nv)
+                };
+                let lt_start = if start_is_zero {
+                    B::F::zero()
+                } else {
+                    eval_lt_bound::<B::F>(&point, &start_bits_lsb, nv)
+                };
+                Ok(lt_end - lt_start)
             })
         };
 

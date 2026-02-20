@@ -145,6 +145,18 @@ where
     pub fn get_or_build_contig_one_oracle(
         &mut self,
         nv: usize,
+        n: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        self.get_or_build_contig_skipped_one_oracle(nv, n, 0)
+    }
+
+    pub fn get_or_build_contig_skipped_one_oracle(
+        &mut self,
+        nv: usize,
+        n: usize,
         s: usize,
     ) -> SnarkResult<TrackedOracle<B>>
     where
@@ -152,7 +164,7 @@ where
     {
         self.tracker_rc
             .borrow_mut()
-            .get_or_build_contig_one_oracle(nv, s)
+            .get_or_build_contig_skipped_one_oracle(nv, n, s)
     }
 
     #[instrument(level = "debug", skip_all)]
