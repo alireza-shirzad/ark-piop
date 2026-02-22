@@ -810,7 +810,23 @@ where
             let sub_evals = self.evaluations(sub_id);
             let super_eval_set: HashSet<B::F> = super_evals.into_iter().collect();
             if cfg_iter!(sub_evals).any(|eval| !super_eval_set.contains(eval)) {
-                tracing::error!("error");
+                let mut missing_examples = Vec::new();
+                let mut missing_count = 0usize;
+                for eval in sub_evals.iter() {
+                    if !super_eval_set.contains(eval) {
+                        missing_count += 1;
+                        if missing_examples.len() < 4 {
+                            missing_examples.push(*eval);
+                        }
+                    }
+                }
+                tracing::error!(
+                    ?super_id,
+                    ?sub_id,
+                    missing_count,
+                    ?missing_examples,
+                    "add_mv_lookup_claim honest subset failed"
+                );
                 return Err(ProverError(HonestProverError(FalseClaim)));
             }
         }
