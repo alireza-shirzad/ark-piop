@@ -22,7 +22,7 @@ use itertools::MultiUnzip;
 use std::{
     borrow::BorrowMut,
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     mem::take,
     rc::{Rc, Weak},
 };
@@ -705,18 +705,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .ok_or(SnarkError::DummyError)
     }
     pub fn query_mv(&self, oracle_id: TrackerID, point: Vec<B::F>) -> SnarkResult<B::F> {
-        let mut equalized_point = point.clone();
-        equalized_point.resize(
-            self.proof
-                .as_ref()
-                .unwrap()
-                .sc_subproof
-                .as_ref()
-                .expect("No sumcheck subproof in the proof")
-                .sc_aux_info()
-                .num_variables,
-            B::F::zero(),
-        );
+        let equalized_point = self.equalized_mv_point(&point);
         self.eval_virtual_mv(oracle_id, &equalized_point)
     }
     pub fn query_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
@@ -794,6 +783,57 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .eval_claims
             .insert(((poly_id, point.to_vec()), eval));
         Ok(())
+    }
+
+    fn equalized_mv_point(&self, point: &[B::F]) -> Vec<B::F> {
+        let target_nv = self
+            .proof
+            .as_ref()
+            .unwrap()
+            .sc_subproof
+            .as_ref()
+            .expect("No sumcheck subproof in the proof")
+            .sc_aux_info()
+            .num_variables;
+        if point.len() == target_nv {
+            return point.to_vec();
+        }
+        let mut equalized = point.to_vec();
+        equalized.resize(target_nv, B::F::zero());
+        equalized
+    }
+
+    fn eval_virtual_mv_cached(
+        &self,
+        oracle_id: TrackerID,
+        point: &Vec<B::F>,
+        cache: &mut HashMap<TrackerID, B::F>,
+    ) -> SnarkResult<B::F> {
+        if let Some(v) = cache.get(&oracle_id) {
+            return Ok(*v);
+        }
+        let terms = self
+            .state
+            .virtual_oracles
+            .get(&oracle_id)
+            .ok_or(SnarkError::DummyError)?;
+        let mut acc = B::F::zero();
+        for (coeff, term_ids) in terms.iter() {
+            let mut term_val = *coeff;
+            for id in term_ids {
+                let v = if let Some(v) = cache.get(id) {
+                    *v
+                } else {
+                    let v = self.eval_base_mv(*id, point)?;
+                    cache.insert(*id, v);
+                    v
+                };
+                term_val *= v;
+            }
+            acc += term_val;
+        }
+        cache.insert(oracle_id, acc);
+        Ok(acc)
     }
 
     // Set range comitments for the tracker
@@ -1151,7 +1191,33 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn perform_eval_check(&mut self) -> SnarkResult<()> {
-        for ((id, point), expected_eval) in &self.state.mv_pcs_substate.eval_claims {
+        let claims = &self.state.mv_pcs_substate.eval_claims;
+        if claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut iter = claims.iter();
+        let (first_key, _) = iter.next().expect("non-empty eval claims");
+        let (_, first_point) = first_key;
+        let all_same_point = iter.all(|((_, point), _)| point == first_point);
+
+        if all_same_point {
+            let equalized = self.equalized_mv_point(first_point);
+            let mut cache: HashMap<TrackerID, B::F> = HashMap::new();
+            for ((id, _point), expected_eval) in claims {
+                if self.eval_virtual_mv_cached(*id, &equalized, &mut cache)? != *expected_eval {
+                    return Err(SnarkError::VerifierError(
+                        crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
+                            "Evaluation check failed for id: {}, point: {:?}, expected eval: {:?}",
+                            id, first_point, expected_eval
+                        )),
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        for ((id, point), expected_eval) in claims {
             if self.query_mv(*id, point.clone())? != *expected_eval {
                 return Err(SnarkError::VerifierError(
                     crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
