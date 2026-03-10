@@ -272,7 +272,7 @@ where
     }
 
     /// Sample a fiat-shamir challenge and append it to the transcript
-    #[instrument(level = "debug", skip(self))]
+    #[instrument(level = "trace", skip(self))]
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
         trace!(?res, "challenge");
