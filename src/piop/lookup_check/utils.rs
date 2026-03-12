@@ -40,7 +40,7 @@ where
     let included_col_mults_map = included_col_evals
         .iter()
         .map(|evals| vec_multiplicity_count::<B::F>(evals, None))
-        .fold(HashMap::<B::F, u64>::new(), |mut acc, map| {
+        .fold(IndexMap::<B::F, u64>::new(), |mut acc, map| {
             for (val, count) in map {
                 *acc.entry(val).or_insert(0) += count;
             }
@@ -58,15 +58,15 @@ where
 }
 
 use ark_ff::PrimeField;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 
 // Returns a map from the unique evaluations of col to their multiplicities
 // does not include values where the selector is zero
-fn vec_multiplicity_count<F>(poly: &[F], sel: Option<&[F]>) -> HashMap<F, u64>
+fn vec_multiplicity_count<F>(poly: &[F], sel: Option<&[F]>) -> IndexMap<F, u64>
 where
     F: PrimeField,
 {
-    let mut mults_map = HashMap::<F, u64>::new();
+    let mut mults_map = IndexMap::<F, u64>::new();
 
     if let Some(sel) = sel {
         for (i, &val) in poly.iter().enumerate() {

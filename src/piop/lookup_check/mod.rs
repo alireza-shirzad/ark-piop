@@ -91,14 +91,14 @@ impl<B: SnarkBackend> PIOP<B> for HintedLookupCheckPIOP<B> {
 
     #[cfg(feature = "honest-prover")]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<()> {
-        use std::collections::HashSet;
+        use indexmap::IndexSet;
 
         use crate::{
             errors::SnarkError,
             prover::errors::{HonestProverError, ProverError},
         };
-        let super_col_hash_set: HashSet<B::F> =
-            HashSet::from_iter(input.super_col.evaluations().iter().cloned());
+        let super_col_hash_set: IndexSet<B::F> =
+            IndexSet::from_iter(input.super_col.evaluations().iter().cloned());
         for elem in input.included_cols.iter().flat_map(|c| c.evaluations()) {
             if !super_col_hash_set.contains(&elem) {
                 tracing::error!("error");
@@ -169,15 +169,15 @@ impl<B: SnarkBackend> PIOP<B> for LookupCheckPIOP<B> {
 
     #[cfg(feature = "honest-prover")]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<()> {
-        use std::{collections::HashSet, hash::Hash};
+        use indexmap::IndexSet;
 
         use crate::{
             errors::SnarkError,
             prover::errors::{HonestProverError, ProverError},
         };
 
-        let super_col_hash_set: HashSet<B::F> =
-            HashSet::from_iter(input.super_col.evaluations().iter().cloned());
+        let super_col_hash_set: IndexSet<B::F> =
+            IndexSet::from_iter(input.super_col.evaluations().iter().cloned());
         for elem in input.included_cols.iter().flat_map(|c| c.evaluations()) {
             if !super_col_hash_set.contains(&elem) {
                 tracing::error!("error");

@@ -46,7 +46,7 @@ use either::Either;
 use rayon::prelude::*;
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     mem::take,
     panic,
     rc::Rc,
@@ -421,16 +421,16 @@ where
     /// Return the max multiplicative degree (max number of MLEs in any product)
     /// of the virtual-poly tree rooted at `id`, matching HPVirtualPolynomial::max_degree.
     pub fn virt_poly_degree(&self, id: TrackerID) -> usize {
-        let mut memo = HashMap::new();
-        let mut visiting = HashSet::new();
+        let mut memo = BTreeMap::new();
+        let mut visiting = BTreeSet::new();
         self.virt_poly_degree_inner(id, &mut memo, &mut visiting)
     }
 
     fn virt_poly_degree_inner(
         &self,
         id: TrackerID,
-        memo: &mut HashMap<TrackerID, usize>,
-        visiting: &mut HashSet<TrackerID>,
+        memo: &mut BTreeMap<TrackerID, usize>,
+        visiting: &mut BTreeSet<TrackerID>,
     ) -> usize {
         if let Some(&cached) = memo.get(&id) {
             return cached;

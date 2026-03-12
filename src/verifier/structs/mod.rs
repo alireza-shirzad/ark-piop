@@ -11,10 +11,10 @@ use crate::{
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use derivative::Derivative;
-use std::collections::HashSet;
+use indexmap::IndexSet;
 ///////////// Structs & Enums ///////////
 
-pub type VerifierEvalClaimMap<F, PC> = HashSet<(
+pub type VerifierEvalClaimMap<F, PC> = IndexSet<(
     (TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point),
     F,
 )>;
