@@ -29,7 +29,12 @@ use indexmap::IndexMap;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use tracing::{Span, field::debug, info, instrument, trace};
 
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    rc::Rc,
+    sync::Arc,
+};
 use structs::proof::SNARKProof;
 use tracker::ProverTracker;
 ///////////// Body /////////////

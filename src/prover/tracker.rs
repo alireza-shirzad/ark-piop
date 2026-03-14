@@ -18,7 +18,7 @@ use crate::{
         },
     },
     errors::{SnarkError, SnarkResult},
-    pcs::PCS,
+    pcs::{PCS, PolynomialCommitment},
     piop::{structs::SumcheckProof, sum_check::SumCheck},
     setup::{
         errors::SetupError::NoRangePoly,
@@ -38,6 +38,9 @@ use ark_ff::batch_inversion;
 use ark_poly::Polynomial;
 use ark_std::One;
 use ark_std::Zero;
+use std::{
+};
+
 use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
 use either::Either;
