@@ -124,15 +124,27 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
             partial_point.len() <= self.num_vars(),
             "invalid size of partial point"
         );
-        let nv = self.num_vars();
-        let mut poly = self.evaluations().to_vec();
-        let dim = partial_point.len();
-        // evaluate single variable of partial point from left to right
-        for (i, point) in partial_point.iter().enumerate().take(dim) {
-            poly = fix_one_variable_helper(&poly, nv - i, point);
+
+        let outer_nv = self.num_vars();
+        let inner_nv = self.mat_mle.num_vars;
+
+        // When `nv > mat_mle.num_vars`, the wrapped polynomial is the whole inner
+        // evaluation vector repeated cyclically. Under the crate's existing
+        // fixing semantics, variables are consumed from the inner MLE first; the
+        // repeated outer dimensions remain virtual until the inner MLE has been
+        // fully fixed. That lets us avoid materializing the repeated evaluations:
+        // fix only the relevant prefix of the inner MLE, then keep the result
+        // wrapped over the remaining outer hypercube.
+        if outer_nv > inner_nv {
+            let inner_points = &partial_point[..partial_point.len().min(inner_nv)];
+            let fixed_inner = fix_dense_prefix_variables(&self.mat_mle, inner_points);
+            return wrap_with_outer_nv(fixed_inner, outer_nv - partial_point.len());
         }
 
-        MLE::<F>::from_evaluations_slice(nv - dim, &poly[..(1 << (nv - dim))])
+        wrap_with_outer_nv(
+            fix_dense_prefix_variables(&self.mat_mle, partial_point),
+            outer_nv - partial_point.len(),
+        )
     }
 
     fn to_evaluations(&self) -> Vec<F> {
@@ -392,4 +404,102 @@ fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F>
     res
 }
 
-// TODO: Add tests for MLE
+fn fix_dense_prefix_variables<F: Field>(
+    mle: &DenseMultilinearExtension<F>,
+    partial_point: &[F],
+) -> DenseMultilinearExtension<F> {
+    let nv = mle.num_vars;
+    let dim = partial_point.len();
+    let mut poly = mle.evaluations.clone();
+
+    // Evaluate variables from left to right, matching the pre-existing MLE
+    // fixing semantics used throughout the crate.
+    for (i, point) in partial_point.iter().enumerate().take(dim) {
+        poly = fix_one_variable_helper(&poly, nv - i, point);
+    }
+
+    DenseMultilinearExtension::from_evaluations_vec(nv - dim, poly[..(1 << (nv - dim))].to_vec())
+}
+
+fn wrap_with_outer_nv<F: Field>(mat_mle: DenseMultilinearExtension<F>, outer_nv: usize) -> MLE<F> {
+    let inner_nv = mat_mle.num_vars;
+    MLE {
+        mat_mle,
+        nv: (outer_nv > inner_nv).then_some(outer_nv),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bn254::Fr;
+
+    fn fr(value: u64) -> Fr {
+        Fr::from(value)
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_while_repetition_remains_virtual() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(1), fr(2), fr(3), fr(4)],
+            ),
+            Some(3),
+        );
+        let point = vec![fr(17)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 2);
+        assert_eq!(optimized.nv, Some(2));
+        assert_eq!(optimized.mat_mle.num_vars, 1);
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_after_crossing_repeat_boundary() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(1), fr(2), fr(3), fr(4)],
+            ),
+            Some(4),
+        );
+        let point = vec![fr(5), fr(6), fr(7)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 1);
+        assert_eq!(optimized.nv, Some(1));
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_after_inner_mle_is_fully_fixed() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(9), fr(10), fr(11), fr(12)],
+            ),
+            Some(5),
+        );
+        let point = vec![fr(3), fr(4), fr(5), fr(6)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 1);
+        assert_eq!(optimized.nv, Some(1));
+        assert_eq!(optimized.mat_mle.num_vars, 0);
+    }
+}

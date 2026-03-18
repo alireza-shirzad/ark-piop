@@ -96,22 +96,16 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
-        if prover_param.num_vars < poly.num_vars() {
+        let committed_poly = poly.mat_mle();
+        let committed_nv = committed_poly.num_vars;
+
+        if prover_param.num_vars < committed_nv {
             return Err(PCSErrors(TooLargePolynomial(
-                poly.num_vars(),
+                committed_nv,
                 prover_param.num_vars,
             )));
         }
-        let ignored = prover_param.num_vars - poly.num_vars();
-        let scalars: Vec<_> = poly.to_evaluations();
-        let commitment =
-            E::G1::msm_unchecked(&prover_param.powers_of_g[ignored].evals, scalars.as_slice())
-                .into_affine();
-
-        Ok(PST13Commitment {
-            com: commitment,
-            nv: poly.num_vars() as u8,
-        })
+        Self::commit_dense_mle(prover_param, committed_poly)
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
@@ -417,6 +411,23 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     }
 }
 
+impl<E: Pairing> PST13<E> {
+    fn commit_dense_mle(
+        prover_param: &PST13ProverParam<E>,
+        poly: &ark_poly::DenseMultilinearExtension<E::ScalarField>,
+    ) -> SnarkResult<PST13Commitment<E>> {
+        let ignored = prover_param.num_vars - poly.num_vars;
+        let commitment =
+            E::G1::msm_unchecked(&prover_param.powers_of_g[ignored].evals, &poly.evaluations)
+                .into_affine();
+
+        Ok(PST13Commitment {
+            com: commitment,
+            nv: poly.num_vars as u8,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -461,6 +472,25 @@ mod tests {
         // single-variate polynomials
         let poly2 = Arc::new(MLE::rand(1, &mut rng));
         test_single_helper(&params, &poly2, &mut rng)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_wrapped_commit_matches_inner_commit() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let (ck, _) = PST13::trim(&params, None, Some(6))?;
+
+        let inner = MLE::rand(3, &mut rng);
+        let wrapped = Arc::new(MLE::new(inner.mat_mle().clone(), Some(6)));
+        let inner = Arc::new(inner);
+
+        let wrapped_commit = PST13::commit(&ck, &wrapped)?;
+        let inner_commit = PST13::commit(&ck, &inner)?;
+
+        assert_eq!(wrapped_commit, inner_commit);
+        assert_eq!(wrapped_commit.nv, inner.num_vars() as u8);
 
         Ok(())
     }
