@@ -69,7 +69,7 @@ impl<F: Field> MLE<F> {
 
         Self {
             mat_mle: DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations),
-            nv: (num_vars > eval_num_vars).then_some(num_vars)
+            nv: (num_vars > eval_num_vars).then_some(num_vars),
         }
     }
 

@@ -80,8 +80,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
             self.challenges.push(*chal);
 
             let r = self.challenges[self.round - 1];
-            cfg_iter_mut!(flattened_ml_extensions)
-                .for_each(|mle| *mle = fix_variables(mle, &[r]));
+            cfg_iter_mut!(flattened_ml_extensions).for_each(|mle| *mle = fix_variables(mle, &[r]));
         } else if self.round > 0 {
             return Err(PolyIOPErrors::Prover(
                 "verifier message is empty".to_string(),
