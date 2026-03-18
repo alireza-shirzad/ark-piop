@@ -1,12 +1,10 @@
 use ark_ff::{Field, Zero};
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use ark_std::{cfg_iter, rand::Rng};
+use ark_std::{cfg_chunks, cfg_iter, rand::Rng};
 use itertools::Either;
 #[cfg(feature = "parallel")]
-use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
-};
+use rayon::prelude::*;
 use std::{
     cmp::Ordering,
     fmt::{self, Formatter},
@@ -128,8 +126,8 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
         let mut poly = self.evaluations().to_vec();
         let dim = partial_point.len();
         // evaluate single variable of partial point from left to right
-        for (i, point) in partial_point.iter().enumerate().take(dim) {
-            poly = fix_one_variable_helper(&poly, nv - i, point);
+        for point in partial_point.iter().take(dim) {
+            poly = fix_one_variable_helper(&poly, point);
         }
 
         MLE::<F>::from_evaluations_slice(nv - dim, &poly[..(1 << (nv - dim))])
@@ -375,21 +373,10 @@ fn increase_nv<F: Field>(
     DenseMultilinearExtension::from_evaluations_vec(new_nv, evals)
 }
 
-fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F> {
-    let mut res = vec![F::zero(); 1 << (nv - 1)];
-
-    // evaluate single variable of partial point from left to right
-    #[cfg(not(feature = "parallel"))]
-    for i in 0..(1 << (nv - 1)) {
-        res[i] = data[i] + (data[(i << 1) + 1] - data[i << 1]) * point;
-    }
-
-    #[cfg(feature = "parallel")]
-    res.par_iter_mut().enumerate().for_each(|(i, x)| {
-        *x = data[i << 1] + (data[(i << 1) + 1] - data[i << 1]) * point;
-    });
-
-    res
+fn fix_one_variable_helper<F: Field>(data: &[F], p: &F) -> Vec<F> {
+    cfg_chunks!(data, 2)
+        .map(|c| c[0] + (c[1] - c[0]) * p)
+        .collect()
 }
 
 // TODO: Add tests for MLE

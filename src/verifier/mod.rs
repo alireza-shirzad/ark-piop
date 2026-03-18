@@ -1,11 +1,7 @@
 pub mod errors;
 pub mod structs;
 mod tracker;
-use std::{
-    cell::RefCell,
-    collections::BTreeMap,
-    rc::Rc,
-};
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use either::Either;
 use indexmap::IndexMap;

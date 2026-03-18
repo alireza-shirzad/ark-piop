@@ -38,8 +38,6 @@ use ark_ff::batch_inversion;
 use ark_poly::Polynomial;
 use ark_std::One;
 use ark_std::Zero;
-use std::{
-};
 
 use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
