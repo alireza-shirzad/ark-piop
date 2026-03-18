@@ -1,6 +1,7 @@
 use ark_ff::{Field, PrimeField};
 use ark_poly::{
     DenseMVPolynomial, DenseMultilinearExtension,
+    MultilinearExtension,
     multivariate::{SparsePolynomial, SparseTerm, Term},
 };
 use ark_std::cfg_iter_mut;
@@ -28,36 +29,7 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
 
 //TODO: Why do we need this when we have a fix-variables method for MLE? is it because of the way MLE fixes variables?
 pub(crate) fn fix_variables<F: Field>(poly: &MLE<F>, partial_point: &[F]) -> MLE<F> {
-    assert!(
-        partial_point.len() <= poly.num_vars(),
-        "invalid size of partial point"
-    );
-    let nv = poly.num_vars();
-    let mut poly = poly.evaluations().to_vec();
-    let dim = partial_point.len();
-    // evaluate single variable of partial point from left to right
-    for (i, point) in partial_point.iter().enumerate().take(dim) {
-        poly = fix_one_variable_helper(&poly, nv - i, point);
-    }
-
-    MLE::<F>::from_evaluations_slice(nv - dim, &poly[..(1 << (nv - dim))])
-}
-
-fn fix_one_variable_helper<F: Field>(data: &[F], nv: usize, point: &F) -> Vec<F> {
-    let mut res = vec![F::zero(); 1 << (nv - 1)];
-
-    // evaluate single variable of partial point from left to right
-    #[cfg(not(feature = "parallel"))]
-    for i in 0..(1 << (nv - 1)) {
-        res[i] = data[i] + (data[(i << 1) + 1] - data[i << 1]) * point;
-    }
-
-    #[cfg(feature = "parallel")]
-    res.par_iter_mut().enumerate().for_each(|(i, x)| {
-        *x = data[i << 1] + (data[(i << 1) + 1] - data[i << 1]) * point;
-    });
-
-    res
+    poly.fix_variables(partial_point)
 }
 
 /// Evaluate eq polynomial.
