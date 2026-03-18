@@ -61,15 +61,15 @@ impl<F: Field> MLE<F> {
 
     pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<F>) -> Self {
         // assert that the number of variables matches the size of evaluations
-        assert_eq!(
-            evaluations.len(),
-            1 << num_vars,
-            "The size of evaluations should be 2^num_vars."
+        assert!(
+            evaluations.len() <= 1 << num_vars,
+            "The size of evaluations should be at most 2^num_vars."
         );
+        let eval_num_vars = evaluations.len().checked_ilog2().unwrap_or_default() as usize;
 
         Self {
             mat_mle: DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations),
-            nv: None,
+            nv: (num_vars > eval_num_vars).then_some(num_vars)
         }
     }
 
@@ -117,20 +117,21 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
     fn relabel(&self, _a: usize, _b: usize, _k: usize) -> Self {
         todo!()
     }
+
     fn fix_variables(&self, partial_point: &[F]) -> Self {
         assert!(
             partial_point.len() <= self.num_vars(),
             "invalid size of partial point"
         );
         let nv = self.num_vars();
-        let mut poly = self.evaluations().to_vec();
         let dim = partial_point.len();
+        let mut poly = Vec::new();
         // evaluate single variable of partial point from left to right
         for point in partial_point.iter().take(dim) {
-            poly = fix_one_variable_helper(&poly, point);
+            poly = fix_one_variable_helper(&self.mat_mle.evaluations, point);
         }
 
-        MLE::<F>::from_evaluations_slice(nv - dim, &poly[..(1 << (nv - dim))])
+        MLE::<F>::from_evaluations_vec(nv - dim, poly)
     }
 
     fn to_evaluations(&self) -> Vec<F> {
@@ -144,11 +145,15 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
 impl<F: Field> Index<usize> for MLE<F> {
     type Output = F;
 
+    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
-        match self.nv {
-            Some(_) => &self.mat_mle[index % (1 << self.mat_mle.num_vars)],
-            None => &self.mat_mle[index],
-        }
+        let index = if self.nv.is_some() {
+            index % (1 << self.mat_mle.num_vars)
+        } else {
+            index
+        };
+
+        &self.mat_mle[index]
     }
 }
 

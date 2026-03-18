@@ -6,7 +6,7 @@ use crate::{
     piop::errors::PolyIOPErrors,
 };
 use ark_ff::{PrimeField, batch_inversion};
-use ark_std::{cfg_into_iter, cfg_iter};
+use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut};
 #[cfg(feature = "parallel")]
 use rayon::prelude::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
@@ -80,13 +80,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
             self.challenges.push(*chal);
 
             let r = self.challenges[self.round - 1];
-            #[cfg(feature = "parallel")]
-            flattened_ml_extensions
-                .par_iter_mut()
-                .for_each(|mle| *mle = fix_variables(mle, &[r]));
-            #[cfg(not(feature = "parallel"))]
-            flattened_ml_extensions
-                .iter_mut()
+            cfg_iter_mut!(flattened_ml_extensions)
                 .for_each(|mle| *mle = fix_variables(mle, &[r]));
         } else if self.round > 0 {
             return Err(PolyIOPErrors::Prover(
