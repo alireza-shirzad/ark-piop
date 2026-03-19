@@ -94,19 +94,19 @@ impl<F: PrimeField> SumcheckProverState<F> {
         let products_list = self.poly.products.clone();
         let mut products_sum = vec![F::zero(); self.poly.aux_info.max_degree + 1];
 
-        let mles = cfg_iter!(flattened_ml_extensions)
-            .map(|f| {
-                if f.mat_mle().num_vars() == 0 {
-                    vec![(f.mat_mle()[0], F::zero())]
-                } else {
-                    f.mat_mle()
-                        .evaluations
-                        .chunks(2)
-                        .map(|c| (c[0], c[1] - c[0]))
-                        .collect::<Vec<_>>()
-                }
-            })
-            .collect::<Vec<_>>();
+        // let mles = cfg_iter!(flattened_ml_extensions)
+        //     .map(|f| {
+        //         if f.mat_mle().num_vars() == 0 {
+        //             vec![(f.mat_mle()[0], F::zero())]
+        //         } else {
+        //             f.mat_mle()
+        //                 .evaluations
+        //                 .chunks(2)
+        //                 .map(|c| (c[0], c[1] - c[0]))
+        //                 .collect::<Vec<_>>()
+        //         }
+        //     })
+        //     .collect::<Vec<_>>();
 
         // Step 2: generate sum for the partial evaluated polynomial:
         // f(r_1, ... r_m,, x_{m+1}... x_n)
