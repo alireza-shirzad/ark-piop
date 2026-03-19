@@ -385,3 +385,81 @@ fn fix_one_variable_helper<F: Field>(data: &[F], p: &F) -> Vec<F> {
 }
 
 // TODO: Add tests for MLE
+
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ark_bn254::Fr;
+
+    fn fr(value: u64) -> Fr {
+        Fr::from(value)
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_while_repetition_remains_virtual() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(1), fr(2), fr(3), fr(4)],
+            ),
+            Some(3),
+        );
+        let point = vec![fr(17)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 2);
+        assert_eq!(optimized.nv, Some(2));
+        assert_eq!(optimized.mat_mle.num_vars, 1);
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_after_crossing_repeat_boundary() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(1), fr(2), fr(3), fr(4)],
+            ),
+            Some(4),
+        );
+        let point = vec![fr(5), fr(6), fr(7)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 1);
+        assert_eq!(optimized.nv, Some(1));
+    }
+
+    #[test]
+    fn fix_variables_matches_materialized_path_after_inner_mle_is_fully_fixed() {
+        let wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(
+                2,
+                vec![fr(9), fr(10), fr(11), fr(12)],
+            ),
+            Some(5),
+        );
+        let point = vec![fr(3), fr(4), fr(5), fr(6)];
+
+        let optimized = wrapped.fix_variables(&point);
+        let materialized =
+            MLE::from_evaluations_vec(wrapped.num_vars(), wrapped.evaluations()).fix_variables(&point);
+
+        assert_eq!(optimized.num_vars(), materialized.num_vars());
+        assert_eq!(optimized.evaluations(), materialized.evaluations());
+        assert_eq!(optimized.num_vars(), 1);
+        assert_eq!(optimized.nv, Some(1));
+        assert_eq!(optimized.mat_mle.num_vars, 0);
+    }
+}
