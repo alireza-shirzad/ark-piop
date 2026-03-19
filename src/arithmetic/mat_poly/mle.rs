@@ -62,13 +62,15 @@ impl<F: Field> MLE<F> {
     pub fn from_evaluations_vec(num_vars: usize, evaluations: Vec<F>) -> Self {
         // assert that the number of variables matches the size of evaluations
         assert!(
-            evaluations.len() <= 1 << num_vars,
-            "The size of evaluations should be at most 2^num_vars."
+            evaluations.len() <= (1 << num_vars),
+            "The size of evaluations ({}) should be at most 2^num_vars (= {}).",
+            evaluations.len(),
+            1 << num_vars,
         );
         let eval_num_vars = evaluations.len().checked_ilog2().unwrap_or_default() as usize;
 
         Self {
-            mat_mle: DenseMultilinearExtension::from_evaluations_vec(num_vars, evaluations),
+            mat_mle: DenseMultilinearExtension::from_evaluations_vec(eval_num_vars, evaluations),
             nv: (num_vars > eval_num_vars).then_some(num_vars),
         }
     }
@@ -125,10 +127,14 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
         );
         let nv = self.num_vars();
         let dim = partial_point.len();
-        let mut poly = Vec::new();
-        // evaluate single variable of partial point from left to right
-        for point in partial_point.iter().take(dim) {
-            poly = fix_one_variable_helper(&self.mat_mle.evaluations, point);
+        let mut poly = self.mat_mle.evaluations.clone();
+            // evaluate single variable of partial point from left to right
+        for point in partial_point {
+            let p = std::mem::take(&mut poly);
+            poly = fix_one_variable_helper(p, point);
+            if poly.len() == 1 {
+                break
+            }
         }
 
         MLE::<F>::from_evaluations_vec(nv - dim, poly)
@@ -378,16 +384,11 @@ fn increase_nv<F: Field>(
     DenseMultilinearExtension::from_evaluations_vec(new_nv, evals)
 }
 
-fn fix_one_variable_helper<F: Field>(data: &[F], p: &F) -> Vec<F> {
-    cfg_chunks!(data, 2)
+fn fix_one_variable_helper<F: Field>(data: Vec<F>, p: &F) -> Vec<F> {
+    cfg_chunks!(&data, 2)
         .map(|c| c[0] + (c[1] - c[0]) * p)
         .collect()
 }
-
-// TODO: Add tests for MLE
-
-
-
 
 #[cfg(test)]
 mod tests {
