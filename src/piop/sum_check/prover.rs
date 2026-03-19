@@ -6,6 +6,7 @@ use crate::{
     piop::errors::PolyIOPErrors,
 };
 use ark_ff::{PrimeField, batch_inversion};
+use ark_poly::MultilinearExtension;
 use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut};
 #[cfg(feature = "parallel")]
 use rayon::prelude::{
@@ -80,8 +81,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
             self.challenges.push(*chal);
 
             let r = self.challenges[self.round - 1];
-            cfg_iter_mut!(flattened_ml_extensions)
-                .for_each(|mle| *mle = fix_variables(mle, &[r]));
+            cfg_iter_mut!(flattened_ml_extensions).for_each(|mle| *mle = fix_variables(mle, &[r]));
         } else if self.round > 0 {
             return Err(PolyIOPErrors::Prover(
                 "verifier message is empty".to_string(),
@@ -94,12 +94,19 @@ impl<F: PrimeField> SumcheckProverState<F> {
         let products_list = self.poly.products.clone();
         let mut products_sum = vec![F::zero(); self.poly.aux_info.max_degree + 1];
 
-        let mles = flattened_ml_extensions.iter().map(|f| {
-            f.mat_mle().evaluations.chunks(2).flat_map(|c| {
-                [c[0], c[1] - c[0]]
-            }).collect::<Vec<_>>()
-            
-        }).collect::<Vec<_>>();
+        let mles = cfg_iter!(flattened_ml_extensions)
+            .map(|f| {
+                if f.mat_mle().num_vars() == 0 {
+                    vec![(f.mat_mle()[0], F::zero())]
+                } else {
+                    f.mat_mle()
+                        .evaluations
+                        .chunks(2)
+                        .map(|c| (c[0], c[1] - c[0]))
+                        .collect::<Vec<_>>()
+                }
+            })
+            .collect::<Vec<_>>();
 
         // Step 2: generate sum for the partial evaluated polynomial:
         // f(r_1, ... r_m,, x_{m+1}... x_n)

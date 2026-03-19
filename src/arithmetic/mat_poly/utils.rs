@@ -1,7 +1,6 @@
 use ark_ff::{Field, PrimeField};
 use ark_poly::{
-    DenseMVPolynomial, DenseMultilinearExtension,
-    MultilinearExtension,
+    DenseMVPolynomial, DenseMultilinearExtension, MultilinearExtension,
     multivariate::{SparsePolynomial, SparseTerm, Term},
 };
 use ark_std::cfg_iter_mut;
