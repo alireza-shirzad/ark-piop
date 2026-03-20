@@ -128,19 +128,31 @@ impl<F: PrimeField> SumcheckProverState<F> {
                     .fold(
                         || (vec![(zero, zero); term_size], vec![zero; term_size + 1]),
                         |(mut buf, mut acc), b| {
+                            let mut any_eval_is_zero = false;
+                            let mut any_step_and_eval_simultaneously_zero = false;
                             buf.iter_mut()
                                 .zip(products.iter())
                                 .for_each(|((eval, step), f)| {
                                     let table = &flattened_mles[*f];
                                     *eval = table[b << 1];
+                                    let cur_eval_is_zero = eval.is_zero();
+                                    any_eval_is_zero |= cur_eval_is_zero;
                                     *step = table[(b << 1) + 1] - *eval;
+                                    any_step_and_eval_simultaneously_zero |=
+                                        cur_eval_is_zero & step.is_zero();
                                 });
 
-                            acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
-                            acc[1..].iter_mut().for_each(|acc| {
-                                buf.iter_mut().for_each(|(eval, step)| *eval += step);
-                                *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
-                            });
+                            if !any_eval_is_zero {
+                                acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
+                            }
+
+                            if !any_step_and_eval_simultaneously_zero {
+                                acc[1..].iter_mut().for_each(|acc| {
+                                    buf.iter_mut().for_each(|(eval, step)| *eval += step);
+                                    *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
+                                });
+                            }
+
                             (buf, acc)
                         },
                     )
