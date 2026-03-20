@@ -175,6 +175,9 @@ impl<F: PrimeField> SumcheckProverState<F> {
                 .for_each(|(val, acc)| *acc += val)
         });
 
+        // products_sum.iter_mut().enumerate().for_each(|(i, acc)| {
+        //     *acc += cfg_iter!(sums).map(|v| v[i]).sum::<F>();
+        // });
         // update prover's state to the partial evaluated polynomial
         self.poly.flattened_ml_extensions = cfg_into_iter!(flattened_mles)
             .map(|x| Arc::new(x))
