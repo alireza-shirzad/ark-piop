@@ -134,18 +134,21 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
         // insert the asserted_sum to the first position of the expected vector
         expected_vec.insert(0, *asserted_sum);
 
-        for (evaluations, &expected) in self
+        for (i, (evaluations, &expected)) in self
             .polynomials_received
             .iter()
             .zip(expected_vec.iter())
+            .enumerate()
             .take(self.num_vars)
         {
             // the deferred check during the interactive phase:
             // 1. check if the received 'P(0) + P(1) = expected`.
             if evaluations[0] + evaluations[1] != expected {
-                return Err(SnarkError::VerifierError(crate::verifier::errors::VerifierError::VerifierCheckFailed(
-                    "Sumcheck's deferred checks failed. Prover message is not consistent with the claim.".to_string(),
-                )));
+                return Err(SnarkError::VerifierError(
+                    crate::verifier::errors::VerifierError::VerifierCheckFailed(format!(
+                        "Sumcheck's deferred checks failed in round {i}. Prover message is not consistent with the claim."
+                    )),
+                ));
             }
         }
         Ok(SumCheckSubClaim {

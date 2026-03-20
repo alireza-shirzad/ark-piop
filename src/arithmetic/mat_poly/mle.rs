@@ -135,7 +135,6 @@ impl<F: Field> MultilinearExtension<F> for MLE<F> {
             }
             let p = std::mem::take(&mut poly);
             poly = fix_one_variable_helper(p, point);
-            
         }
 
         MLE::<F>::from_evaluations_vec(nv - dim, poly)

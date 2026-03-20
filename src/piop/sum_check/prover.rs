@@ -69,7 +69,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
         //    g(r_1, ..., r_{m-1}, x_m ... x_n)
         //
         // eval g over r_m, and mutate g to g(r_1, ... r_m,, x_{m+1}... x_n)
-        let mut flattened_ml_extensions: Vec<MLE<F>> = cfg_iter!(self.poly.flattened_ml_extensions)
+        let mut flattened_mles: Vec<MLE<F>> = cfg_iter!(self.poly.flattened_ml_extensions)
             .map(|x| x.as_ref().clone())
             .collect();
         if let Some(chal) = challenge {
@@ -81,7 +81,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
             self.challenges.push(*chal);
 
             let r = self.challenges[self.round - 1];
-            cfg_iter_mut!(flattened_ml_extensions).for_each(|mle| *mle = fix_variables(mle, &[r]));
+            cfg_iter_mut!(flattened_mles).for_each(|mle| *mle = fix_variables(mle, &[r]));
         } else if self.round > 0 {
             return Err(PolyIOPErrors::Prover(
                 "verifier message is empty".to_string(),
@@ -94,7 +94,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
         let products_list = self.poly.products.clone();
         let mut products_sum = vec![F::zero(); self.poly.aux_info.max_degree + 1];
 
-        // let mles = cfg_iter!(flattened_ml_extensions)
+        // let mles = cfg_iter!(flattened_mles)
         //     .map(|f| {
         //         if f.mat_mle().num_vars() == 0 {
         //             vec![(f.mat_mle()[0], F::zero())]
@@ -108,62 +108,67 @@ impl<F: PrimeField> SumcheckProverState<F> {
         //     })
         //     .collect::<Vec<_>>();
 
+        let max_nv = flattened_mles[0].num_vars();
+
         // Step 2: generate sum for the partial evaluated polynomial:
         // f(r_1, ... r_m,, x_{m+1}... x_n)
 
+        let zero = F::zero();
         let sums = cfg_iter!(products_list)
             .map(|(coefficient, products)| {
-                let mut sum =
-                    cfg_into_iter!(0..1 << (self.poly.aux_info.num_variables - self.round))
-                        .fold(
-                            || {
-                                (
-                                    vec![(F::zero(), F::zero()); products.len()],
-                                    vec![F::zero(); products.len() + 1],
-                                )
-                            },
-                            |(mut buf, mut acc), b| {
-                                buf.iter_mut().zip(products.iter()).for_each(
-                                    |((eval, step), f)| {
-                                        let table = &flattened_ml_extensions[*f];
-                                        *eval = table[b << 1];
-                                        *step = table[(b << 1) + 1] - table[b << 1];
-                                    },
-                                );
-                                acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
-                                acc[1..].iter_mut().for_each(|acc| {
-                                    buf.iter_mut().for_each(|(eval, step)| *eval += step as &_);
-                                    *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
+                let mut coefficient = *coefficient;
+                let term_size = products.len();
+                let term_nv = products
+                    .iter()
+                    .map(|i| flattened_mles[*i].mat_mle().num_vars())
+                    .max()
+                    .unwrap();
+                let summation_size = 1 << (term_nv.saturating_sub(1));
+                let mut sum = cfg_into_iter!(0..summation_size)
+                    .fold(
+                        || (vec![(zero, zero); term_size], vec![zero; term_size + 1]),
+                        |(mut buf, mut acc), b| {
+                            buf.iter_mut()
+                                .zip(products.iter())
+                                .for_each(|((eval, step), f)| {
+                                    let table = &flattened_mles[*f];
+                                    *eval = table[b << 1];
+                                    *step = table[(b << 1) + 1] - *eval;
                                 });
-                                (buf, acc)
-                            },
-                        )
-                        .map(|(_, partial)| partial)
-                        .reduce(
-                            || vec![F::zero(); products.len() + 1],
-                            |mut sum, partial| {
-                                sum.iter_mut()
-                                    .zip(partial)
-                                    .for_each(|(sum, partial)| *sum += partial);
-                                sum
-                            },
-                        );
-                sum.iter_mut().for_each(|sum| *sum *= coefficient);
-                let extraploation =
-                    cfg_into_iter!(0..self.poly.aux_info.max_degree - products.len())
-                        .map(|i| {
-                            let (points, weights) = &self.extrapolation_aux[products.len() - 1];
-                            let at = F::from((products.len() + 1 + i) as u64);
-                            extrapolate(points, weights, &sum, &at)
-                        })
-                        .collect::<Vec<_>>();
 
-                sum.iter()
-                    .chain(extraploation.iter())
-                    .cloned()
-                    .collect::<Vec<_>>()
+                            acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
+                            acc[1..].iter_mut().for_each(|acc| {
+                                buf.iter_mut().for_each(|(eval, step)| *eval += step);
+                                *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
+                            });
+                            (buf, acc)
+                        },
+                    )
+                    .map(|(_, partial)| partial)
+                    .reduce(
+                        || vec![F::zero(); term_size + 1],
+                        |mut sum, partial| {
+                            sum.iter_mut()
+                                .zip(partial)
+                                .for_each(|(sum, partial)| *sum += partial);
+                            sum
+                        },
+                    );
+                coefficient *= F::from(1 << (max_nv - term_nv.max(1)));
+                sum.iter_mut().for_each(|sum| *sum *= coefficient);
+
+                let extrapolation = cfg_into_iter!(0..self.poly.aux_info.max_degree - term_size)
+                    .map(|i| {
+                        let (points, weights) = &self.extrapolation_aux[term_size - 1];
+                        let at = F::from((term_size + 1 + i) as u64);
+                        extrapolate(points, weights, &sum, &at)
+                    })
+                    .collect::<Vec<_>>();
+
+                [sum, extrapolation].concat()
             })
             .collect::<Vec<_>>();
+
         sums.iter().for_each(|v| {
             v.iter()
                 .zip(products_sum.iter_mut())
@@ -171,8 +176,8 @@ impl<F: PrimeField> SumcheckProverState<F> {
         });
 
         // update prover's state to the partial evaluated polynomial
-        self.poly.flattened_ml_extensions = cfg_iter!(flattened_ml_extensions)
-            .map(|x| Arc::new(x.clone()))
+        self.poly.flattened_ml_extensions = cfg_into_iter!(flattened_mles)
+            .map(|x| Arc::new(x))
             .collect();
 
         Ok(SumcheckProverMessage {
