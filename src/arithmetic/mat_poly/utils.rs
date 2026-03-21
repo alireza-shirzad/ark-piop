@@ -22,7 +22,13 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
     assert_eq!(poly.mat_mle().num_vars, eq.num_vars());
     ark_std::cfg_iter!(eq.mat_mle().evaluations)
         .zip(&poly.mat_mle().evaluations)
-        .map(|(e, p)| *e * p)
+        .filter_map(|(e, p)| (!p.is_zero()).then(|| 
+            if p.is_one() {
+                *e
+            } else {
+                *e * p  
+            }
+        ))
         .sum::<F>()
 }
 
@@ -52,11 +58,39 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
 ///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
 /// over r, which is
 ///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<Arc<MLE<F>>> {
-    let evals = build_eq_x_r_vec(r)?;
-    let mle = MLE::from_evaluations_vec(r.len(), evals);
+pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<MLE<F>> {
+    // we build eq(x,r) from its evaluations
+    // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
+    // for example, with num_vars = 4, x is a binary vector of 4, then
+    //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
+    //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
+    //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
+    //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
+    //  ....
+    //  1 1 1 1 -> r0       * r1        * r2        * r3
+    // we will need 2^num_var evaluations
 
-    Ok(Arc::new(mle))
+    if r.is_empty() {
+        return Err(ArithErrors::InvalidParameters("r length is 0".to_string()).into());
+    }
+    let n = r.len();
+    let mut buf = vec![F::zero(); 1 << n];
+    buf[0] = F::one();
+
+    for (k, ri) in r.iter().enumerate() {
+        let active = 1 << k;
+        let one_minus_ri = F::one() - *ri;
+        // split into disjoint halves — no borrow conflict
+        let (lo, hi) = buf[..active * 2].split_at_mut(active);
+        hi.copy_from_slice(lo);                                  // copy source
+        cfg_iter_mut!(lo).for_each(|x| *x *= one_minus_ri);     // lower half: x_k = 0
+        cfg_iter_mut!(hi).for_each(|x| *x *= *ri);              // upper half: x_k = 1
+    }
+
+    
+    let mle = MLE::from_evaluations_vec(r.len(), buf);
+
+    Ok(mle)
 }
 
 /// Build the multivariate sparse representation of eq(x, r).
@@ -105,71 +139,6 @@ pub fn build_sparse_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<SparsePolynomi
         .collect();
 
     Ok(SparsePolynomial::from_coefficients_vec(r.len(), coeffs))
-}
-/// This function build the eq(x, r) polynomial for any given r, and output the
-/// evaluation of eq(x, r) in its vector form.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
-pub(crate) fn build_eq_x_r_vec<F: PrimeField>(r: &[F]) -> SnarkResult<Vec<F>> {
-    // we build eq(x,r) from its evaluations
-    // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
-    // for example, with num_vars = 4, x is a binary vector of 4, then
-    //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
-    //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
-    //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
-    //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
-    //  ....
-    //  1 1 1 1 -> r0       * r1        * r2        * r3
-    // we will need 2^num_var evaluations
-
-    let mut eval = Vec::new();
-    build_eq_x_r_helper(r, &mut eval)?;
-
-    Ok(eval)
-}
-
-/// A helper function to build eq(x, r) recursively.
-/// This function takes `r.len()` steps, and for each step it requires a maximum
-/// `r.len()-1` multiplications.
-fn build_eq_x_r_helper<F: PrimeField>(r: &[F], buf: &mut Vec<F>) -> SnarkResult<()> {
-    if r.is_empty() {
-        return Err(ArithErrors::InvalidParameters("r length is 0".to_string()).into());
-    } else if r.len() == 1 {
-        // initializing the buffer with [1-r_0, r_0]
-        buf.push(F::one() - r[0]);
-        buf.push(r[0]);
-    } else {
-        build_eq_x_r_helper(&r[1..], buf)?;
-
-        // suppose at the previous step we received [b_1, ..., b_k]
-        // for the current step we will need
-        // if x_0 = 0:   (1-r0) * [b_1, ..., b_k]
-        // if x_0 = 1:   r0 * [b_1, ..., b_k]
-        // let mut res = vec![];
-        // for &b_i in buf.iter() {
-        //     let tmp = r[0] * b_i;
-        //     res.push(b_i - tmp);
-        //     res.push(tmp);
-        // }
-        // *buf = res;
-
-        let mut res = vec![F::zero(); buf.len() << 1];
-        cfg_iter_mut!(res).enumerate().for_each(|(i, val)| {
-            let bi = buf[i >> 1];
-            let tmp = r[0] * bi;
-            if i & 1 == 0 {
-                *val = bi - tmp;
-            } else {
-                *val = tmp;
-            }
-        });
-        *buf = res;
-    }
-
-    Ok(())
 }
 
 /// Generate eq(t,x), a product of multilinear polynomials with fixed t.

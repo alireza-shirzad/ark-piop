@@ -1,6 +1,6 @@
 pub(crate) mod srs;
 pub mod structs;
-use crate::arithmetic::mat_poly::utils::build_eq_x_r_vec;
+use crate::arithmetic::mat_poly::utils::build_eq_x_r;
 use crate::arithmetic::mat_poly::utils::eq_eval;
 use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
 use crate::arithmetic::virt_poly::hp_interface::VPAuxInfo;
@@ -208,7 +208,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
 
         // eq(t, i) for i in [0..k]
-        let eq_t_i_list = build_eq_x_r_vec(t.as_ref())?;
+
+        let eq_t_i_list = build_eq_x_r(t.as_ref())?.into_evaluations();
         // combine the polynomials that have same opening point first to reduce the
         // cost of sum check later.
         let point_indices = points
@@ -241,7 +242,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let tilde_eqs: Vec<_> = deduped_points
             .iter()
             .map(|point| {
-                let eq_b_zi = build_eq_x_r_vec(point).unwrap();
+                let eq_b_zi = build_eq_x_r(point).unwrap().into_evaluations();
                 Arc::new(MLE::from_evaluations_vec(num_var, eq_b_zi))
             })
             .collect();
@@ -357,7 +358,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let a2 = &batch_proof.sum_check_proof.point[..num_var];
 
         // build g' commitment
-        let eq_t_list = build_eq_x_r_vec(t.as_ref())?;
+        let eq_t_list = build_eq_x_r(t.as_ref())?.into_evaluations();
 
         let mut scalars = vec![];
         let mut bases = vec![];

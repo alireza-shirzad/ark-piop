@@ -190,7 +190,8 @@ where
     ///
     /// Assumes the input polynomial is already on the heap and assigns a
     /// TrackerID to it in the map
-    fn track_mat_arc_mv_poly(&mut self, polynomial: Arc<MLE<B::F>>) -> TrackerID {
+    fn track_mat_arc_mv_poly(&mut self, polynomial: impl Into<Arc<MLE<B::F>>>) -> TrackerID {
+        let polynomial = polynomial.into();
         // Create the new TrackerID
         let poly_id = self.gen_id();
 
@@ -654,7 +655,7 @@ where
 
         // Derive smaller eq tables by summing pairs, O(2^max_nv) total work
         let mut eq_evals: BTreeMap<usize, MLE<B::F>> = BTreeMap::new();
-        eq_evals.insert(max_nv, Arc::into_inner(largest_eq).unwrap());
+        eq_evals.insert(max_nv, largest_eq);
 
         for nv in (min_nv..max_nv).rev() {
             let prev_evals = &eq_evals[&(nv + 1)].mat_mle().evaluations;
@@ -1267,7 +1268,7 @@ where
             .id();
 
         // build the eq(x, r) polynomial
-        let eq_x_r_id = self.track_mat_arc_mv_poly(build_eq_x_r(r.as_ref()).unwrap());
+        let eq_x_r_id = self.track_mat_arc_mv_poly(build_eq_x_r(r.as_ref())?);
 
         // create the relevant sumcheck claim, i.e. reduce the zerocheck claim to a
         // sumcheck claim

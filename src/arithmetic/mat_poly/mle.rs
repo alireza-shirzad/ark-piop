@@ -55,6 +55,13 @@ impl<F: Field> MLE<F> {
         }
     }
 
+    pub fn into_evaluations(self) -> Vec<F> {
+        match self.nv {
+            Some(_) => self.iter().cloned().collect::<Vec<F>>(),
+            None => self.mat_mle.evaluations,
+        }        
+    }
+
     pub fn from_evaluations_slice(num_vars: usize, evaluations: &[F]) -> Self {
         Self::from_evaluations_vec(num_vars, evaluations.to_vec())
     }
