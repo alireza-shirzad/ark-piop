@@ -22,13 +22,7 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
     assert_eq!(poly.mat_mle().num_vars, eq.num_vars());
     ark_std::cfg_iter!(eq.mat_mle().evaluations)
         .zip(&poly.mat_mle().evaluations)
-        .filter_map(|(e, p)| (!p.is_zero()).then(|| 
-            if p.is_one() {
-                *e
-            } else {
-                *e * p  
-            }
-        ))
+        .filter_map(|(e, p)| (!p.is_zero()).then(|| if p.is_one() { *e } else { *e * p }))
         .sum::<F>()
 }
 
@@ -82,12 +76,11 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<MLE<F>> {
         let one_minus_ri = F::one() - *ri;
         // split into disjoint halves — no borrow conflict
         let (lo, hi) = buf[..active * 2].split_at_mut(active);
-        hi.copy_from_slice(lo);                                  // copy source
-        cfg_iter_mut!(lo).for_each(|x| *x *= one_minus_ri);     // lower half: x_k = 0
-        cfg_iter_mut!(hi).for_each(|x| *x *= *ri);              // upper half: x_k = 1
+        hi.copy_from_slice(lo); // copy source
+        cfg_iter_mut!(lo).for_each(|x| *x *= one_minus_ri); // lower half: x_k = 0
+        cfg_iter_mut!(hi).for_each(|x| *x *= *ri); // upper half: x_k = 1
     }
 
-    
     let mle = MLE::from_evaluations_vec(r.len(), buf);
 
     Ok(mle)

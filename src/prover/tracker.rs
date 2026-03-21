@@ -36,8 +36,8 @@ use crate::{
 use ark_ec::AdditiveGroup;
 use ark_ff::batch_inversion;
 use ark_poly::{MultilinearExtension, Polynomial};
-use ark_std::{One, cfg_chunks};
 use ark_std::Zero;
+use ark_std::{One, cfg_chunks};
 
 use ark_std::{cfg_iter, cfg_iter_mut};
 use derivative::Derivative;
@@ -640,7 +640,6 @@ where
         mat_poly.map(|poly| poly.evaluate(pt))
     }
 
-    
     pub fn batch_evaluate_mv(&self, ids: &[TrackerID], pt: &[B::F]) -> Option<Vec<B::F>> {
         // Find max nv needed
         let mut needed_nvs = BTreeSet::new();
@@ -725,8 +724,7 @@ where
         }
     }
 
-    
-/// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
+    /// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
     /// This assumes that `eq_evals` contains the evaluations of the eq polynomial for each number
     /// of variables of the *actual* underlying `DenseMultilinearExtension` of the materialized polynomials.
     pub fn evaluate_mat_mv_with_eq_evals(
@@ -734,7 +732,6 @@ where
         eq_evals: &BTreeMap<usize, MLE<B::F>>,
         materialized_polys: &BTreeMap<TrackerID, Arc<MLE<B::F>>>,
     ) -> Option<B::F> {
-
         let poly = materialized_polys.get(&id).unwrap();
 
         let nv = poly.mat_mle().num_vars;
@@ -1978,9 +1975,16 @@ where
 
         // Group claims by point
         let mut deduped_claims: BTreeMap<Vec<B::F>, Vec<_>> = BTreeMap::new();
-        self.state.mv_pcs_substate.eval_claims.iter().for_each(|claim| {
-            deduped_claims.entry(claim.point().clone()).or_default().push(claim);
-        });
+        self.state
+            .mv_pcs_substate
+            .eval_claims
+            .iter()
+            .for_each(|claim| {
+                deduped_claims
+                    .entry(claim.point().clone())
+                    .or_default()
+                    .push(claim);
+            });
 
         // For each unique point, batch-evaluate all needed mat_ids once
         let mut id_to_eval: BTreeMap<(TrackerID, PointID), B::F> = BTreeMap::new();
@@ -2024,13 +2028,8 @@ where
             }
         }
 
-
-
-
         /////////////////////////
 
-        
-        
         let opening_proof: PCSOpeningProof<B::F, B::MvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = B::MvPCS::open(
@@ -2153,8 +2152,6 @@ where
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use crate::{DefaultSnarkBackend, setup::KeyGenerator};
@@ -2163,9 +2160,7 @@ mod tests {
 
     type F = <DefaultSnarkBackend as SnarkBackend>::F;
 
-
     fn make_tracker() -> ProverTracker<DefaultSnarkBackend> {
-
         let key_generator = KeyGenerator::<DefaultSnarkBackend>::new().with_num_mv_vars(16);
         let (pk, _vk) = key_generator.gen_keys().unwrap();
         ProverTracker::new_from_pk(pk)
@@ -2239,20 +2234,18 @@ mod tests {
         let mut tracker = make_tracker();
 
         // nv=0 is a special case in both evaluate_mv and eq folding
-        let id_const = tracker.track_mat_mv_poly(
-            MLE::from_evaluations_vec(0, vec![F::from(42)])
-        );
+        let id_const = tracker.track_mat_mv_poly(MLE::from_evaluations_vec(0, vec![F::from(42)]));
         let id_nv3 = tracker.track_mat_mv_poly(random_mle(3));
 
         let pt = vec![F::from(2), F::from(3), F::from(5)];
 
         let expected_const = tracker.evaluate_mv(id_const, &pt[..0]).unwrap();
-        let expected_nv3  = tracker.evaluate_mv(id_nv3,  &pt).unwrap();
+        let expected_nv3 = tracker.evaluate_mv(id_nv3, &pt).unwrap();
 
         let batch = tracker.batch_evaluate_mv(&[id_const, id_nv3], &pt).unwrap();
 
         assert_eq!(batch[0], expected_const, "constant poly mismatch");
-        assert_eq!(batch[1], expected_nv3,   "nv=3 alongside constant mismatch");
+        assert_eq!(batch[1], expected_nv3, "nv=3 alongside constant mismatch");
     }
 
     #[test]
@@ -2265,6 +2258,9 @@ mod tests {
         let batch = tracker.batch_evaluate_mv(&[id, id, id], &pt).unwrap();
 
         assert_eq!(batch.len(), 3);
-        assert!(batch.iter().all(|v| *v == expected), "duplicate id mismatch");
+        assert!(
+            batch.iter().all(|v| *v == expected),
+            "duplicate id mismatch"
+        );
     }
 }

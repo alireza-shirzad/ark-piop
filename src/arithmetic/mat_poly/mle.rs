@@ -59,7 +59,7 @@ impl<F: Field> MLE<F> {
         match self.nv {
             Some(_) => self.iter().cloned().collect::<Vec<F>>(),
             None => self.mat_mle.evaluations,
-        }        
+        }
     }
 
     pub fn from_evaluations_slice(num_vars: usize, evaluations: &[F]) -> Self {
