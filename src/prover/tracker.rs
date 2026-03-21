@@ -35,8 +35,8 @@ use crate::{
 };
 use ark_ec::AdditiveGroup;
 use ark_ff::batch_inversion;
-use ark_poly::Polynomial;
-use ark_std::One;
+use ark_poly::{MultilinearExtension, Polynomial};
+use ark_std::{One, cfg_chunks};
 use ark_std::Zero;
 
 use ark_std::{cfg_iter, cfg_iter_mut};
@@ -639,6 +639,61 @@ where
         mat_poly.map(|poly| poly.evaluate(pt))
     }
 
+    
+    pub fn batch_evaluate_mv(&self, ids: &[TrackerID], pt: &[B::F]) -> Option<Vec<B::F>> {
+        // Find max nv needed
+        let mut needed_nvs = BTreeSet::new();
+        for &id in ids {
+            self.collect_needed_nvs(id, &mut needed_nvs);
+        }
+        let max_nv = *needed_nvs.iter().max()?;
+        let min_nv = *needed_nvs.iter().min()?;
+
+        // Build largest eq once: O(2^max_nv)
+        let largest_eq = build_eq_x_r(&pt[..max_nv]).unwrap();
+
+        // Derive smaller eq tables by summing pairs, O(2^max_nv) total work
+        let mut eq_evals: BTreeMap<usize, MLE<B::F>> = BTreeMap::new();
+        eq_evals.insert(max_nv, Arc::into_inner(largest_eq).unwrap());
+
+        for nv in (min_nv..max_nv).rev() {
+            let prev_evals = &eq_evals[&(nv + 1)].mat_mle().evaluations;
+            let half = prev_evals.len() / 2;
+            let evals = cfg_iter!(prev_evals[..half])
+                .zip(&prev_evals[half..])
+                .map(|(a, b)| *a + *b)
+                .collect::<Vec<_>>();
+            eq_evals.insert(nv, MLE::from_evaluations_vec(nv, evals));
+        }
+        // Handle nv=0 case
+        if needed_nvs.contains(&0) {
+            eq_evals.insert(0, MLE::from_evaluations_vec(0, vec![B::F::one()]));
+        }
+
+        let mat_mles = &self.state.mv_pcs_substate.materialized_polys;
+        cfg_iter!(ids)
+            .map(|&id| Self::evaluate_mat_mv_with_eq_evals(id, &eq_evals, mat_mles))
+            .collect()
+    }
+
+    /// Recursively collects all nv values of underlying materialized polynomials
+    /// reachable from this id.
+    fn collect_needed_nvs(&self, id: TrackerID, nvs: &mut BTreeSet<usize>) {
+        match self.state.mv_pcs_substate.materialized_polys.get(&id) {
+            Some(poly) => {
+                nvs.insert(poly.mat_mle().num_vars);
+            }
+            None => {
+                let p = self.virt_poly(id).unwrap();
+                for (_, prod) in p.iter() {
+                    for &poly_id in prod.iter() {
+                        self.collect_needed_nvs(poly_id, nvs);
+                    }
+                }
+            }
+        }
+    }
+
     /// Evaluates a polynomial at a point
     pub fn evaluate_mv(&self, id: TrackerID, pt: &[B::F]) -> Option<B::F> {
         match self.state.mv_pcs_substate.materialized_polys.get(&id) {
@@ -667,6 +722,22 @@ where
                 Some(result)
             }
         }
+    }
+
+    
+/// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
+    /// This assumes that `eq_evals` contains the evaluations of the eq polynomial for each number
+    /// of variables of the *actual* underlying `DenseMultilinearExtension` of the materialized polynomials.
+    pub fn evaluate_mat_mv_with_eq_evals(
+        id: TrackerID,
+        eq_evals: &BTreeMap<usize, MLE<B::F>>,
+        materialized_polys: &BTreeMap<TrackerID, Arc<MLE<B::F>>>,
+    ) -> Option<B::F> {
+
+        let poly = materialized_polys.get(&id).unwrap();
+
+        let nv = poly.mat_mle().num_vars;
+        Some(evaluate_with_eq(poly, &eq_evals[&nv]))
     }
 
     /// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
@@ -1903,25 +1974,62 @@ where
         let mut mat_polys = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
-        for claim in &self.state.mv_pcs_substate.eval_claims {
-            let eval_id = claim.id();
-            let eval_point = claim.point();
-            let mat_ids = self.extract_mv_openable_ids(eval_id);
-            let point_id = *point_to_id.entry(eval_point.clone()).or_insert_with(|| {
+
+        // Group claims by point
+        let mut deduped_claims: BTreeMap<Vec<B::F>, Vec<_>> = BTreeMap::new();
+        self.state.mv_pcs_substate.eval_claims.iter().for_each(|claim| {
+            deduped_claims.entry(claim.point().clone()).or_default().push(claim);
+        });
+
+        // For each unique point, batch-evaluate all needed mat_ids once
+        let mut id_to_eval: BTreeMap<(TrackerID, PointID), B::F> = BTreeMap::new();
+        for (point, claims_for_point) in &deduped_claims {
+            // Assign point_id
+            let point_id = *point_to_id.entry(point.clone()).or_insert_with(|| {
                 let pid = PointID::from_usize(next_point_id);
                 next_point_id += 1;
-                point_map.insert(pid, eval_point.clone());
+                point_map.insert(pid, point.clone());
                 pid
             });
+
+            // Collect all unique mat_ids for this point across all claims
+            let all_mat_ids: Vec<TrackerID> = claims_for_point
+                .iter()
+                .flat_map(|claim| self.extract_mv_openable_ids(claim.id()))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
+            // Single batch evaluation for all mat_ids at this point
+            let all_evals = self.batch_evaluate_mv(&all_mat_ids, point).unwrap();
+
+            for (mat_id, eval) in all_mat_ids.into_iter().zip(all_evals) {
+                id_to_eval.insert((mat_id, point_id), eval);
+            }
+        }
+
+        // Build mat_polys/points/evals in claim order (same as old code)
+        for claim in &self.state.mv_pcs_substate.eval_claims {
+            let eval_id = claim.id();
+            let point = claim.point();
+            let point_id = *point_to_id.get(point).unwrap();
+            let mat_ids = self.extract_mv_openable_ids(eval_id);
             for mat_id in mat_ids {
-                let eval = self.evaluate_mv(mat_id, eval_point).unwrap();
+                let eval = *id_to_eval.get(&(mat_id, point_id)).unwrap();
                 query_map.entry(mat_id).or_default().insert(point_id, eval);
                 mat_polys.push(self.mat_mv_poly(mat_id).unwrap().clone());
-                points.push(eval_point.clone());
+                points.push(point.clone());
                 evals.push(eval);
             }
         }
 
+
+
+
+        /////////////////////////
+
+        
+        
         let opening_proof: PCSOpeningProof<B::F, B::MvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = B::MvPCS::open(
@@ -2041,5 +2149,121 @@ where
         };
         self.state.miscellaneous_field_elements.clear();
         Ok(proof)
+    }
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use crate::{DefaultSnarkBackend, setup::KeyGenerator};
+
+    use super::*;
+
+    type F = <DefaultSnarkBackend as SnarkBackend>::F;
+
+
+    fn make_tracker() -> ProverTracker<DefaultSnarkBackend> {
+
+        let key_generator = KeyGenerator::<DefaultSnarkBackend>::new().with_num_mv_vars(16);
+        let (pk, _vk) = key_generator.gen_keys().unwrap();
+        ProverTracker::new_from_pk(pk)
+    }
+
+    // Helper to make a random MLE
+    fn random_mle(nv: usize) -> MLE<F> {
+        let evals: Vec<F> = (0..(1 << nv)).map(|i| F::from(i as u64 + 1)).collect();
+        MLE::from_evaluations_vec(nv, evals)
+    }
+
+    #[test]
+    fn test_batch_evaluate_mv_single_poly() {
+        let mut tracker = make_tracker();
+        let poly = random_mle(3);
+        let id = tracker.track_mat_mv_poly(poly);
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+
+        let expected = tracker.evaluate_mv(id, &pt).unwrap();
+        let batch = tracker.batch_evaluate_mv(&[id], &pt).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0], expected, "single poly batch mismatch");
+    }
+
+    #[test]
+    fn test_batch_evaluate_mv_different_nvs() {
+        let mut tracker = make_tracker();
+
+        // Three polys with different nv — exercises the eq folding path
+        let id_nv2 = tracker.track_mat_mv_poly(random_mle(2));
+        let id_nv3 = tracker.track_mat_mv_poly(random_mle(3));
+        let id_nv4 = tracker.track_mat_mv_poly(random_mle(4));
+
+        let pt = vec![F::from(2), F::from(3), F::from(5), F::from(7)];
+
+        let expected_nv2 = tracker.evaluate_mv(id_nv2, &pt[..2]).unwrap();
+        let expected_nv3 = tracker.evaluate_mv(id_nv3, &pt[..3]).unwrap();
+        let expected_nv4 = tracker.evaluate_mv(id_nv4, &pt).unwrap();
+
+        let ids = vec![id_nv2, id_nv3, id_nv4];
+        let batch = tracker.batch_evaluate_mv(&ids, &pt).unwrap();
+
+        assert_eq!(batch.len(), 3);
+        assert_eq!(batch[0], expected_nv2, "nv=2 mismatch");
+        assert_eq!(batch[1], expected_nv3, "nv=3 mismatch");
+        assert_eq!(batch[2], expected_nv4, "nv=4 mismatch");
+    }
+
+    #[test]
+    fn test_batch_evaluate_mv_same_nv() {
+        let mut tracker = make_tracker();
+
+        // Two polys with same nv — eq is built once and reused
+        let id_a = tracker.track_mat_mv_poly(random_mle(3));
+        let id_b = tracker.track_mat_mv_poly(random_mle(3));
+
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+
+        let expected_a = tracker.evaluate_mv(id_a, &pt).unwrap();
+        let expected_b = tracker.evaluate_mv(id_b, &pt).unwrap();
+
+        let batch = tracker.batch_evaluate_mv(&[id_a, id_b], &pt).unwrap();
+
+        assert_eq!(batch[0], expected_a, "first nv=3 poly mismatch");
+        assert_eq!(batch[1], expected_b, "second nv=3 poly mismatch");
+    }
+
+    #[test]
+    fn test_batch_evaluate_mv_constant_poly() {
+        let mut tracker = make_tracker();
+
+        // nv=0 is a special case in both evaluate_mv and eq folding
+        let id_const = tracker.track_mat_mv_poly(
+            MLE::from_evaluations_vec(0, vec![F::from(42)])
+        );
+        let id_nv3 = tracker.track_mat_mv_poly(random_mle(3));
+
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+
+        let expected_const = tracker.evaluate_mv(id_const, &pt[..0]).unwrap();
+        let expected_nv3  = tracker.evaluate_mv(id_nv3,  &pt).unwrap();
+
+        let batch = tracker.batch_evaluate_mv(&[id_const, id_nv3], &pt).unwrap();
+
+        assert_eq!(batch[0], expected_const, "constant poly mismatch");
+        assert_eq!(batch[1], expected_nv3,   "nv=3 alongside constant mismatch");
+    }
+
+    #[test]
+    fn test_batch_evaluate_mv_duplicate_ids() {
+        let mut tracker = make_tracker();
+        let id = tracker.track_mat_mv_poly(random_mle(3));
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+
+        let expected = tracker.evaluate_mv(id, &pt).unwrap();
+        let batch = tracker.batch_evaluate_mv(&[id, id, id], &pt).unwrap();
+
+        assert_eq!(batch.len(), 3);
+        assert!(batch.iter().all(|v| *v == expected), "duplicate id mismatch");
     }
 }

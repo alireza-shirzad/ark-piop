@@ -177,6 +177,7 @@ pub trait PCS<F: PrimeField>: Clone {
         drop(enter_guard);
         res
     }
+
     #[inline(always)]
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,

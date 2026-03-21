@@ -386,7 +386,14 @@ fn increase_nv<F: Field>(
 
 fn fix_one_variable_helper<F: Field>(data: Vec<F>, p: &F) -> Vec<F> {
     cfg_chunks!(&data, 2)
-        .map(|c| c[0] + (c[1] - c[0]) * p)
+        .map(|c| {
+            let diff = c[1] - c[0];
+            if diff.is_zero() {
+                c[0]
+            } else {
+                c[0] + diff * p
+            }
+        })
         .collect()
 }
 
