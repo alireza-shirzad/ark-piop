@@ -242,6 +242,26 @@ where
         ))
     }
 
+    pub fn track_mat_mv_poly_with_external_commitment(
+        &mut self,
+        polynomial: &MLE<B::F>,
+        commitment: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedPoly<B>> {
+        let degree = polynomial.num_vars();
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("polynomial", debug(polynomial));
+        }
+        Ok(TrackedPoly::new(
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_mat_mv_p_with_external_commitment(polynomial, commitment)?,
+            ),
+            degree,
+            self.tracker_rc.clone(),
+        ))
+    }
+
     /// Get a shared to the materialized multivariate polynomial given its
     /// TrackerID
     #[instrument(level = "debug", skip(self))]

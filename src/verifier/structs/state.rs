@@ -8,7 +8,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use derivative::Derivative;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, collections::BTreeSet, sync::Arc};
 
 use super::{
     VerifierEvalClaimMap,
@@ -56,6 +56,10 @@ where
     PC: PCS<F>,
 {
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
+    // External commitments mirror prover-side context commitments. They are
+    // tracked so claims can reference them, but they are not expected to be
+    // present in the proof's serialized commitment map.
+    pub external_materialized_comm_ids: BTreeSet<TrackerID>,
     pub eval_claims: VerifierEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,

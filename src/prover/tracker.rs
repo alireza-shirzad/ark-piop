@@ -252,6 +252,26 @@ where
         Ok(poly_id)
     }
 
+    pub fn track_mat_mv_p_with_external_commitment(
+        &mut self,
+        polynomial: &MLE<B::F>,
+        commitment: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackerID> {
+        let polynomial = Arc::new(polynomial.clone());
+        let poly_id = self.track_mat_arc_mv_poly(polynomial);
+        // Reuse an externally provided commitment for this tracked polynomial
+        // without transcript-binding it as a new proof commitment.
+        self.state
+            .mv_pcs_substate
+            .materialized_comms
+            .insert(poly_id, commitment);
+        self.state
+            .mv_pcs_substate
+            .external_materialized_comm_ids
+            .insert(poly_id);
+        Ok(poly_id)
+    }
+
     pub fn track_and_commit_mat_uv_poly(
         &mut self,
         polynomial: LDE<B::F>,
@@ -2059,7 +2079,23 @@ where
             query_map,
             point_map,
             opening_proof,
-            comitments: self.state.mv_pcs_substate.materialized_comms.clone(),
+            // Only commitments created inside this proof are serialized here.
+            // Externally supplied commitments are referenced by tracker id but are
+            // expected to come from context, not from the proof payload itself.
+            comitments: self
+                .state
+                .mv_pcs_substate
+                .materialized_comms
+                .iter()
+                .filter(|(id, _)| {
+                    !self
+                        .state
+                        .mv_pcs_substate
+                        .external_materialized_comm_ids
+                        .contains(id)
+                })
+                .map(|(id, comm)| (*id, comm.clone()))
+                .collect(),
         })
     }
 

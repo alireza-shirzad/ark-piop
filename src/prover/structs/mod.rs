@@ -3,6 +3,7 @@
 pub mod polynomial;
 pub mod proof;
 /////////////////// Imports //////////////////
+use std::collections::BTreeSet;
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::structs::claim::TrackerNoZerocheckClaim;
@@ -88,6 +89,10 @@ where
 {
     pub materialized_polys: BTreeMap<TrackerID, Arc<PC::Poly>>,
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
+    // Commitments reused from external context, such as base table commitments.
+    // These must be tracked for openings, but they are not emitted as proof-owned
+    // commitments in the PCS subproof.
+    pub external_materialized_comm_ids: BTreeSet<TrackerID>,
     pub eval_claims: Vec<TrackerEvalClaim<F, PC>>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,

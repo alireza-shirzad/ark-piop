@@ -120,6 +120,25 @@ where
         Ok(tracked_oracle)
     }
 
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_external_mat_mv_com(
+        &self,
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedOracle<B>> {
+        let nv = comm.log_size();
+        let tracked_oracle = TrackedOracle::new(
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_external_mat_mv_com(comm)?,
+            ),
+            self.tracker_rc.clone(),
+            nv as usize,
+        );
+        trace!("assigned id {}", tracked_oracle.id());
+        Ok(tracked_oracle)
+    }
+
     /// Track a materialized multivariate polynomial
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID

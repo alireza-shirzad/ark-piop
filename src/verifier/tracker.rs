@@ -374,6 +374,64 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(id)
     }
 
+    pub(crate) fn track_external_mat_mv_com(
+        &mut self,
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackerID> {
+        let id = self.gen_id();
+
+        // Build the same tracked-oracle interface as a normal materialized
+        // commitment, but do not treat this commitment as proof-owned.
+        let oracle = match self.proof.as_ref() {
+            Some(proof) => {
+                let mv_queries_clone = proof.mv_pcs_subproof.query_map.clone();
+                let mv_points_clone = proof.mv_pcs_subproof.point_map.clone();
+                let mv_point_to_id: BTreeMap<Vec<B::F>, crate::structs::PointID> = mv_points_clone
+                    .iter()
+                    .map(|(point_id, point)| (point.clone(), *point_id))
+                    .collect();
+                Oracle::new_multivariate(comm.log_size() as usize, move |point: Vec<B::F>| {
+                    let point_id = mv_point_to_id.get(&point).ok_or(SnarkError::VerifierError(
+                        VerifierError::OracleEvalNotProvided(id.to_int(), f_vec_short_str(&point)),
+                    ))?;
+                    let query_res = *mv_queries_clone
+                        .get(&id)
+                        .and_then(|queries_by_point| queries_by_point.get(point_id))
+                        .ok_or(SnarkError::VerifierError(
+                            VerifierError::OracleEvalNotProvided(
+                                id.to_int(),
+                                f_vec_short_str(&point),
+                            ),
+                        ))?;
+                    Ok(query_res)
+                })
+            }
+            None => panic!("Should not be called"),
+        };
+        let mut terms = VirtualOracle::new();
+        terms.push((B::F::one(), vec![id]));
+        self.state.base_oracles.insert(id, oracle);
+        self.state.virtual_oracles.insert(id, terms);
+        self.state
+            .oracle_log_sizes
+            .insert(id, comm.log_size() as usize);
+        self.state.oracle_kinds.insert(
+            id,
+            crate::verifier::structs::oracle::OracleKind::Multivariate,
+        );
+        self.state.oracle_is_material.insert(id, true);
+        self.state.oracle_degrees.insert(id, 1);
+        self.state
+            .mv_pcs_substate
+            .materialized_comms
+            .insert(id, comm);
+        self.state
+            .mv_pcs_substate
+            .external_materialized_comm_ids
+            .insert(id);
+        Ok(id)
+    }
+
     // Track a materiazlied univariate commitment
     pub fn track_mat_uv_com(
         &mut self,
