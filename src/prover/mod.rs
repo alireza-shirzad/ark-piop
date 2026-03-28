@@ -122,6 +122,16 @@ where
         Rc::clone(&self.tracker_rc)
     }
 
+    /// Return the number of tracked materialized commitments currently owned by
+    /// the prover state for the multivariate and univariate PCS substates.
+    pub fn commitment_counts(&self) -> (usize, usize) {
+        let tracker = self.tracker_rc.borrow();
+        (
+            tracker.state.mv_pcs_substate.materialized_comms.len(),
+            tracker.state.uv_pcs_substate.materialized_comms.len(),
+        )
+    }
+
     /// Track a materialized multivariate polynomial
     /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
     /// map and returns the TrackerID
