@@ -188,6 +188,26 @@ where
         Ok(tracked_poly)
     }
 
+    #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
+    pub fn track_and_send_mat_mv_poly(&mut self, polynomial: &MLE<B::F>) -> SnarkResult<TrackedPoly<B>> {
+        let num_vars = polynomial.num_vars();
+        Span::current().record("num_vars", num_vars);
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("polynomial", debug(&polynomial));
+        }
+        let tracked_poly = TrackedPoly::new(
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_and_send_mat_mv_poly(polynomial)?,
+            ),
+            num_vars,
+            self.tracker_rc.clone(),
+        );
+        trace!("assigned id {}", tracked_poly.id());
+        Ok(tracked_poly)
+    }
+
     #[instrument(level = "trace", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     /// Track a materialized polynomial using a pre-computed commitment.
     pub fn track_mat_mv_poly_with_commitment(

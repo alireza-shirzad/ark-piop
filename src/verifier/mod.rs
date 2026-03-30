@@ -10,6 +10,7 @@ use tracing::{Span, field::debug, instrument, trace};
 
 use crate::{
     SnarkBackend,
+    arithmetic::mat_poly::mle::MLE,
     errors::SnarkResult,
     pcs::PolynomialCommitment,
     piop::{PIOP, lookup_check},
@@ -276,6 +277,21 @@ where
             self.tracker_rc.clone(),
             nv,
         ))
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_mv_poly_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
+        let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_poly_by_id(id)?;
+        Ok(TrackedOracle::new(
+            Either::Left(tracker_id),
+            self.tracker_rc.clone(),
+            nv,
+        ))
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn sent_mv_poly_by_id(&self, id: TrackerID) -> SnarkResult<MLE<B::F>> {
+        self.tracker_rc.borrow().sent_mv_poly_by_id(id)
     }
 
     #[instrument(level = "debug", skip(self))]

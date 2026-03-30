@@ -1,6 +1,6 @@
 use crate::{
     SnarkBackend,
-    arithmetic::{f_vec_short_str, mat_poly::utils::eq_eval},
+    arithmetic::{f_vec_short_str, mat_poly::{mle::MLE, utils::eq_eval}},
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
     piop::{errors::PolyIOPErrors, sum_check::SumCheck},
@@ -16,6 +16,7 @@ use crate::{
     verifier::structs::oracle::InnerOracle,
 };
 use ark_ff::PrimeField;
+use ark_poly::Polynomial;
 use ark_std::{One, Zero};
 use either::Either;
 use itertools::MultiUnzip;
@@ -160,6 +161,48 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             );
         }
         Ok((nv as usize, new_id))
+    }
+
+    pub fn track_mv_poly_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
+        let polynomial: MLE<B::F>;
+        {
+            let poly_opt = self.proof.as_ref().unwrap().sent_mv_polys.get(&id);
+            match poly_opt {
+                Some(value) => {
+                    polynomial = value.clone();
+                }
+                None => {
+                    panic!(
+                        "VerifierTracker Error: attempted to transfer prover polynomial, but id not found: {}",
+                        id
+                    );
+                }
+            }
+        }
+        let nv = polynomial.num_vars();
+        let new_id = self.track_mat_mv_poly(polynomial)?;
+
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(
+                id, new_id,
+                "VerifierTracker Error: attempted to transfer prover polynomial, but ids don't match: {}, {}",
+                id, new_id
+            );
+        }
+        Ok((nv, new_id))
+    }
+
+    pub fn sent_mv_poly_by_id(&self, id: TrackerID) -> SnarkResult<MLE<B::F>> {
+        self.proof
+            .as_ref()
+            .and_then(|proof| proof.sent_mv_polys.get(&id).cloned())
+            .ok_or_else(|| {
+                SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
+                    id.to_int(),
+                    "sent_mv_poly".to_string(),
+                ))
+            })
     }
 
     pub fn mv_commitment(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {
@@ -429,6 +472,36 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .mv_pcs_substate
             .external_materialized_comm_ids
             .insert(id);
+        Ok(id)
+    }
+
+    pub(crate) fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> SnarkResult<TrackerID> {
+        let id = self.gen_id();
+        let nv = polynomial.num_vars();
+        let polynomial = std::sync::Arc::new(polynomial);
+        let oracle_poly = polynomial.clone();
+        let oracle = Oracle::new_multivariate(nv, move |mut point: Vec<B::F>| {
+            if point.len() > nv {
+                point.truncate(nv);
+            } else if point.len() < nv {
+                point.resize(nv, B::F::zero());
+            }
+            Ok(oracle_poly.evaluate(&point))
+        });
+        let mut terms = VirtualOracle::new();
+        terms.push((B::F::one(), vec![id]));
+        self.state.base_oracles.insert(id, oracle);
+        self.state.virtual_oracles.insert(id, terms);
+        self.state.oracle_log_sizes.insert(id, nv);
+        self.state.oracle_kinds.insert(
+            id,
+            crate::verifier::structs::oracle::OracleKind::Multivariate,
+        );
+        self.state.oracle_is_material.insert(id, true);
+        self.state.oracle_degrees.insert(id, 1);
+        self.state
+            .transcript
+            .append_serializable_element(b"mv_poly", polynomial.as_ref())?;
         Ok(id)
     }
 

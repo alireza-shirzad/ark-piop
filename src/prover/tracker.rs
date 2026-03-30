@@ -227,6 +227,17 @@ where
         Self::track_mat_mv_p_and_commitment(self, &polynomial, commitment)
     }
 
+    /// Tracks a materialized multivariate polynomial and includes it directly in the proof.
+    pub fn track_and_send_mat_mv_poly(&mut self, polynomial: &MLE<B::F>) -> SnarkResult<TrackerID> {
+        let polynomial = Arc::new(polynomial.clone());
+        let poly_id = self.track_mat_arc_mv_poly(polynomial.clone());
+        self.state.sent_mv_poly_ids.insert(poly_id);
+        self.state
+            .transcript
+            .append_serializable_element(b"mv_poly", polynomial.as_ref())?;
+        Ok(poly_id)
+    }
+
     pub fn track_mat_mv_p_and_commitment(
         &mut self,
         polynomial: &MLE<B::F>,
@@ -2181,6 +2192,18 @@ where
             sc_subproof: self.compile_sc_subproof(max_nv)?,
             mv_pcs_subproof: self.compile_mv_pcs_subproof()?,
             uv_pcs_subproof: self.compile_uv_pcs_subproof()?,
+            sent_mv_polys: self
+                .state
+                .sent_mv_poly_ids
+                .iter()
+                .filter_map(|id| {
+                    self.state
+                        .mv_pcs_substate
+                        .materialized_polys
+                        .get(id)
+                        .map(|poly| (*id, poly.as_ref().as_ref().clone()))
+                })
+                .collect(),
             miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
         };
         self.state.miscellaneous_field_elements.clear();

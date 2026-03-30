@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::SnarkBackend;
+use crate::arithmetic::mat_poly::mle::MLE;
 use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
@@ -20,6 +21,7 @@ where
     pub sc_subproof: Option<SumcheckSubproof<B::F>>,
     pub mv_pcs_subproof: PCSSubproof<B::F, B::MvPCS>,
     pub uv_pcs_subproof: PCSSubproof<B::F, B::UvPCS>,
+    pub sent_mv_polys: BTreeMap<TrackerID, MLE<B::F>>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
 }
 
