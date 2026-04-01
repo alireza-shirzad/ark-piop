@@ -958,6 +958,18 @@ where
         self.state.miscellaneous_field_elements.insert(key, field);
     }
 
+    pub fn insert_auxiliary_mv_poly(
+        &mut self,
+        key: String,
+        polynomial: MLE<B::F>,
+    ) -> SnarkResult<()> {
+        self.state
+            .transcript
+            .append_serializable_element(b"aux_mv_poly", polynomial.as_ref())?;
+        self.state.auxiliary_sent_mv_polys.insert(key, polynomial);
+        Ok(())
+    }
+
     pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
         self.state
             .miscellaneous_field_elements
@@ -2204,8 +2216,10 @@ where
                         .map(|poly| (*id, poly.as_ref().as_ref().clone()))
                 })
                 .collect(),
+            auxiliary_sent_mv_polys: self.state.auxiliary_sent_mv_polys.clone(),
             miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
         };
+        self.state.auxiliary_sent_mv_polys.clear();
         self.state.miscellaneous_field_elements.clear();
         Ok(proof)
     }

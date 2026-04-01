@@ -856,6 +856,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .ok_or(SnarkError::DummyError)
     }
 
+    pub fn auxiliary_mv_poly(&mut self, key: &str) -> SnarkResult<MLE<B::F>> {
+        let polynomial = self
+            .proof
+            .as_ref()
+            .and_then(|proof| proof.auxiliary_sent_mv_polys.get(key).cloned())
+            .ok_or(SnarkError::DummyError)?;
+        self.state
+            .transcript
+            .append_serializable_element(b"aux_mv_poly", polynomial.as_ref())?;
+        Ok(polynomial)
+    }
+
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.state
             .mv_pcs_substate

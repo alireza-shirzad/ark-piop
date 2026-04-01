@@ -340,6 +340,16 @@ where
         self.tracker_rc.borrow().miscellaneous_field_element(key)
     }
 
+    pub fn send_auxiliary_mv_poly(
+        &mut self,
+        key: String,
+        polynomial: MLE<B::F>,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .insert_auxiliary_mv_poly(key, polynomial)
+    }
+
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {

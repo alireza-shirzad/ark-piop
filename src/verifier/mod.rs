@@ -162,6 +162,17 @@ where
         )
     }
 
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_mv_poly(&self, polynomial: MLE<B::F>) -> SnarkResult<TrackedOracle<B>> {
+        let log_size = polynomial.num_vars();
+        let tracker_id = self.tracker_rc.borrow_mut().track_mat_mv_poly(polynomial)?;
+        Ok(TrackedOracle::new(
+            Either::Left(tracker_id),
+            self.tracker_rc.clone(),
+            log_size,
+        ))
+    }
+
     pub fn get_or_build_contig_one_oracle(
         &mut self,
         nv: usize,
@@ -217,6 +228,11 @@ where
     #[instrument(level = "debug", skip(self))]
     pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
         RefCell::borrow(&self.tracker_rc).miscellaneous_field_element(label)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn auxiliary_mv_poly(&mut self, key: &str) -> SnarkResult<MLE<B::F>> {
+        self.tracker_rc.borrow_mut().auxiliary_mv_poly(key)
     }
 
     pub fn add_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {

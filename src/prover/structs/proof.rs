@@ -22,6 +22,7 @@ where
     pub mv_pcs_subproof: PCSSubproof<B::F, B::MvPCS>,
     pub uv_pcs_subproof: PCSSubproof<B::F, B::UvPCS>,
     pub sent_mv_polys: BTreeMap<TrackerID, MLE<B::F>>,
+    pub auxiliary_sent_mv_polys: BTreeMap<String, MLE<B::F>>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
 }
 

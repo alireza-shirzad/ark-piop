@@ -78,6 +78,7 @@ where
     pub mv_pcs_subproof: ProcessedPCSSubproof<B::F, B::MvPCS>,
     pub uv_pcs_subproof: ProcessedPCSSubproof<B::F, B::UvPCS>,
     pub sent_mv_polys: BTreeMap<TrackerID, MLE<B::F>>,
+    pub auxiliary_sent_mv_polys: BTreeMap<String, MLE<B::F>>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
 }
 
@@ -95,6 +96,7 @@ where
             mv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.mv_pcs_subproof),
             uv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.uv_pcs_subproof),
             sent_mv_polys: proof.sent_mv_polys.clone(),
+            auxiliary_sent_mv_polys: proof.auxiliary_sent_mv_polys.clone(),
             miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
         }
     }
