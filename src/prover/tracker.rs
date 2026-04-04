@@ -69,6 +69,16 @@ struct SumcheckInvocationStats {
     num_terms: usize,
     prove_time_s: f64,
 }
+
+#[derive(Clone, Debug, Default)]
+struct ClaimStageStats {
+    non_zero_checks_count: usize,
+    non_zero_checks_degree_distribution: Vec<usize>,
+    zero_checks_count: usize,
+    zero_checks_degree_distribution: Vec<usize>,
+    sum_checks_count: usize,
+    sum_checks_degree_distribution: Vec<usize>,
+}
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
 ///  1) Recording the structure of virtual polynomials and
@@ -98,6 +108,90 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
+    fn current_claim_stage_stats(&self) -> ClaimStageStats {
+        let non_zero_checks_degree_distribution = self
+            .state
+            .mv_pcs_substate
+            .no_zero_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+        let zero_checks_degree_distribution = self
+            .state
+            .mv_pcs_substate
+            .zero_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+        let sum_checks_degree_distribution = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| self.virt_poly_degree(claim.id()))
+            .collect::<Vec<_>>();
+
+        ClaimStageStats {
+            non_zero_checks_count: non_zero_checks_degree_distribution.len(),
+            non_zero_checks_degree_distribution,
+            zero_checks_count: zero_checks_degree_distribution.len(),
+            zero_checks_degree_distribution,
+            sum_checks_count: sum_checks_degree_distribution.len(),
+            sum_checks_degree_distribution,
+        }
+    }
+
+    fn emit_claim_pipeline_stats(
+        &self,
+        before_initial: &ClaimStageStats,
+        before_after_nozero_batching: &ClaimStageStats,
+        before_after_zero_batching: &ClaimStageStats,
+        before_after_sum_batching: &ClaimStageStats,
+        after_after_zero_batching: &ClaimStageStats,
+        after_after_sum_batching: &ClaimStageStats,
+    ) {
+        info!(
+            target: "bench_stats",
+            claims_before_degree_reduction_initial_non_zero_checks_count = before_initial.non_zero_checks_count,
+            claims_before_degree_reduction_initial_non_zero_checks_degree_distribution = ?before_initial.non_zero_checks_degree_distribution,
+            claims_before_degree_reduction_initial_zero_checks_count = before_initial.zero_checks_count,
+            claims_before_degree_reduction_initial_zero_checks_degree_distribution = ?before_initial.zero_checks_degree_distribution,
+            claims_before_degree_reduction_initial_sum_checks_count = before_initial.sum_checks_count,
+            claims_before_degree_reduction_initial_sum_checks_degree_distribution = ?before_initial.sum_checks_degree_distribution,
+            claims_before_degree_reduction_after_nozero_batching_non_zero_checks_count = before_after_nozero_batching.non_zero_checks_count,
+            claims_before_degree_reduction_after_nozero_batching_non_zero_checks_degree_distribution = ?before_after_nozero_batching.non_zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_nozero_batching_zero_checks_count = before_after_nozero_batching.zero_checks_count,
+            claims_before_degree_reduction_after_nozero_batching_zero_checks_degree_distribution = ?before_after_nozero_batching.zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_nozero_batching_sum_checks_count = before_after_nozero_batching.sum_checks_count,
+            claims_before_degree_reduction_after_nozero_batching_sum_checks_degree_distribution = ?before_after_nozero_batching.sum_checks_degree_distribution,
+            claims_before_degree_reduction_after_zero_batching_non_zero_checks_count = before_after_zero_batching.non_zero_checks_count,
+            claims_before_degree_reduction_after_zero_batching_non_zero_checks_degree_distribution = ?before_after_zero_batching.non_zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_zero_batching_zero_checks_count = before_after_zero_batching.zero_checks_count,
+            claims_before_degree_reduction_after_zero_batching_zero_checks_degree_distribution = ?before_after_zero_batching.zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_zero_batching_sum_checks_count = before_after_zero_batching.sum_checks_count,
+            claims_before_degree_reduction_after_zero_batching_sum_checks_degree_distribution = ?before_after_zero_batching.sum_checks_degree_distribution,
+            claims_before_degree_reduction_after_sum_batching_non_zero_checks_count = before_after_sum_batching.non_zero_checks_count,
+            claims_before_degree_reduction_after_sum_batching_non_zero_checks_degree_distribution = ?before_after_sum_batching.non_zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_sum_batching_zero_checks_count = before_after_sum_batching.zero_checks_count,
+            claims_before_degree_reduction_after_sum_batching_zero_checks_degree_distribution = ?before_after_sum_batching.zero_checks_degree_distribution,
+            claims_before_degree_reduction_after_sum_batching_sum_checks_count = before_after_sum_batching.sum_checks_count,
+            claims_before_degree_reduction_after_sum_batching_sum_checks_degree_distribution = ?before_after_sum_batching.sum_checks_degree_distribution,
+            claims_after_degree_reduction_after_zero_batching_non_zero_checks_count = after_after_zero_batching.non_zero_checks_count,
+            claims_after_degree_reduction_after_zero_batching_non_zero_checks_degree_distribution = ?after_after_zero_batching.non_zero_checks_degree_distribution,
+            claims_after_degree_reduction_after_zero_batching_zero_checks_count = after_after_zero_batching.zero_checks_count,
+            claims_after_degree_reduction_after_zero_batching_zero_checks_degree_distribution = ?after_after_zero_batching.zero_checks_degree_distribution,
+            claims_after_degree_reduction_after_zero_batching_sum_checks_count = after_after_zero_batching.sum_checks_count,
+            claims_after_degree_reduction_after_zero_batching_sum_checks_degree_distribution = ?after_after_zero_batching.sum_checks_degree_distribution,
+            claims_after_degree_reduction_after_sum_batching_non_zero_checks_count = after_after_sum_batching.non_zero_checks_count,
+            claims_after_degree_reduction_after_sum_batching_non_zero_checks_degree_distribution = ?after_after_sum_batching.non_zero_checks_degree_distribution,
+            claims_after_degree_reduction_after_sum_batching_zero_checks_count = after_after_sum_batching.zero_checks_count,
+            claims_after_degree_reduction_after_sum_batching_zero_checks_degree_distribution = ?after_after_sum_batching.zero_checks_degree_distribution,
+            claims_after_degree_reduction_after_sum_batching_sum_checks_count = after_after_sum_batching.sum_checks_count,
+            claims_after_degree_reduction_after_sum_batching_sum_checks_degree_distribution = ?after_after_sum_batching.sum_checks_degree_distribution,
+            "sc_claim_counts"
+        );
+    }
+
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         let mut tracker = Self {
             pk: ProcessedSNARKPk::new_from_pk(&pk),
@@ -225,17 +319,6 @@ where
         // commit to the polynomial
         let commitment = B::MvPCS::commit(self.pk.mv_pcs_param.as_ref(), &polynomial)?;
         Self::track_mat_mv_p_and_commitment(self, &polynomial, commitment)
-    }
-
-    /// Tracks a materialized multivariate polynomial and includes it directly in the proof.
-    pub fn track_and_send_mat_mv_poly(&mut self, polynomial: &MLE<B::F>) -> SnarkResult<TrackerID> {
-        let polynomial = Arc::new(polynomial.clone());
-        let poly_id = self.track_mat_arc_mv_poly(polynomial.clone());
-        self.state.sent_mv_poly_ids.insert(poly_id);
-        self.state
-            .transcript
-            .append_serializable_element(b"mv_poly", polynomial.as_ref())?;
-        Ok(poly_id)
     }
 
     pub fn track_mat_mv_p_and_commitment(
@@ -956,18 +1039,6 @@ where
 
     pub fn insert_miscellaneous_field(&mut self, key: String, field: B::F) {
         self.state.miscellaneous_field_elements.insert(key, field);
-    }
-
-    pub fn insert_auxiliary_mv_poly(
-        &mut self,
-        key: String,
-        polynomial: MLE<B::F>,
-    ) -> SnarkResult<()> {
-        self.state
-            .transcript
-            .append_serializable_element(b"aux_mv_poly", polynomial.as_ref())?;
-        self.state.auxiliary_sent_mv_polys.insert(key, polynomial);
-        Ok(())
     }
 
     pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
@@ -1907,66 +1978,43 @@ where
         &mut self,
         max_nv: usize,
     ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
-        let nonzerocheck_degrees = self
-            .state
-            .mv_pcs_substate
-            .no_zero_check_claims
-            .iter()
-            .map(|claim| self.virt_poly_degree(claim.id()))
-            .collect::<Vec<_>>();
-        let zerocheck_degrees = self
-            .state
-            .mv_pcs_substate
-            .zero_check_claims
-            .iter()
-            .map(|claim| self.virt_poly_degree(claim.id()))
-            .collect::<Vec<_>>();
-        let sumcheck_degrees = self
-            .state
-            .mv_pcs_substate
-            .sum_check_claims
-            .iter()
-            .map(|claim| self.virt_poly_degree(claim.id()))
-            .collect::<Vec<_>>();
-
+        let before_initial = self.current_claim_stage_stats();
         self.batch_nozero_check_claims()?;
+        let before_after_nozero_batching = self.current_claim_stage_stats();
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
+        let before_after_zero_batching = self.current_claim_stage_stats();
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // Batch all the sumcheck claims into one sumcheck claim
         let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
+        let before_after_sum_batching = self.current_claim_stage_stats();
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove",);
-            info!(
-                target: "bench_stats",
-                phase = "compile_sc_subproof_pre_batch",
-                nonzerocheck_claims = nonzerocheck_degrees.len(),
-                nonzerocheck_degree_distribution = ?nonzerocheck_degrees,
-                zerocheck_claims = zerocheck_degrees.len(),
-                zerocheck_degree_distribution = ?zerocheck_degrees,
-                sumcheck_claims = sumcheck_degrees.len(),
-                sumcheck_degree_distribution = ?sumcheck_degrees,
-                lookup_claims = self.state.bench_lookup_claims_pre_reduction,
-                reduce_degree_max_degree = 0,
-                reduce_degree_num_commited = 0,
-                sumcheck_degree = 0,
-                sumcheck_num_terms = 0,
-                sumcheck_prove_time_s = 0.0,
-                "sc_claim_counts"
+            let after_after_zero_batching = ClaimStageStats::default();
+            let after_after_sum_batching = ClaimStageStats::default();
+            self.emit_claim_pipeline_stats(
+                &before_initial,
+                &before_after_nozero_batching,
+                &before_after_zero_batching,
+                &before_after_sum_batching,
+                &after_after_zero_batching,
+                &after_after_sum_batching,
             );
             return Ok(None);
         }
 
         // Reduce high-degree terms deterministically before sumcheck.
-        let reduce_stats = self.reduce_sumcheck_dgree()?;
+        let _reduce_stats = self.reduce_sumcheck_dgree()?;
 
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
         self.batch_z_check_claims()?;
+        let after_after_zero_batching = self.current_claim_stage_stats();
         // Convert the only zerocheck claim to a sumcheck claim
         self.z_check_claim_to_s_check_claim(max_nv)?;
         // Batch all the sumcheck claims into one sumcheck claim
         let additional_sumcheck_claims = self.batch_s_check_claims()?;
+        let after_after_sum_batching = self.current_claim_stage_stats();
         for (id, claim) in additional_sumcheck_claims {
             individual_sumcheck_claims.entry(id).or_insert(claim);
         }
@@ -1975,23 +2023,14 @@ where
         //     return Ok(None);
         // }
         // Perform the one batched sumcheck
-        let (sc_proof, sc_aux_info, sumcheck_stats) = self.perform_single_sumcheck()?;
-        info!(
-            target: "bench_stats",
-            phase = "compile_sc_subproof_pre_batch",
-            nonzerocheck_claims = nonzerocheck_degrees.len(),
-            nonzerocheck_degree_distribution = ?nonzerocheck_degrees,
-            zerocheck_claims = zerocheck_degrees.len(),
-            zerocheck_degree_distribution = ?zerocheck_degrees,
-            sumcheck_claims = sumcheck_degrees.len(),
-            sumcheck_degree_distribution = ?sumcheck_degrees,
-            lookup_claims = self.state.bench_lookup_claims_pre_reduction,
-            reduce_degree_max_degree = reduce_stats.max_degree,
-            reduce_degree_num_commited = reduce_stats.num_committed,
-            sumcheck_degree = sumcheck_stats.degree,
-            sumcheck_num_terms = sumcheck_stats.num_terms,
-            sumcheck_prove_time_s = sumcheck_stats.prove_time_s,
-            "sc_claim_counts"
+        let (sc_proof, sc_aux_info, _sumcheck_stats) = self.perform_single_sumcheck()?;
+        self.emit_claim_pipeline_stats(
+            &before_initial,
+            &before_after_nozero_batching,
+            &before_after_zero_batching,
+            &before_after_sum_batching,
+            &after_after_zero_batching,
+            &after_after_sum_batching,
         );
         // Assemble the sumcheck subproof of the prover
         let sc_subproof = SumcheckSubproof::new(
@@ -2204,22 +2243,8 @@ where
             sc_subproof: self.compile_sc_subproof(max_nv)?,
             mv_pcs_subproof: self.compile_mv_pcs_subproof()?,
             uv_pcs_subproof: self.compile_uv_pcs_subproof()?,
-            sent_mv_polys: self
-                .state
-                .sent_mv_poly_ids
-                .iter()
-                .filter_map(|id| {
-                    self.state
-                        .mv_pcs_substate
-                        .materialized_polys
-                        .get(id)
-                        .map(|poly| (*id, poly.as_ref().as_ref().clone()))
-                })
-                .collect(),
-            auxiliary_sent_mv_polys: self.state.auxiliary_sent_mv_polys.clone(),
             miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
         };
-        self.state.auxiliary_sent_mv_polys.clear();
         self.state.miscellaneous_field_elements.clear();
         Ok(proof)
     }

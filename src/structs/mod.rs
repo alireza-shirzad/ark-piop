@@ -12,7 +12,9 @@ use ark_serialize::{
 use derivative::Derivative;
 use std::{collections::BTreeMap, fmt::Display};
 /////////// Types ///////////
+//TODO: Check a map from point id to (polynomial,F)
 pub type QueryMap<F> = BTreeMap<TrackerID, BTreeMap<PointID, F>>;
+//TODO: Double check uniqueness
 pub type PointMap<F, PC> = BTreeMap<PointID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point>;
 
 /////////// Structs ///////////

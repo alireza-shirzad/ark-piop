@@ -72,8 +72,6 @@ where
 
     /// Mutable indexed tracked polynomials for protocol-time updates.
     pub indexed_tracked_polys: BTreeMap<String, TrackedPoly<B>>,
-    pub sent_mv_poly_ids: BTreeSet<TrackerID>,
-    pub auxiliary_sent_mv_polys: BTreeMap<String, MLE<B::F>>,
 
     pub mv_pcs_substate: ProverPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,

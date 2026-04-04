@@ -1,6 +1,9 @@
 use crate::{
     SnarkBackend,
-    arithmetic::{f_vec_short_str, mat_poly::{mle::MLE, utils::eq_eval}},
+    arithmetic::{
+        f_vec_short_str,
+        mat_poly::{mle::MLE, utils::eq_eval},
+    },
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
     piop::{errors::PolyIOPErrors, sum_check::SumCheck},
@@ -161,48 +164,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             );
         }
         Ok((nv as usize, new_id))
-    }
-
-    pub fn track_mv_poly_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
-        let polynomial: MLE<B::F>;
-        {
-            let poly_opt = self.proof.as_ref().unwrap().sent_mv_polys.get(&id);
-            match poly_opt {
-                Some(value) => {
-                    polynomial = value.clone();
-                }
-                None => {
-                    panic!(
-                        "VerifierTracker Error: attempted to transfer prover polynomial, but id not found: {}",
-                        id
-                    );
-                }
-            }
-        }
-        let nv = polynomial.num_vars();
-        let new_id = self.track_mat_mv_poly(polynomial)?;
-
-        #[cfg(debug_assertions)]
-        {
-            assert_eq!(
-                id, new_id,
-                "VerifierTracker Error: attempted to transfer prover polynomial, but ids don't match: {}, {}",
-                id, new_id
-            );
-        }
-        Ok((nv, new_id))
-    }
-
-    pub fn sent_mv_poly_by_id(&self, id: TrackerID) -> SnarkResult<MLE<B::F>> {
-        self.proof
-            .as_ref()
-            .and_then(|proof| proof.sent_mv_polys.get(&id).cloned())
-            .ok_or_else(|| {
-                SnarkError::VerifierError(VerifierError::OracleEvalNotProvided(
-                    id.to_int(),
-                    "sent_mv_poly".to_string(),
-                ))
-            })
     }
 
     pub fn mv_commitment(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {
@@ -854,18 +815,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .as_ref()
             .and_then(|proof| proof.miscellaneous_field_elements.get(label).cloned())
             .ok_or(SnarkError::DummyError)
-    }
-
-    pub fn auxiliary_mv_poly(&mut self, key: &str) -> SnarkResult<MLE<B::F>> {
-        let polynomial = self
-            .proof
-            .as_ref()
-            .and_then(|proof| proof.auxiliary_sent_mv_polys.get(key).cloned())
-            .ok_or(SnarkError::DummyError)?;
-        self.state
-            .transcript
-            .append_serializable_element(b"aux_mv_poly", polynomial.as_ref())?;
-        Ok(polynomial)
     }
 
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
