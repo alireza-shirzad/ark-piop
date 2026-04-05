@@ -35,7 +35,15 @@ where
     fn default() -> Self {
         Self {
             log_size: 23,
-            srs_path: current_dir().unwrap().join("..").join("srs"),
+            // Truth-table commands are typically executed from a crate
+            // directory such as `tt-exec`, so keep the default relative to the
+            // caller's working directory but store the reusable SRS artifacts
+            // under the workspace-level `artifacts/srs` folder.
+            srs_path: current_dir()
+                .unwrap()
+                .join("..")
+                .join("artifacts")
+                .join("srs"),
             _phantom: PhantomData,
         }
     }
