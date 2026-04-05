@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 
-use crate::{artifact::Artifact, errors::SnarkResult, SnarkBackend};
+use crate::{
+    artifact::{Artifact, SizeBreakdown},
+    errors::SnarkResult,
+    SnarkBackend,
+};
 use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
@@ -8,7 +12,7 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use derivative::Derivative;
 /// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
@@ -64,5 +68,55 @@ where
                 )?)
             }
         }
+    }
+
+    fn size_breakdown(&self) -> Option<SizeBreakdown> {
+        let sc_subproof = self.sc_subproof.serialized_size(Compress::Yes);
+
+        let mv_opening_proof = self.mv_pcs_subproof.opening_proof.serialized_size(Compress::Yes);
+        let mv_commitments = self.mv_pcs_subproof.comitments.serialized_size(Compress::Yes);
+        let mv_query_map = self.mv_pcs_subproof.query_map.serialized_size(Compress::Yes);
+        let mv_pcs_subproof = self.mv_pcs_subproof.serialized_size(Compress::Yes);
+
+        let uv_opening_proof = self.uv_pcs_subproof.opening_proof.serialized_size(Compress::Yes);
+        let uv_commitments = self.uv_pcs_subproof.comitments.serialized_size(Compress::Yes);
+        let uv_query_map = self.uv_pcs_subproof.query_map.serialized_size(Compress::Yes);
+        let uv_pcs_subproof = self.uv_pcs_subproof.serialized_size(Compress::Yes);
+
+        let miscellaneous_field_elements = self.miscellaneous_field_elements.serialized_size(Compress::Yes);
+        let total = self.serialized_size(Compress::Yes);
+
+        Some(SizeBreakdown::node(
+            total,
+            [
+                ("sc_subproof", SizeBreakdown::leaf(sc_subproof)),
+                (
+                    "mv_pcs_subproof",
+                    SizeBreakdown::node(
+                        mv_pcs_subproof,
+                        [
+                            ("opening_proof", SizeBreakdown::leaf(mv_opening_proof)),
+                            ("commitments", SizeBreakdown::leaf(mv_commitments)),
+                            ("query_map", SizeBreakdown::leaf(mv_query_map)),
+                        ],
+                    ),
+                ),
+                (
+                    "uv_pcs_subproof",
+                    SizeBreakdown::node(
+                        uv_pcs_subproof,
+                        [
+                            ("opening_proof", SizeBreakdown::leaf(uv_opening_proof)),
+                            ("commitments", SizeBreakdown::leaf(uv_commitments)),
+                            ("query_map", SizeBreakdown::leaf(uv_query_map)),
+                        ],
+                    ),
+                ),
+                (
+                    "miscellaneous_field_elements",
+                    SizeBreakdown::leaf(miscellaneous_field_elements),
+                ),
+            ],
+        ))
     }
 }
