@@ -1,4 +1,5 @@
 pub mod arithmetic;
+pub mod artifact;
 pub mod errors;
 pub mod pcs;
 pub mod piop;

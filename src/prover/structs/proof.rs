@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::SnarkBackend;
+use crate::{artifact::Artifact, errors::SnarkResult, SnarkBackend};
 use crate::structs::PCSOpeningProof;
 use crate::{
     pcs::PCS,
@@ -40,4 +40,29 @@ where
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub point_map: PointMap<F, PC>,
     pub query_map: QueryMap<F>,
+}
+
+impl<B> Artifact for SNARKProof<B>
+where
+    B: SnarkBackend,
+    SNARKProof<B>: CanonicalSerialize + CanonicalDeserialize,
+{
+    fn to_bytes(&self) -> SnarkResult<Vec<u8>> {
+        let mut buffer = Vec::new();
+        self.serialize_compressed(&mut buffer)?;
+        Ok(buffer)
+    }
+
+    fn from_bytes(bytes: &[u8]) -> SnarkResult<Self> {
+        let mut cursor = std::io::Cursor::new(bytes);
+        match Self::deserialize_compressed_unchecked(&mut cursor) {
+            Ok(proof) => Ok(proof),
+            Err(_) => {
+                let mut fallback_cursor = std::io::Cursor::new(bytes);
+                Ok(Self::deserialize_uncompressed_unchecked(
+                    &mut fallback_cursor,
+                )?)
+            }
+        }
+    }
 }

@@ -43,6 +43,18 @@ pub enum SnarkError {
     #[error("TruthTable Prover Error")]
     SetupError(#[from] SetupError),
 
+    /// Error when reading or writing an artifact.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Error when serializing or deserializing an artifact with arkworks codecs.
+    #[error("serialization error: {0}")]
+    Serialization(#[from] ark_serialize::SerializationError),
+
+    /// Error for artifact-specific encoding formats outside the core SNARK stack.
+    #[error("artifact error: {0}")]
+    Artifact(String),
+
     #[error("Error")]
     DummyError,
 }
