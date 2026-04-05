@@ -79,6 +79,18 @@ struct ClaimStageStats {
     sum_checks_count: usize,
     sum_checks_degree_distribution: Vec<usize>,
 }
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ScCompileTimingBreakdown {
+    nozerocheck_batching_time_s: f64,
+    first_batch_zerocheck_time_s: f64,
+    first_zerocheck_to_sumcheck_time_s: f64,
+    first_batch_sumcheck_time_s: f64,
+    reduce_sumcheck_time_s: f64,
+    second_batch_zerocheck_time_s: f64,
+    second_zerocheck_to_sumcheck_time_s: f64,
+    sumcheck_time_s: f64,
+}
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of  
 ///  1) Recording the structure of virtual polynomials and
@@ -147,6 +159,7 @@ where
         before_after_nozero_batching: &ClaimStageStats,
         before_after_zero_batching: &ClaimStageStats,
         before_after_sum_batching: &ClaimStageStats,
+        after_initial: &ClaimStageStats,
         after_after_zero_batching: &ClaimStageStats,
         after_after_sum_batching: &ClaimStageStats,
     ) {
@@ -176,6 +189,12 @@ where
             claims_before_degree_reduction_after_sum_batching_zero_checks_degree_distribution = ?before_after_sum_batching.zero_checks_degree_distribution,
             claims_before_degree_reduction_after_sum_batching_sum_checks_count = before_after_sum_batching.sum_checks_count,
             claims_before_degree_reduction_after_sum_batching_sum_checks_degree_distribution = ?before_after_sum_batching.sum_checks_degree_distribution,
+            claims_after_degree_reduction_initial_non_zero_checks_count = after_initial.non_zero_checks_count,
+            claims_after_degree_reduction_initial_non_zero_checks_degree_distribution = ?after_initial.non_zero_checks_degree_distribution,
+            claims_after_degree_reduction_initial_zero_checks_count = after_initial.zero_checks_count,
+            claims_after_degree_reduction_initial_zero_checks_degree_distribution = ?after_initial.zero_checks_degree_distribution,
+            claims_after_degree_reduction_initial_sum_checks_count = after_initial.sum_checks_count,
+            claims_after_degree_reduction_initial_sum_checks_degree_distribution = ?after_initial.sum_checks_degree_distribution,
             claims_after_degree_reduction_after_zero_batching_non_zero_checks_count = after_after_zero_batching.non_zero_checks_count,
             claims_after_degree_reduction_after_zero_batching_non_zero_checks_degree_distribution = ?after_after_zero_batching.non_zero_checks_degree_distribution,
             claims_after_degree_reduction_after_zero_batching_zero_checks_count = after_after_zero_batching.zero_checks_count,
@@ -189,6 +208,21 @@ where
             claims_after_degree_reduction_after_sum_batching_sum_checks_count = after_after_sum_batching.sum_checks_count,
             claims_after_degree_reduction_after_sum_batching_sum_checks_degree_distribution = ?after_after_sum_batching.sum_checks_degree_distribution,
             "sc_claim_counts"
+        );
+    }
+
+    fn emit_sc_compile_timing_breakdown(&self, breakdown: ScCompileTimingBreakdown) {
+        info!(
+            target: "bench_stats",
+            snark_prover_piop_nozerocheck_batching_time_s = breakdown.nozerocheck_batching_time_s,
+            snark_prover_piop_first_batch_zerocheck_time_s = breakdown.first_batch_zerocheck_time_s,
+            snark_prover_piop_first_zerocheck_to_sumcheck_time_s = breakdown.first_zerocheck_to_sumcheck_time_s,
+            snark_prover_piop_first_batch_sumcheck_time_s = breakdown.first_batch_sumcheck_time_s,
+            snark_prover_piop_reduce_sumcheck_time_s = breakdown.reduce_sumcheck_time_s,
+            snark_prover_piop_second_batch_zerocheck_time_s = breakdown.second_batch_zerocheck_time_s,
+            snark_prover_piop_second_zerocheck_to_sumcheck_time_s = breakdown.second_zerocheck_to_sumcheck_time_s,
+            snark_prover_piop_sumcheck_time_s = breakdown.sumcheck_time_s,
+            "snark_prover_piop_breakdown"
         );
     }
 
@@ -1978,19 +2012,32 @@ where
         &mut self,
         max_nv: usize,
     ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        let mut timing_breakdown = ScCompileTimingBreakdown::default();
         let before_initial = self.current_claim_stage_stats();
+        let nozero_batching_started = Instant::now();
         self.batch_nozero_check_claims()?;
+        timing_breakdown.nozerocheck_batching_time_s = nozero_batching_started.elapsed().as_secs_f64();
         let before_after_nozero_batching = self.current_claim_stage_stats();
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
+        let first_batch_zerocheck_started = Instant::now();
         self.batch_z_check_claims()?;
+        timing_breakdown.first_batch_zerocheck_time_s =
+            first_batch_zerocheck_started.elapsed().as_secs_f64();
         let before_after_zero_batching = self.current_claim_stage_stats();
         // Convert the only zerocheck claim to a sumcheck claim
+        let first_zerocheck_to_sumcheck_started = Instant::now();
         self.z_check_claim_to_s_check_claim(max_nv)?;
+        timing_breakdown.first_zerocheck_to_sumcheck_time_s =
+            first_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
         // Batch all the sumcheck claims into one sumcheck claim
+        let first_batch_sumcheck_started = Instant::now();
         let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
+        timing_breakdown.first_batch_sumcheck_time_s =
+            first_batch_sumcheck_started.elapsed().as_secs_f64();
         let before_after_sum_batching = self.current_claim_stage_stats();
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove",);
+            let after_initial = ClaimStageStats::default();
             let after_after_zero_batching = ClaimStageStats::default();
             let after_after_sum_batching = ClaimStageStats::default();
             self.emit_claim_pipeline_stats(
@@ -1998,20 +2045,31 @@ where
                 &before_after_nozero_batching,
                 &before_after_zero_batching,
                 &before_after_sum_batching,
+                &after_initial,
                 &after_after_zero_batching,
                 &after_after_sum_batching,
             );
+            self.emit_sc_compile_timing_breakdown(timing_breakdown);
             return Ok(None);
         }
 
         // Reduce high-degree terms deterministically before sumcheck.
+        let reduce_sumcheck_started = Instant::now();
         let _reduce_stats = self.reduce_sumcheck_dgree()?;
+        timing_breakdown.reduce_sumcheck_time_s = reduce_sumcheck_started.elapsed().as_secs_f64();
+        let after_initial = self.current_claim_stage_stats();
 
         // Batch all the zero-check claims into one claim, remove old zerocheck claims
+        let second_batch_zerocheck_started = Instant::now();
         self.batch_z_check_claims()?;
+        timing_breakdown.second_batch_zerocheck_time_s =
+            second_batch_zerocheck_started.elapsed().as_secs_f64();
         let after_after_zero_batching = self.current_claim_stage_stats();
         // Convert the only zerocheck claim to a sumcheck claim
+        let second_zerocheck_to_sumcheck_started = Instant::now();
         self.z_check_claim_to_s_check_claim(max_nv)?;
+        timing_breakdown.second_zerocheck_to_sumcheck_time_s =
+            second_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
         // Batch all the sumcheck claims into one sumcheck claim
         let additional_sumcheck_claims = self.batch_s_check_claims()?;
         let after_after_sum_batching = self.current_claim_stage_stats();
@@ -2023,15 +2081,19 @@ where
         //     return Ok(None);
         // }
         // Perform the one batched sumcheck
+        let sumcheck_started = Instant::now();
         let (sc_proof, sc_aux_info, _sumcheck_stats) = self.perform_single_sumcheck()?;
+        timing_breakdown.sumcheck_time_s = sumcheck_started.elapsed().as_secs_f64();
         self.emit_claim_pipeline_stats(
             &before_initial,
             &before_after_nozero_batching,
             &before_after_zero_batching,
             &before_after_sum_batching,
+            &after_initial,
             &after_after_zero_batching,
             &after_after_sum_batching,
         );
+        self.emit_sc_compile_timing_breakdown(timing_breakdown);
         // Assemble the sumcheck subproof of the prover
         let sc_subproof = SumcheckSubproof::new(
             sc_proof.clone(),
@@ -2238,11 +2300,32 @@ where
         // Transform all the materialized polynomials to polynomials with the maximum
         // number of variables needed
         let max_nv = self.equalize_mat_poly_nv();
+        let compile_sc_subproof_started = Instant::now();
+        let sc_subproof = self.compile_sc_subproof(max_nv)?;
+        let compile_sc_subproof_time_s = compile_sc_subproof_started.elapsed().as_secs_f64();
+
+        let compile_mv_pcs_subproof_started = Instant::now();
+        let mv_pcs_subproof = self.compile_mv_pcs_subproof()?;
+        let compile_mv_pcs_subproof_time_s =
+            compile_mv_pcs_subproof_started.elapsed().as_secs_f64();
+
+        let compile_uv_pcs_subproof_started = Instant::now();
+        let uv_pcs_subproof = self.compile_uv_pcs_subproof()?;
+        let compile_uv_pcs_subproof_time_s =
+            compile_uv_pcs_subproof_started.elapsed().as_secs_f64();
+
+        info!(
+            target: "bench_stats",
+            snark_prover_piop_time_s = compile_sc_subproof_time_s,
+            snark_prover_mv_pcs_time_s = compile_mv_pcs_subproof_time_s,
+            snark_prover_uv_pcs_time_s = compile_uv_pcs_subproof_time_s,
+            "snark_prover_times"
+        );
         // Assemble and output the final proof
         let proof = SNARKProof {
-            sc_subproof: self.compile_sc_subproof(max_nv)?,
-            mv_pcs_subproof: self.compile_mv_pcs_subproof()?,
-            uv_pcs_subproof: self.compile_uv_pcs_subproof()?,
+            sc_subproof,
+            mv_pcs_subproof,
+            uv_pcs_subproof,
             miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
         };
         self.state.miscellaneous_field_elements.clear();
