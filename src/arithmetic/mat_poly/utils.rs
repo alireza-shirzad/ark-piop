@@ -4,7 +4,7 @@ use ark_poly::{
     multivariate::{SparsePolynomial, SparseTerm, Term},
 };
 use ark_std::cfg_iter_mut;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;

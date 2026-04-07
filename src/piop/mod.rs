@@ -1,16 +1,8 @@
 //! A General Purpose PIOP abstraction.
 
-use ark_ff::PrimeField;
 use tracing::{Level, span};
 
-use crate::{
-    SnarkBackend,
-    arithmetic::mat_poly::{lde::LDE, mle::MLE},
-    errors::SnarkResult,
-    pcs::PCS,
-    prover::ArgProver,
-    verifier::ArgVerifier,
-};
+use crate::{SnarkBackend, errors::SnarkResult, prover::ArgProver, verifier::ArgVerifier};
 pub mod errors;
 pub mod keyed_sumcheck;
 pub mod lookup_check;

@@ -1,17 +1,11 @@
 mod utils;
 use crate::{
     SnarkBackend,
-    arithmetic::mat_poly::{lde::LDE, mle::MLE},
     errors::SnarkResult,
-    pcs::PCS,
     piop::{DeepClone, PIOP},
     prover::{ArgProver, structs::polynomial::TrackedPoly},
-    verifier::{
-        ArgVerifier,
-        structs::oracle::{Oracle, TrackedOracle},
-    },
+    verifier::{ArgVerifier, structs::oracle::TrackedOracle},
 };
-use ark_ff::One;
 use derivative::Derivative;
 use std::marker::PhantomData;
 pub use utils::{calc_inclusion_multiplicity, calc_inclusion_multiplicity_from_evals};

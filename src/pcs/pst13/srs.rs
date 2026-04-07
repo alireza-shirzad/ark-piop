@@ -1,9 +1,6 @@
 //! Implementing Structured Reference Strings for multilinear polynomial KZG
 use crate::{
-    arithmetic::mat_poly::{
-        mle::MLE,
-        utils::{build_eq_x_r, eq_eval, eq_extension},
-    },
+    arithmetic::mat_poly::utils::{eq_eval, eq_extension},
     errors::{SnarkError, SnarkResult},
     pcs::{StructuredReferenceString, errors::PCSError},
 };
@@ -17,7 +14,7 @@ use core::{iter::FromIterator, panic};
 use rayon::iter::ParallelIterator;
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
 
-use std::{collections::LinkedList, sync::Arc};
+use std::collections::LinkedList;
 /// Evaluations over {0,1}^n for G1 or G2
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct Evaluations<C: AffineRepr> {
