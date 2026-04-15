@@ -1,0 +1,424 @@
+//! Verifier side of the PIOP framework.
+//!
+//! [`ArgVerifier`] is the main entry point. It wraps a [`VerifierTracker`](tracker::VerifierTracker)
+//! (via `Rc<RefCell<...>>`) and exposes methods to register commitments,
+//! add claims, and verify proofs.
+
+pub mod errors;
+pub mod structs;
+mod tracker;
+use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+
+use either::Either;
+use indexmap::IndexMap;
+use structs::oracle::{Oracle, TrackedOracle};
+use tracing::{Span, field::debug, instrument, trace};
+
+use crate::{
+    SnarkBackend,
+    arithmetic::mat_poly::mle::MLE,
+    errors::SnarkResult,
+    pcs::PolynomialCommitment,
+    piop::{PIOP, lookup_check},
+    prover::structs::proof::SNARKProof,
+    setup::structs::SNARKVk,
+    types::{CommitmentBinding, TrackerID},
+};
+
+use crate::pcs::PCS;
+use ark_ff::PrimeField;
+use derivative::Derivative;
+
+use tracker::VerifierTracker;
+
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
+pub struct ArgVerifier<B>
+where
+    B: SnarkBackend,
+{
+    tracker_rc: Rc<RefCell<VerifierTracker<B>>>,
+}
+impl<B> PartialEq for ArgVerifier<B>
+where
+    B: SnarkBackend,
+{
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.tracker_rc, &other.tracker_rc)
+    }
+}
+
+impl<B> ArgVerifier<B>
+where
+    B: SnarkBackend,
+{
+    // TODO: See if you can shorten this function
+    #[instrument(level = "debug", skip_all)]
+    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
+        let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
+        let range_tr_polys: BTreeMap<String, TrackedOracle<B>> = vk
+            .indexed_coms
+            .iter()
+            .map(|(data_type, mle)| {
+                let tr_poly = verifier.track_mat_mv_com(mle.clone()).unwrap();
+                (data_type.clone(), tr_poly)
+            })
+            .collect();
+        verifier
+            .tracker_rc
+            .borrow_mut()
+            .set_indexed_tracked_polys(range_tr_polys);
+        verifier
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn new_from_tracker_rc(tracker_rc: Rc<RefCell<VerifierTracker<B>>>) -> Self {
+        tracker_rc
+            .borrow_mut()
+            .set_self_rc(Rc::downgrade(&tracker_rc));
+        Self { tracker_rc }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn new_from_tracker(tracker: VerifierTracker<B>) -> Self {
+        Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
+    }
+
+    /// Create an independent verifier handle by deep-cloning the underlying tracker state.
+    ///
+    /// Unlike `Clone`, this does not share the internal `Rc<RefCell<_>>`, so mutations in one
+    /// verifier handle do not leak into another.
+    #[instrument(level = "debug", skip_all)]
+    pub fn fork(&self) -> Self {
+        let tracker = self.tracker_rc.borrow().clone();
+        Self::new_from_tracker(tracker)
+    }
+
+    /// Get the range tracked oracle given the label
+    #[instrument(level = "debug", skip_all)]
+    pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
+        RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label)
+    }
+
+    /// Insert or update an indexed tracked oracle.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_indexed_tracked_poly(
+        &mut self,
+        label: String,
+        oracle: TrackedOracle<B>,
+    ) -> Option<TrackedOracle<B>> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_indexed_tracked_poly(label, oracle)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_mv_com(
+        &self,
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedOracle<B>> {
+        self.track_mat_mv_com_with_binding(comm, CommitmentBinding::ProofEmitted)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_mv_com_with_binding(
+        &self,
+        comm: <B::MvPCS as PCS<B::F>>::Commitment,
+        binding: CommitmentBinding,
+    ) -> SnarkResult<TrackedOracle<B>> {
+        let nv = comm.log_size();
+        let tracked_oracle = TrackedOracle::new(
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_mat_mv_com_with_binding(comm, binding)?,
+            ),
+            self.tracker_rc.clone(),
+            nv as usize,
+        );
+        trace!("assigned id {}", tracked_oracle.id());
+        Ok(tracked_oracle)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_uv_com(
+        &self,
+        comm: <B::UvPCS as PCS<B::F>>::Commitment,
+    ) -> SnarkResult<TrackedOracle<B>> {
+        self.track_mat_uv_com_with_binding(comm, CommitmentBinding::ProofEmitted)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_uv_com_with_binding(
+        &self,
+        comm: <B::UvPCS as PCS<B::F>>::Commitment,
+        binding: CommitmentBinding,
+    ) -> SnarkResult<TrackedOracle<B>> {
+        let degree = comm.log_size();
+        let tracked_oracle = TrackedOracle::new(
+            Either::Left(
+                self.tracker_rc
+                    .borrow_mut()
+                    .track_mat_uv_com_with_binding(comm, binding)?,
+            ),
+            self.tracker_rc.clone(),
+            degree as usize,
+        );
+        trace!("assigned id {}", tracked_oracle.id());
+        Ok(tracked_oracle)
+    }
+
+    /// Track a materialized multivariate polynomial
+    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
+    /// map and returns the TrackerID
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: B::F) -> TrackedOracle<B> {
+        if tracing::level_enabled!(tracing::Level::TRACE) {
+            Span::current().record("cnst", debug(&cnst));
+        }
+        let _ = self.tracker_rc.borrow_mut().gen_id();
+        TrackedOracle::new(Either::Right(cnst), self.tracker_rc.clone(), nv)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_base_oracle(&self, oracle: Oracle<B::F>) -> TrackedOracle<B> {
+        let log_size = oracle.log_size();
+        TrackedOracle::new(
+            Either::Left(self.tracker_rc.borrow_mut().track_base_oracle(oracle)),
+            self.tracker_rc.clone(),
+            log_size,
+        )
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn track_mat_mv_poly(&self, polynomial: MLE<B::F>) -> SnarkResult<TrackedOracle<B>> {
+        let log_size = polynomial.num_vars();
+        let tracker_id = self.tracker_rc.borrow_mut().track_mat_mv_poly(polynomial)?;
+        Ok(TrackedOracle::new(
+            Either::Left(tracker_id),
+            self.tracker_rc.clone(),
+            log_size,
+        ))
+    }
+
+    pub fn get_or_build_contig_one_poly(
+        &mut self,
+        nv: usize,
+        n: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        self.get_or_build_contig_skipped_one_poly(nv, n, 0)
+    }
+
+    pub fn get_or_build_contig_skipped_one_poly(
+        &mut self,
+        nv: usize,
+        n: usize,
+        s: usize,
+    ) -> SnarkResult<TrackedOracle<B>>
+    where
+        B::F: PrimeField,
+    {
+        self.tracker_rc
+            .borrow_mut()
+            .get_or_build_contig_skipped_one_poly(nv, n, s)
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn peek_next_id(&mut self) -> TrackerID {
+        self.tracker_rc.borrow_mut().peek_next_id()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn gen_id(&mut self) -> TrackerID {
+        self.tracker_rc.borrow_mut().gen_id()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn set_proof(&mut self, proof: SNARKProof<B>) {
+        self.tracker_rc.borrow_mut().set_proof(proof);
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
+        self.tracker_rc.borrow_mut().set_proof_ref(proof);
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
+        let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
+        trace!("challenge {:?}", res);
+        res
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn miscellaneous_field_element(&self, label: &str) -> SnarkResult<B::F> {
+        RefCell::borrow(&self.tracker_rc).miscellaneous_field_element(label)
+    }
+
+    pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_sumcheck_claim(poly_id, claimed_sum);
+    }
+    #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
+        self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id);
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_nozerocheck_claim(poly_id);
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn add_mv_lookup_claim(
+        &mut self,
+        super_id: TrackerID,
+        sub_id: TrackerID,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_lookup_claim(super_id, sub_id)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn query_mv(&mut self, poly_id: TrackerID, point: Vec<B::F>) -> SnarkResult<B::F> {
+        self.tracker_rc.borrow_mut().query_mv(poly_id, point)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn query_uv(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
+        self.tracker_rc.borrow_mut().query_uv(poly_id, point)
+    }
+
+    //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
+    #[instrument(level = "debug", skip(self))]
+    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
+        self.tracker_rc.borrow().prover_claimed_sum(id)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn commitment_num_vars(&self, id: TrackerID) -> SnarkResult<usize> {
+        self.tracker_rc.borrow_mut().commitment_num_vars(id)
+    }
+
+    /// Track the next multivariate commitment the prover emitted. Convenience
+    /// fused form of `peek_next_id()` followed by `track_mv_com_by_id(id)`:
+    /// the peek-then-track pattern is race-prone because any other claim that
+    /// sneaks in between the two calls desyncs tracker IDs.
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_next_mv_com(&mut self) -> SnarkResult<TrackedOracle<B>> {
+        let id = self.tracker_rc.borrow_mut().peek_next_id();
+        self.track_mv_com_by_id(id)
+    }
+
+    // TODO: Rename to get oracle
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
+        // Check if this is a constant before borrowing the tracker.
+        let maybe_cnst = self.tracker_rc.borrow().proof_mv_constant(id);
+        if let Some(cnst) = maybe_cnst {
+            let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?;
+            return Ok(TrackedOracle::new_committed_constant(
+                cnst,
+                tracker_id,
+                self.tracker_rc.clone(),
+                nv,
+            ));
+        }
+        let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?;
+        Ok(TrackedOracle::new(
+            Either::Left(tracker_id),
+            self.tracker_rc.clone(),
+            nv,
+        ))
+    }
+
+    /// Univariate analogue of [`Self::track_next_mv_com`].
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_next_uv_com(&mut self) -> SnarkResult<TrackedOracle<B>> {
+        let id = self.tracker_rc.borrow_mut().peek_next_id();
+        self.track_uv_com_by_id(id)
+    }
+
+    #[instrument(level = "debug", skip(self))]
+    pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
+        let (degree, tracker_id) = self.tracker_rc.borrow_mut().track_uv_com_by_id(id)?;
+        Ok(TrackedOracle::new(
+            Either::Left(tracker_id),
+            self.tracker_rc.clone(),
+            degree,
+        ))
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn tracked_oracle_from_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
+        if let Some(log_size) = self.tracker_rc.borrow().oracle_log_size(id) {
+            Ok(TrackedOracle::new(
+                Either::Left(id),
+                self.tracker_rc.clone(),
+                log_size,
+            ))
+        } else {
+            self.track_mv_com_by_id(id)
+        }
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
+        if lookup_claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+        for claim in lookup_claims {
+            by_super
+                .entry(claim.super_poly())
+                .or_default()
+                .push(claim.sub_poly());
+        }
+
+        for (super_id, sub_ids) in by_super {
+            let super_col = self.tracked_oracle_from_id(super_id)?;
+            let included_cols = sub_ids
+                .into_iter()
+                .map(|sub_id| self.tracked_oracle_from_id(sub_id))
+                .collect::<SnarkResult<Vec<_>>>()?;
+
+            let super_col_multiplicity = self.track_next_mv_com()?;
+
+            let lookup_verifier_input = lookup_check::HintedLookupCheckVerifierInput {
+                included_tracked_col_oracles: included_cols,
+                super_tracked_col_oracle: super_col,
+                super_col_multiplicity,
+            };
+            lookup_check::HintedLookupCheckPIOP::verify(self, lookup_verifier_input)?;
+        }
+
+        Ok(())
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    pub fn verify(&self) -> SnarkResult<()> {
+        let mut verifier = self.clone();
+        verifier.reduce_lookup_claims()?;
+        self.tracker_rc.borrow_mut().verify()
+    }
+
+    #[instrument(level = "debug", skip_all)]
+    #[cfg(feature = "test-utils")]
+    pub fn clone_underlying_tracker(&self) -> VerifierTracker<B> {
+        RefCell::borrow(&self.tracker_rc).clone()
+    }
+    #[instrument(level = "debug", skip_all)]
+    #[cfg(feature = "test-utils")]
+    pub fn deep_copy(&self) -> ArgVerifier<B> {
+        ArgVerifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
+    }
+}

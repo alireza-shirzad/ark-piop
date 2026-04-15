@@ -1,0 +1,106 @@
+[package]
+name = "ark-piop"
+version = "0.1.0"
+edition = "2024"
+description = "A general-purpose Polynomial Interactive Oracle Proof (PIOP) framework built on arkworks."
+license = "MIT/Apache-2.0"
+repository = "https://github.com/alireza-shirzad/ark-piop"
+readme = "readme.md"
+keywords = ["snark", "zk", "cryptography", "arkworks", "piop"]
+categories = ["cryptography"]
+rust-version = "1.93"
+
+[dependencies]
+# arkwork dependencies
+ark-std = { version = "0.5.0", default-features = false }
+ark-ff = { version = "0.5.0", default-features = false }
+ark-ec = { version = "0.5.0", default-features = false }
+ark-poly = { version = "0.5.0", default-features = false }
+ark-serialize = { version = "0.5.0", default-features = false }
+# other dependencies
+rayon = { version = "1.5.2", default-features = false, optional = true }
+blake3 = { version = "1", features = ["rayon"] }
+merlin = { version = "3.0.0", default-features = false }
+derivative = { version = "2", features = ["use_core"] }
+thiserror = "2.0.11"
+itertools = "0.14"
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
+tracing = "0.1.37"
+chrono = "0.4"
+tracing-chrome = "0.7"
+tracing-flame = "0.2"
+indexmap = "2.11.4"
+tracing-tree = "0.4.*"
+either = "1.8.0"
+serde = { version = "1.0", features = ["derive"] }
+ark-bn254 = { version = "0.5.0", default-features = false, features = [
+    "curve",
+], optional = true }
+[dev-dependencies]
+ark-bn254 = { version = "0.5.0", default-features = false, features = [
+    "curve",
+] }
+proptest = "1.5"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "pipeline"
+harness = false
+required-features = ["test-utils"]
+
+[patch.crates-io]
+ark-std = { git = "https://github.com/arkworks-rs/std" }
+ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
+ark-ec = { git = "https://github.com/arkworks-rs/algebra" }
+ark-poly = { git = "https://github.com/arkworks-rs/algebra" }
+ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
+ark-bn254 = { git = "https://github.com/arkworks-rs/algebra" }
+
+[[test]]
+name = "pipeline"
+path = "tests/pipeline.rs"
+required-features = ["test-utils"]
+
+[features]
+default = ["std", "parallel"]
+std = ["ark-ff/std", "ark-poly/std", "ark-std/std", "ark-serialize/std"]
+print-trace = ["ark-std/print-trace"]
+test-utils = ["ark-bn254"]
+parallel = [
+    "std",
+    "ark-ff/parallel",
+    "ark-ec/parallel",
+    "ark-poly/parallel",
+    "ark-std/parallel",
+    "ark-serialize/parallel",
+    "rayon",
+]
+honest-prover = []
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+incremental = true
+panic = 'abort'
+
+[profile.bench]
+opt-level = 3
+debug = false
+rpath = false
+lto = "thin"
+incremental = true
+debug-assertions = false
+
+[profile.dev]
+opt-level = 0
+panic = 'abort'
+
+[profile.test]
+opt-level = 3
+lto = "thin"
+incremental = true
+debug-assertions = true
+debug = true
