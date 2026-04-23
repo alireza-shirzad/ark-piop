@@ -6,6 +6,7 @@ use ark_ff::Field;
 pub mod errors;
 pub mod ff;
 pub mod mat_poly;
+pub mod msm;
 pub mod virt_poly;
 
 // Input index

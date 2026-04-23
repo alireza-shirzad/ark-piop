@@ -51,6 +51,10 @@ name = "pipeline"
 harness = false
 required-features = ["test-utils"]
 
+[[example]]
+name = "calibrate_msm"
+required-features = ["test-utils"]
+
 [patch.crates-io]
 ark-std = { git = "https://github.com/arkworks-rs/std" }
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
