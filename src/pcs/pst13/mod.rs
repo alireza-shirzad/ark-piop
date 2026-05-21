@@ -141,6 +141,13 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         }
 
         let nv = polynomial.num_vars();
+        let open_span = tracing::span!(
+            tracing::Level::DEBUG,
+            "pst13.open",
+            nv = nv,
+            total_msm_scalars = (1usize << nv).saturating_sub(1),
+        );
+        let _open_enter = open_span.enter();
         // the first `ignored` SRS vectors are unused for opening.
         let ignored = prover_param.num_vars - nv + 1;
         let mut f = polynomial.to_evaluations();
@@ -154,20 +161,40 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         {
             let k = nv - 1 - i;
             let cur_dim = 1 << k;
+            let round_span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.open.round",
+                round = i,
+                msm_size = cur_dim,
+            );
+            let _round_enter = round_span.enter();
             let mut q = vec![E::ScalarField::zero(); cur_dim];
             let mut r = vec![E::ScalarField::zero(); cur_dim];
 
-            for b in 0..(1 << k) {
-                // q[b] = f[1, b] - f[0, b]
-                q[b] = f[(b << 1) + 1] - f[b << 1];
+            {
+                let qr_span = tracing::span!(
+                    tracing::Level::DEBUG,
+                    "pst13.open.round.qr",
+                    size = cur_dim,
+                );
+                let _qr_enter = qr_span.enter();
+                for b in 0..(1 << k) {
+                    // q[b] = f[1, b] - f[0, b]
+                    q[b] = f[(b << 1) + 1] - f[b << 1];
 
-                // r[b] = f[0, b] + q[b] * p
-                r[b] = f[b << 1] + (q[b] * point_at_k);
+                    // r[b] = f[0, b] + q[b] * p
+                    r[b] = f[b << 1] + (q[b] * point_at_k);
+                }
             }
             f = r;
 
             // this is a MSM over G1 and is likely to be the bottleneck
-
+            let msm_span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.open.round.msm",
+                size = cur_dim,
+            );
+            let _msm_enter = msm_span.enter();
             proofs.push(E::G1::msm_unchecked(&gi.evals, &q).into_affine());
         }
         let eval = evaluate_opt(polynomial, point);
@@ -223,29 +250,48 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             BTreeMap::from_iter(point_indices.iter().map(|(point, idx)| (*idx, *point)))
                 .into_values()
                 .collect::<Vec<_>>();
-        let merged_tilde_gs = polynomials
-            .iter()
-            .zip(points.iter())
-            .zip(eq_t_i_list.iter())
-            .fold(
-                iter::repeat_with(MLE::zero)
-                    .map(Arc::new)
-                    .take(point_indices.len())
-                    .collect::<Vec<_>>(),
-                |mut merged_tilde_gs, ((poly, point), coeff)| {
-                    *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
-                        (*coeff, poly.deref());
-                    merged_tilde_gs
-                },
+        let merged_tilde_gs = {
+            let span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.multi_open.merge_polys",
+                num_polys = polynomials.len(),
+                num_unique_points = point_indices.len(),
+                nv = num_var,
             );
+            let _enter = span.enter();
+            polynomials
+                .iter()
+                .zip(points.iter())
+                .zip(eq_t_i_list.iter())
+                .fold(
+                    iter::repeat_with(MLE::zero)
+                        .map(Arc::new)
+                        .take(point_indices.len())
+                        .collect::<Vec<_>>(),
+                    |mut merged_tilde_gs, ((poly, point), coeff)| {
+                        *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
+                            (*coeff, poly.deref());
+                        merged_tilde_gs
+                    },
+                )
+        };
 
-        let tilde_eqs: Vec<_> = deduped_points
-            .iter()
-            .map(|point| {
-                let eq_b_zi = build_eq_x_r(point).unwrap().into_evaluations();
-                Arc::new(MLE::from_evaluations_vec(num_var, eq_b_zi))
-            })
-            .collect();
+        let tilde_eqs: Vec<_> = {
+            let span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.multi_open.build_tilde_eqs",
+                num_unique_points = deduped_points.len(),
+                nv = num_var,
+            );
+            let _enter = span.enter();
+            deduped_points
+                .iter()
+                .map(|point| {
+                    let eq_b_zi = build_eq_x_r(point).unwrap().into_evaluations();
+                    Arc::new(MLE::from_evaluations_vec(num_var, eq_b_zi))
+                })
+                .collect()
+        };
 
         // built the virtual polynomial for SumCheck
 
@@ -254,13 +300,21 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
         }
 
-        let proof = match SumCheck::<E::ScalarField>::prove(&sum_check_vp, transcript) {
-            Ok(p) => p,
-            Err(_e) => {
-                // cannot wrap IOPError with PCSError due to cyclic dependency
-                return Err(PCSErrors(ProverError(
-                    "Sumcheck in batch proving Failed".to_string(),
-                )));
+        let proof = {
+            let span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.multi_open.sumcheck",
+                nv = num_var,
+            );
+            let _enter = span.enter();
+            match SumCheck::<E::ScalarField>::prove(&sum_check_vp, transcript) {
+                Ok(p) => p,
+                Err(_e) => {
+                    // cannot wrap IOPError with PCSError due to cyclic dependency
+                    return Err(PCSErrors(ProverError(
+                        "Sumcheck in batch proving Failed".to_string(),
+                    )));
+                }
             }
         };
 
@@ -270,13 +324,29 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         // build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is the
         // sumcheck's point \tilde eq_i(a2) = eq(a2, point_i)
         let mut g_prime = Arc::new(MLE::zero());
-        for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-            let eq_i_a2 = eq_eval(a2, point)?;
-            *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
+        {
+            let span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.multi_open.build_g_prime",
+                num_unique_points = deduped_points.len(),
+                nv = num_var,
+            );
+            let _enter = span.enter();
+            for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
+                let eq_i_a2 = eq_eval(a2, point)?;
+                *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
+            }
         }
 
-        let (g_prime_proof, _g_prime_eval) =
-            Self::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?;
+        let (g_prime_proof, _g_prime_eval) = {
+            let span = tracing::span!(
+                tracing::Level::DEBUG,
+                "pst13.multi_open.final_open",
+                nv = num_var,
+            );
+            let _enter = span.enter();
+            Self::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?
+        };
         // assert_eq!(g_prime_eval, tilde_g_eval);
 
         Ok(PST13BatchProof {

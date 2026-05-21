@@ -258,6 +258,11 @@ where
         RefCell::borrow(&self.tracker_rc).miscellaneous_field_element(label)
     }
 
+    #[instrument(level = "debug", skip(self))]
+    pub fn miscellaneous_field_vector(&self, label: &str) -> SnarkResult<Vec<B::F>> {
+        RefCell::borrow(&self.tracker_rc).miscellaneous_field_vector(label)
+    }
+
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.tracker_rc
             .borrow_mut()

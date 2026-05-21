@@ -75,8 +75,14 @@ where
     pub mv_pcs_substate: ProverPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
+    pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
     pub num_vars: BTreeMap<TrackerID, usize>,
     pub bench_lookup_claims_pre_reduction: usize,
+    /// Per-superset subset counts captured from `reduce_lookup_claims`. Each
+    /// entry is the number of subset polynomials looked up into one superset
+    /// polynomial; the length is the number of distinct supersets and the sum
+    /// is the total lookup-claim count before lookup-PIOP reduction.
+    pub bench_lookup_subset_counts_per_superset: Vec<usize>,
 }
 
 #[derive(Derivative)]

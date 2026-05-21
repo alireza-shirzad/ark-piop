@@ -22,6 +22,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             })
     }
 
+    pub fn miscellaneous_field_vector(&self, label: &str) -> SnarkResult<Vec<B::F>> {
+        self.proof
+            .as_ref()
+            .and_then(|proof| proof.miscellaneous_field_vectors.get(label).cloned())
+            .ok_or_else(|| {
+                SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
+                    "proof has no miscellaneous field vector with label {:?}",
+                    label
+                )))
+            })
+    }
+
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.state
             .mv_pcs_substate

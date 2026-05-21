@@ -32,6 +32,7 @@ where
     pub mv_pcs_subproof: PCSSubproof<B::F, B::MvPCS>,
     pub uv_pcs_subproof: PCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
+    pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
 }
 
 /// The PCS subproof of a SNARK for the ZKSQL protocol.
@@ -155,6 +156,9 @@ where
         let miscellaneous_field_elements = self
             .miscellaneous_field_elements
             .serialized_size(Compress::Yes);
+        let miscellaneous_field_vectors = self
+            .miscellaneous_field_vectors
+            .serialized_size(Compress::Yes);
         // +1 for the one-byte PROOF_ENCODING_VERSION envelope that `to_bytes`
         // prepends; keeps the reported total in sync with the on-disk size.
         let total = self.serialized_size(Compress::Yes) + 1;
@@ -190,6 +194,10 @@ where
                 (
                     "miscellaneous_field_elements",
                     SizeBreakdown::leaf(miscellaneous_field_elements),
+                ),
+                (
+                    "miscellaneous_field_vectors",
+                    SizeBreakdown::leaf(miscellaneous_field_vectors),
                 ),
             ],
         ))

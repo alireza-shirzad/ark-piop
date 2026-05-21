@@ -169,6 +169,23 @@ where
             })
     }
 
+    pub fn insert_miscellaneous_field_vector(&mut self, key: String, vector: Vec<B::F>) {
+        self.state.miscellaneous_field_vectors.insert(key, vector);
+    }
+
+    pub fn miscellaneous_field_vector(&self, label: &str) -> SnarkResult<Vec<B::F>> {
+        self.state
+            .miscellaneous_field_vectors
+            .get(label)
+            .cloned()
+            .ok_or_else(|| {
+                SnarkError::from(PolyIOPErrors::InvalidParameters(format!(
+                    "prover state has no miscellaneous field vector with label {:?}",
+                    label
+                )))
+            })
+    }
+
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate

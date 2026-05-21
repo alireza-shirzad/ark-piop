@@ -178,7 +178,7 @@ pub trait PCS<F: PrimeField>: Clone {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         use tracing::Level;
-        let span = tracing::span!(Level::TRACE, "pcs.commit", poly = ?poly);
+        let span = tracing::span!(Level::DEBUG, "pcs.commit");
         let enter_guard = span.enter();
         let res = Self::commit_impl_inner(prover_param, poly);
         drop(enter_guard);
@@ -193,8 +193,7 @@ pub trait PCS<F: PrimeField>: Clone {
         commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, F)> {
         use tracing::Level;
-        let span = tracing::span!(Level::TRACE, "pcs.open", poly = ?polynomial,
-                point = ?point,);
+        let span = tracing::span!(Level::DEBUG, "pcs.open");
         let enter_guard = span.enter();
         let res = Self::open_impl_inner(prover_param, polynomial, point, commitment);
         drop(enter_guard);
@@ -210,12 +209,9 @@ pub trait PCS<F: PrimeField>: Clone {
     ) -> SnarkResult<Self::BatchProof> {
         use tracing::Level;
         let span = tracing::span!(
-            Level::TRACE,
+            Level::DEBUG,
             "pcs.multi_open",
             num_polys = _polynomials.len(),
-            polys = ?_polynomials,
-            points = ?_points,
-            evals = ?_evals
         );
 
         let enter_guard = span.enter();

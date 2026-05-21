@@ -338,6 +338,21 @@ where
         self.tracker_rc.borrow().miscellaneous_field_element(key)
     }
 
+    pub fn add_miscellaneous_field_vector(
+        &mut self,
+        key: String,
+        vector: Vec<B::F>,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .insert_miscellaneous_field_vector(key, vector);
+        Ok(())
+    }
+
+    pub fn miscellaneous_field_vector(&self, key: &str) -> SnarkResult<Vec<B::F>> {
+        self.tracker_rc.borrow().miscellaneous_field_vector(key)
+    }
+
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
@@ -419,9 +434,7 @@ where
             tracker.state.bench_lookup_claims_pre_reduction = claims.len();
             claims
         };
-        if lookup_claims.is_empty() {
-            return Ok(());
-        }
+        let lookup_claims_count = lookup_claims.len();
 
         let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
         for claim in lookup_claims {
@@ -429,6 +442,26 @@ where
                 .entry(claim.super_poly())
                 .or_default()
                 .push(claim.sub_poly());
+        }
+
+        // Capture (subsets-per-superset) distribution for bench reporting.
+        // Total lookup claims = sum; distinct supersets = len.
+        let subset_counts_per_superset: Vec<usize> =
+            by_super.values().map(|v| v.len()).collect();
+        self.tracker_rc
+            .borrow_mut()
+            .state
+            .bench_lookup_subset_counts_per_superset = subset_counts_per_superset.clone();
+        info!(
+            target: "bench_stats",
+            claims_lookup_count = lookup_claims_count,
+            claims_lookup_supersets_count = subset_counts_per_superset.len(),
+            claims_lookup_subset_counts_per_superset = ?subset_counts_per_superset,
+            "lookup_claims_pre_reduction"
+        );
+
+        if by_super.is_empty() {
+            return Ok(());
         }
         info!("reducing {} lookup claims", by_super.len());
         for (super_id, sub_ids) in &by_super {
