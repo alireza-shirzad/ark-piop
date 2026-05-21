@@ -353,6 +353,21 @@ where
         self.tracker_rc.borrow().miscellaneous_field_vector(key)
     }
 
+    pub fn add_miscellaneous_uint_vector(
+        &mut self,
+        key: String,
+        vector: Vec<u64>,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .insert_miscellaneous_uint_vector(key, vector);
+        Ok(())
+    }
+
+    pub fn miscellaneous_uint_vector(&self, key: &str) -> SnarkResult<Vec<u64>> {
+        self.tracker_rc.borrow().miscellaneous_uint_vector(key)
+    }
+
     /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {

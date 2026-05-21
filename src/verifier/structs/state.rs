@@ -78,6 +78,7 @@ where
     pub uv_pcs_subproof: ProcessedPCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
+    pub miscellaneous_uint_vectors: BTreeMap<String, Vec<u64>>,
 }
 
 impl<B> ProcessedProof<B>
@@ -95,6 +96,7 @@ where
             uv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.uv_pcs_subproof),
             miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
             miscellaneous_field_vectors: proof.miscellaneous_field_vectors.clone(),
+            miscellaneous_uint_vectors: proof.miscellaneous_uint_vectors.clone(),
         }
     }
 }

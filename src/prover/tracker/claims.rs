@@ -186,6 +186,23 @@ where
             })
     }
 
+    pub fn insert_miscellaneous_uint_vector(&mut self, key: String, vector: Vec<u64>) {
+        self.state.miscellaneous_uint_vectors.insert(key, vector);
+    }
+
+    pub fn miscellaneous_uint_vector(&self, label: &str) -> SnarkResult<Vec<u64>> {
+        self.state
+            .miscellaneous_uint_vectors
+            .get(label)
+            .cloned()
+            .ok_or_else(|| {
+                SnarkError::from(PolyIOPErrors::InvalidParameters(format!(
+                    "prover state has no miscellaneous uint vector with label {:?}",
+                    label
+                )))
+            })
+    }
+
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.state
             .mv_pcs_substate
