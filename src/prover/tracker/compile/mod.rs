@@ -60,11 +60,9 @@ where
             uv_pcs_subproof,
             miscellaneous_field_elements: self.state.miscellaneous_field_elements.clone(),
             miscellaneous_field_vectors: self.state.miscellaneous_field_vectors.clone(),
-            miscellaneous_uint_vectors: self.state.miscellaneous_uint_vectors.clone(),
         };
         self.state.miscellaneous_field_elements.clear();
         self.state.miscellaneous_field_vectors.clear();
-        self.state.miscellaneous_uint_vectors.clear();
         Ok(proof)
     }
 }

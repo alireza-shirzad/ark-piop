@@ -76,10 +76,6 @@ where
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
-    /// Compact channel for index-like data sent verbatim to the verifier.
-    /// 8 bytes per entry vs. ~32 for the field-element channel — use this for
-    /// permutation indices, position hints, and similar O(log n)-bit values.
-    pub miscellaneous_uint_vectors: BTreeMap<String, Vec<u64>>,
     pub num_vars: BTreeMap<TrackerID, usize>,
     pub bench_lookup_claims_pre_reduction: usize,
     /// Per-superset subset counts captured from `reduce_lookup_claims`. Each
