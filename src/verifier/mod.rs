@@ -6,7 +6,7 @@
 
 pub mod errors;
 pub mod structs;
-mod tracker;
+pub mod tracker;
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
 
 use either::Either;

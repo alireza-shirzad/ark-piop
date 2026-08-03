@@ -103,6 +103,10 @@ where
     // bypass commitment and PCS opening — only the scalar value is sent in the
     // proof and transcript-bound.
     pub constants: BTreeMap<TrackerID, F>,
+    // Per-TrackerID `num_vars` for entries in `constants`. Emitted alongside
+    // the scalar so the verifier can mirror `poly_log_sizes` — see the note
+    // on `PROOF_ENCODING_VERSION = 2`.
+    pub constants_num_vars: BTreeMap<TrackerID, usize>,
     // Commitments reused from external context, such as base table commitments.
     // These must be tracked for openings, but they are not emitted as proof-owned
     // commitments in the PCS subproof.

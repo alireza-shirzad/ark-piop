@@ -7,7 +7,7 @@
 ///////// Modules and reexports /////////
 pub mod errors;
 pub mod structs;
-mod tracker;
+pub mod tracker;
 ///////// Imports /////////
 use crate::{
     SnarkBackend,

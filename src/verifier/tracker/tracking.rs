@@ -6,7 +6,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
         // Check if this ID refers to a constant polynomial (no commitment needed).
         if let Some(&cnst) = self.proof_or_err()?.mv_pcs_subproof.constants.get(&id) {
-            return self.track_mv_constant_by_id(id, cnst);
+            // Wire v2+: constants carry their num_vars in the subproof so the
+            // verifier's poly_log_sizes matches the prover's state.num_vars.
+            let num_vars = self
+                .proof_or_err()?
+                .mv_pcs_subproof
+                .constant_num_vars
+                .get(&id)
+                .copied()
+                .unwrap_or(0);
+            return self.track_mv_constant_by_id(id, cnst, num_vars);
         }
 
         let comm: <B::MvPCS as PCS<B::F>>::Commitment;
@@ -46,10 +55,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     /// Tracks a constant polynomial from the proof. Creates a constant oracle
     /// and transcript-binds the value to match the prover's transcript.
+    ///
+    /// `num_vars` is the prover-side `num_vars` for the constant, plumbed
+    /// through the proof so `poly_log_sizes[id]` matches the prover's
+    /// `state.num_vars[id]`. See `PROOF_ENCODING_VERSION` v2 note.
     fn track_mv_constant_by_id(
         &mut self,
         #[cfg_attr(not(debug_assertions), allow(unused_variables))] expected_id: TrackerID,
         cnst: B::F,
+        num_vars: usize,
     ) -> SnarkResult<(usize, TrackerID)> {
         let id = self.gen_id();
         #[cfg(debug_assertions)]
@@ -62,12 +76,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
 
         // Register a constant oracle so virtual polynomial evaluation works.
-        let oracle = Oracle::new_constant(0, cnst);
+        let oracle = Oracle::new_constant(num_vars, cnst);
         let mut terms = VirtualOracle::new();
         terms.push((B::F::one(), vec![id]));
         self.state.base_oracles.insert(id, oracle);
         self.state.virtual_polys.insert(id, terms);
-        self.state.poly_log_sizes.insert(id, 0);
+        self.state.poly_log_sizes.insert(id, num_vars);
         self.state
             .poly_kinds
             .insert(id, crate::verifier::structs::oracle::OracleKind::Constant);
@@ -79,7 +93,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .transcript
             .append_serializable_element(b"cnst", &cnst)?;
 
-        Ok((0, id))
+        Ok((num_vars, id))
     }
 
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {

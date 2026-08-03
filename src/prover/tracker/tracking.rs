@@ -135,6 +135,13 @@ where
         self.state.num_vars.insert(id, num_vars);
         // Store constant in proof (instead of a commitment).
         self.state.mv_pcs_substate.constants.insert(id, cnst);
+        // Emit num_vars so the verifier can mirror `poly_log_sizes` and keep
+        // downstream arithmetic (add/mul, chunk-commit max_nv) in sync — see
+        // PROOF_ENCODING_VERSION note.
+        self.state
+            .mv_pcs_substate
+            .constants_num_vars
+            .insert(id, num_vars);
         // Transcript-bind so the verifier derives the same challenges.
         self.state
             .transcript

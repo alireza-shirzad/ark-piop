@@ -142,8 +142,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         TrackerID::from_usize(id)
     }
 
-    // Peek at the next TrackerID without incrementing the counter
-    pub(crate) fn peek_next_id(&mut self) -> TrackerID {
+    /// Peek at the next TrackerID without incrementing the counter. Widened
+    /// to `pub` so tt-core plan expr nodes (specifically `LikeExpr`) that
+    /// need to commit witness polys during `add_virtual_witness` — where
+    /// the pass does not carry an `ArgVerifier` reference — can mirror the
+    /// prover's commit order via `oracle.tracker().borrow_mut().peek_next_id()`
+    /// followed by `track_mv_com_by_id`.
+    pub fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }
 

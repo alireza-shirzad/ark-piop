@@ -114,6 +114,10 @@ where
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub constants: BTreeMap<TrackerID, F>,
+    /// Per-TrackerID `num_vars` for entries in `constants`, mirrored from the
+    /// proof so `track_mv_constant_by_id` can set `poly_log_sizes[id]` to the
+    /// prover's value instead of a hardcoded `0` — see PROOF_ENCODING_VERSION.
+    pub constant_num_vars: BTreeMap<TrackerID, usize>,
     pub point_map: Arc<PointMap<F, PC>>,
     /// TrackerID-keyed query map, reconstructed for oracle evaluation closures.
     pub query_map: Arc<QueryMap<F>>,
@@ -160,6 +164,13 @@ where
             })
             .collect();
 
+        // Widen prover-emitted u32 num_vars into the usize map the tracker uses.
+        let constant_num_vars: BTreeMap<TrackerID, usize> = pcs_subproof
+            .constant_num_vars
+            .iter()
+            .map(|(tracker_id, nv)| (*tracker_id, *nv as usize))
+            .collect();
+
         // Reconstruct TrackerID-keyed query map for oracle closures:
         // each TrackerID gets the evaluations from its CommitmentID.
         let mut query_map: BTreeMap<TrackerID, BTreeMap<PointID, F>> = BTreeMap::new();
@@ -173,6 +184,7 @@ where
             opening_proof: pcs_subproof.opening_proof.clone(),
             comitments,
             constants,
+            constant_num_vars,
             point_map: Arc::new(pcs_subproof.point_map.clone()),
             query_map: Arc::new(query_map),
             deduped_query_map: Arc::new(pcs_subproof.query_map.clone()),

@@ -152,6 +152,26 @@ where
             constant_map.insert(*tracker_id, const_id);
         }
 
+        // Emit per-TrackerID num_vars so the verifier mirrors `poly_log_sizes`.
+        // Fall back to 0 for any constant that wasn't recorded (shouldn't
+        // happen — `track_and_commit_mv_constant` always writes both maps).
+        let constant_num_vars: BTreeMap<TrackerID, u32> = self
+            .state
+            .mv_pcs_substate
+            .constants
+            .keys()
+            .map(|tracker_id| {
+                let nv = self
+                    .state
+                    .mv_pcs_substate
+                    .constants_num_vars
+                    .get(tracker_id)
+                    .copied()
+                    .unwrap_or(0) as u32;
+                (*tracker_id, nv)
+            })
+            .collect();
+
         Ok(PCSSubproof {
             query_map,
             point_map,
@@ -160,6 +180,7 @@ where
             comitment_map,
             unique_constants,
             constant_map,
+            constant_num_vars,
         })
     }
 
@@ -272,6 +293,7 @@ where
             comitment_map,
             unique_constants: BTreeMap::new(),
             constant_map: BTreeMap::new(),
+            constant_num_vars: BTreeMap::new(),
         })
     }
 }
