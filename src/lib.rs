@@ -124,3 +124,17 @@ impl SnarkBackend for DefaultSnarkBackend {
     type MvPCS = pcs::pst13::PST13<Bn254>;
     type UvPCS = pcs::kzg10::KZG10<Bn254>;
 }
+
+/// Alternate backend for testing: BLS12-381 with PST13 (multivariate) and
+/// KZG10 (univariate). Used by benchmarks that need parity with systems
+/// hard-coded to BLS12-381 (e.g. QEDB).
+#[cfg(feature = "test-utils-bls12-381")]
+use ark_bls12_381::Bls12_381;
+#[cfg(feature = "test-utils-bls12-381")]
+pub struct Bls12_381SnarkBackend;
+#[cfg(feature = "test-utils-bls12-381")]
+impl SnarkBackend for Bls12_381SnarkBackend {
+    type F = <Bls12_381 as ark_ec::pairing::Pairing>::ScalarField;
+    type MvPCS = pcs::pst13::PST13<Bls12_381>;
+    type UvPCS = pcs::kzg10::KZG10<Bls12_381>;
+}

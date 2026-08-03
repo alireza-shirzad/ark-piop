@@ -39,6 +39,9 @@ serde = { version = "1.0", features = ["derive"] }
 ark-bn254 = { version = "0.5.0", default-features = false, features = [
     "curve",
 ], optional = true }
+ark-bls12-381 = { version = "0.5.0", default-features = false, features = [
+    "curve",
+], optional = true }
 [dev-dependencies]
 ark-bn254 = { version = "0.5.0", default-features = false, features = [
     "curve",
@@ -62,6 +65,7 @@ ark-ec = { git = "https://github.com/arkworks-rs/algebra" }
 ark-poly = { git = "https://github.com/arkworks-rs/algebra" }
 ark-serialize = { git = "https://github.com/arkworks-rs/algebra" }
 ark-bn254 = { git = "https://github.com/arkworks-rs/algebra" }
+ark-bls12-381 = { git = "https://github.com/arkworks-rs/algebra" }
 
 [[test]]
 name = "pipeline"
@@ -73,6 +77,7 @@ default = ["std", "parallel"]
 std = ["ark-ff/std", "ark-poly/std", "ark-std/std", "ark-serialize/std"]
 print-trace = ["ark-std/print-trace"]
 test-utils = ["ark-bn254"]
+test-utils-bls12-381 = ["ark-bls12-381"]
 parallel = [
     "std",
     "ark-ff/parallel",
