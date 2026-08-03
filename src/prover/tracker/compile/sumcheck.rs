@@ -669,10 +669,11 @@ where
             &after_after_sum_batching,
         );
         self.emit_sc_compile_timing_breakdown(timing_breakdown);
-        // Assemble the sumcheck subproof of the prover
+        // Assemble the sumcheck subproof of the prover. Phase-1 wraps the
+        // single sumcheck in a one-element bucket vector; Phase 5 fills in
+        // multiple buckets for `SumcheckBucketing::ByClaimNumVars`.
         let sc_subproof = SumcheckSubproof::new(
-            sc_proof.clone(),
-            sc_aux_info.clone(),
+            vec![SumcheckBucketProof::new(sc_proof.clone(), sc_aux_info.clone())],
             individual_sumcheck_claims,
         );
         Ok(Some(sc_subproof))

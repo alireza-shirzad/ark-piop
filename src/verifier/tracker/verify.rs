@@ -90,22 +90,23 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
+        // Phase-1 shim: while the compile flow still emits a single bucket,
+        // the verifier reads bucket[0]. Phase 5 will loop over buckets.
+        let subproof = self
+            .proof
+            .as_ref()
+            .unwrap()
+            .sc_subproof
+            .as_ref()
+            .expect("No sumcheck subproof in the proof");
+        let bucket = subproof
+            .buckets()
+            .first()
+            .expect("SumcheckSubproof must contain at least one bucket");
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
-            self.proof
-                .as_ref()
-                .unwrap()
-                .sc_subproof
-                .as_ref()
-                .expect("No sumcheck subproof in the proof")
-                .sc_proof(),
-            self.proof
-                .as_ref()
-                .unwrap()
-                .sc_subproof
-                .as_ref()
-                .expect("No sumcheck subproof in the proof")
-                .sc_aux_info(),
+            bucket.sc_proof(),
+            bucket.sc_aux_info(),
             &mut self.state.transcript,
         )?;
         self.add_mv_eval_claim(

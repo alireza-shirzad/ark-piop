@@ -130,7 +130,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 "proof has no sumcheck subproof".to_string(),
             ))
         })?;
-        let target_nv = subproof.sc_aux_info().num_variables;
+        // Pad to the last (largest) bucket's num_vars — for Single mode this
+        // is the only bucket; for ByClaimNumVars it's the biggest sumcheck
+        // in the subproof, which is what the largest claim would be evaluated
+        // against.
+        let target_nv = subproof
+            .buckets()
+            .last()
+            .map(|b| b.num_vars())
+            .unwrap_or(point.len());
         if point.len() == target_nv {
             return Ok(point.to_vec());
         }

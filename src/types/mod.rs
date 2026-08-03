@@ -19,6 +19,27 @@ pub struct SharedArgConfig {
     /// Chunk size for batching no-zero-check claims. Larger values reduce
     /// the number of committed chunks but increase the degree of each chunk.
     pub nozero_chunk_size: usize,
+    /// How the final sumcheck stage partitions its claims into rounds.
+    /// [`SumcheckBucketing::Single`] (currently the only variant) matches the
+    /// historical behaviour — every claim is padded to the global max
+    /// `num_vars` and batched into one sumcheck. A future
+    /// `ByClaimNumVars` variant will group claims by their pre-batch
+    /// `num_vars` and run one sumcheck per distinct size, so proofs that
+    /// mix row-size and char-size claims stop paying padding overhead.
+    /// The proof-wire shape ([`SumcheckSubproof`]) already carries a
+    /// `Vec<SumcheckBucketProof>` in anticipation of that variant.
+    pub sumcheck_bucketing: SumcheckBucketing,
+}
+
+/// Partitioning strategy for the final aggregated sumcheck stage. Only
+/// [`SumcheckBucketing::Single`] is implemented today; the enum exists so
+/// downstream callers can begin passing an explicit choice ahead of the
+/// per-bucket compile refactor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SumcheckBucketing {
+    /// One sumcheck at global max `num_vars`. Original behaviour.
+    #[default]
+    Single,
 }
 
 impl Default for SharedArgConfig {
@@ -26,6 +47,7 @@ impl Default for SharedArgConfig {
         Self {
             sumcheck_term_degree_limit: 6,
             nozero_chunk_size: 1,
+            sumcheck_bucketing: SumcheckBucketing::Single,
         }
     }
 }
@@ -165,14 +187,42 @@ pub enum CommitmentBinding {
     External,
 }
 
+/// One sumcheck round emitted by the prover. In [`SumcheckBucketing::Single`]
+/// mode the subproof carries exactly one of these; in `ByClaimNumVars` mode
+/// it carries one per distinct claim `num_vars`, ordered ascending.
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct SumcheckBucketProof<F>
+where
+    F: PrimeField,
+{
+    sc_proof: SumcheckProof<F>,
+    sc_aux_info: VPAuxInfo<F>,
+}
+
+impl<F: PrimeField> SumcheckBucketProof<F> {
+    pub(crate) fn new(sc_proof: SumcheckProof<F>, sc_aux_info: VPAuxInfo<F>) -> Self {
+        Self { sc_proof, sc_aux_info }
+    }
+    pub fn sc_proof(&self) -> &SumcheckProof<F> {
+        &self.sc_proof
+    }
+    pub(crate) fn sc_aux_info(&self) -> &VPAuxInfo<F> {
+        &self.sc_aux_info
+    }
+    pub fn num_vars(&self) -> usize {
+        self.sc_aux_info.num_variables
+    }
+}
+
 // The sumcheck subproof of a SNARK for the ZKSQL protocol.
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SumcheckSubproof<F>
 where
     F: PrimeField,
 {
-    sc_proof: SumcheckProof<F>,
-    sc_aux_info: VPAuxInfo<F>,
+    // One entry per bucket; ascending num_vars when bucketing is enabled.
+    // For historical `Single` mode this always has length 1.
+    buckets: Vec<SumcheckBucketProof<F>>,
     //TODO: This sumcheck_claims map is not used in all the protocols using this library, so it should not be in the proof.
     //TODO: Suggestion: Add a field to the proof for the optional and non-constant elements sent via the proof.
     sumcheck_claims: BTreeMap<TrackerID, F>,
@@ -180,13 +230,11 @@ where
 
 impl<F: PrimeField> SumcheckSubproof<F> {
     pub(crate) fn new(
-        sc_proof: SumcheckProof<F>,
-        sc_aux_info: VPAuxInfo<F>,
+        buckets: Vec<SumcheckBucketProof<F>>,
         sumcheck_claims: BTreeMap<TrackerID, F>,
     ) -> Self {
         Self {
-            sc_proof,
-            sc_aux_info,
+            buckets,
             sumcheck_claims,
         }
     }
@@ -194,12 +242,8 @@ impl<F: PrimeField> SumcheckSubproof<F> {
         &self.sumcheck_claims
     }
 
-    pub fn sc_proof(&self) -> &SumcheckProof<F> {
-        &self.sc_proof
-    }
-
-    pub(crate) fn sc_aux_info(&self) -> &VPAuxInfo<F> {
-        &self.sc_aux_info
+    pub fn buckets(&self) -> &[SumcheckBucketProof<F>] {
+        &self.buckets
     }
 }
 

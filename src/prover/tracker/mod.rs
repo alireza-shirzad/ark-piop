@@ -33,7 +33,7 @@ use crate::{
     },
     types::{
         CommitmentBinding, CommitmentID, ConstantID, PCSOpeningProof, PointID, SharedArgConfig,
-        SumcheckSubproof, TrackerID,
+        SumcheckBucketProof, SumcheckSubproof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
