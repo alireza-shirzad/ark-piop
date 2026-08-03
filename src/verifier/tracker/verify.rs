@@ -81,17 +81,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn perform_single_sumcheck(&mut self) -> SnarkResult<()> {
+    fn perform_single_sumcheck(&mut self, bucket_index: usize) -> SnarkResult<()> {
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
-            debug!("No sumcheck claims to verify",);
+            debug!("No sumcheck claims to verify in bucket {bucket_index}");
             return Ok(());
         }
         assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
-        // Phase-1 shim: while the compile flow still emits a single bucket,
-        // the verifier reads bucket[0]. Phase 5 will loop over buckets.
         let subproof = self
             .proof
             .as_ref()
@@ -101,8 +99,14 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .expect("No sumcheck subproof in the proof");
         let bucket = subproof
             .buckets()
-            .first()
-            .expect("SumcheckSubproof must contain at least one bucket");
+            .get(bucket_index)
+            .unwrap_or_else(|| {
+                panic!(
+                    "SumcheckSubproof does not have bucket at index {bucket_index} \
+                     (has {} bucket(s))",
+                    subproof.buckets().len()
+                )
+            });
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
             bucket.sc_proof(),
@@ -168,11 +172,38 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .and_then(|proof| proof.sc_subproof.as_ref())
             .map(|subproof| subproof.sumcheck_claims().clone());
 
+        // When bucketing, prover recorded values pre-scaled by
+        // `2^(global_max - poly_nv)` so tt-core gadgets that un-scale by
+        // their local max recover raw. That leaves state.claim at the
+        // *global-max* scale, but the aggregated sumcheck inside this
+        // bucket runs at `max_nv = target_nv`; we need state.claim at
+        // raw to match. So divide by the same factor for gadget-added
+        // claims (those that match a proof-recorded value).
+        let is_bucketed = matches!(
+            self.config.sumcheck_bucketing,
+            crate::types::SumcheckBucketing::ByClaimNumVars
+        );
+        let global_max_for_recording = if is_bucketed {
+            self.equalize_mat_com_nv()
+        } else {
+            max_nv
+        };
+
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             if let Some(proof_claims) = proof_claims.as_ref()
                 && let Some(proof_claim) = proof_claims.get(&claim.id())
                 && claim.claim() == *proof_claim
             {
+                if is_bucketed {
+                    let poly_nv = poly_log_sizes
+                        .get(&claim.id())
+                        .copied()
+                        .unwrap_or(global_max_for_recording);
+                    if global_max_for_recording > poly_nv {
+                        let factor = B::F::from(1u64 << (global_max_for_recording - poly_nv));
+                        claim.set_claim(claim.claim() / factor);
+                    }
+                }
                 continue;
             }
 
@@ -184,32 +215,113 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
+    /// Runs the verifier-side sumcheck pipeline for a single bucket at
+    /// `target_nv`. Consumes whatever claims are currently in state, verifies
+    /// one bucket's `SumcheckProof` at `bucket_index`, and leaves the
+    /// aggregated sumcheck claim slot empty so the next bucket can populate
+    /// it. Does **not** call `perform_eval_check` — that runs once, after
+    /// every bucket, from the dispatcher.
+    fn run_bucket_pipeline_verify(
+        &mut self,
+        target_nv: usize,
+        bucket_index: usize,
+    ) -> SnarkResult<()> {
+        self.batch_nozero_check_claims(target_nv)?;
+        self.batch_z_check_claims(target_nv)?;
+        self.z_check_claim_to_s_check_claim(target_nv)?;
+        self.equalize_sumcheck_claims(target_nv)?;
+        self.batch_s_check_claims(target_nv)?;
+        self.reduce_sumcheck_dgree(target_nv)?;
+        self.batch_z_check_claims(target_nv)?;
+        self.z_check_claim_to_s_check_claim(target_nv)?;
+        self.batch_s_check_claims(target_nv)?;
+        self.perform_single_sumcheck(bucket_index)?;
+        // Match prover-side cleanup: clear the aggregated sumcheck claim so
+        // the next bucket starts from an empty slate.
+        self.state.mv_pcs_substate.sum_check_claims.clear();
+        Ok(())
+    }
+
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
-        self.batch_nozero_check_claims(max_nv)?;
-        // Batch all the zero check claims into one
-        self.batch_z_check_claims(max_nv)?;
-        // Convert the only zero check claim to a sumcheck claim
-        self.z_check_claim_to_s_check_claim(max_nv)?;
-        // Ensure sumcheck claims are consistent with the max nv used in the protocol
-        self.equalize_sumcheck_claims(max_nv)?;
-        // aggregate the sumcheck claims
-        self.batch_s_check_claims(max_nv)?;
-        // Reduce high-degree terms deterministically before sumcheck.
-        self.reduce_sumcheck_dgree()?;
-        // Batch all the zero check claims into one
-        self.batch_z_check_claims(max_nv)?;
-        // Convert the only zero check claim to a sumcheck claim
-        self.z_check_claim_to_s_check_claim(max_nv)?;
-        // Ensure sumcheck claims are consistent with the max nv used in the protocol
-        // self.equalize_sumcheck_claims(max_nv)?;
-        // aggregate the sumcheck claims
-        self.batch_s_check_claims(max_nv)?;
-        // verify the sumcheck proof
-        self.perform_single_sumcheck()?;
-        // Verify the evaluation claims
-        self.perform_eval_check()?;
+        match self.config.sumcheck_bucketing {
+            crate::types::SumcheckBucketing::Single => {
+                self.run_bucket_pipeline_verify(max_nv, 0)?;
+            }
+            crate::types::SumcheckBucketing::ByClaimNumVars => {
+                // Snapshot and partition every pending claim by
+                // `state.poly_log_sizes[claim.id()]`, then run one bucket per
+                // distinct size, ascending. Must match prover-side bucket
+                // ordering for the transcript to line up.
+                let global_max_for_recording = self.equalize_mat_com_nv();
+                let zc_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+                let sc_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+                let nzc_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
 
+                let mut zc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerZerocheckClaim>,
+                > = BTreeMap::new();
+                let mut sc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerSumcheckClaim<B::F>>,
+                > = BTreeMap::new();
+                let mut nzc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerNoZerocheckClaim>,
+                > = BTreeMap::new();
+                for c in zc_claims {
+                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+                    zc_buckets.entry(nv).or_default().push(c);
+                }
+                for c in sc_claims {
+                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+                    sc_buckets.entry(nv).or_default().push(c);
+                }
+                for c in nzc_claims {
+                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+                    nzc_buckets.entry(nv).or_default().push(c);
+                }
+
+                let mut nvs: std::collections::BTreeSet<usize> =
+                    std::collections::BTreeSet::new();
+                nvs.extend(zc_buckets.keys().copied());
+                nvs.extend(sc_buckets.keys().copied());
+                nvs.extend(nzc_buckets.keys().copied());
+
+                for (bucket_index, target_nv) in nvs.into_iter().enumerate() {
+                    self.state.mv_pcs_substate.zero_check_claims =
+                        zc_buckets.remove(&target_nv).unwrap_or_default();
+                    self.state.mv_pcs_substate.sum_check_claims =
+                        sc_buckets.remove(&target_nv).unwrap_or_default();
+                    self.state.mv_pcs_substate.no_zero_check_claims =
+                        nzc_buckets.remove(&target_nv).unwrap_or_default();
+                    self.run_bucket_pipeline_verify(target_nv, bucket_index)?;
+                }
+                // Prover's `equalize_mat_poly_nv_to` extends every
+                // eval-claim point to `global_max` inside the per-bucket
+                // loop, so all recorded points sit on the same domain by
+                // the time PCS batch-open runs. Mirror that here so the
+                // verifier's batch_verify_inner sees uniform-length points
+                // when it computes `eq_eval(a2, point_i)`.
+                let extended: crate::verifier::structs::VerifierEvalClaimMap<
+                    B::F,
+                    B::MvPCS,
+                > = std::mem::take(&mut self.state.mv_pcs_substate.eval_claims)
+                    .into_iter()
+                    .map(|((id, mut point), eval)| {
+                        if point.len() < global_max_for_recording {
+                            point.resize(global_max_for_recording, B::F::zero());
+                        }
+                        ((id, point), eval)
+                    })
+                    .collect();
+                self.state.mv_pcs_substate.eval_claims = extended;
+                let _ = max_nv;
+            }
+        }
+        // Verify all evaluation claims once, after every bucket.
+        self.perform_eval_check()?;
         Ok(())
     }
 
@@ -223,7 +335,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     ///    and add zerocheck links.
     ///
     /// The same tie-breaking/order is used to keep this fully deterministic.
-    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<()> {
+    fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<()> {
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
             "reduce_sumcheck_dgree expects no zerocheck claims"
@@ -343,6 +455,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             replacements: &mut usize,
             expanded_terms_total: &mut usize,
             expanded_oversized_terms: &mut usize,
+            target_nv: usize,
         ) -> SnarkResult<TrackerID> {
             let max_term_degree = tracker.config.sumcheck_term_degree_limit - 1;
 
@@ -414,21 +527,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 chunk_cache: &mut BTreeMap<Vec<TrackerID>, TrackerID>,
                 extra_zero_claims: &mut Vec<TrackerID>,
                 committed_chunks: &mut usize,
+                target_nv: usize,
             ) -> SnarkResult<TrackerID> {
                 if let Some(id) = chunk_cache.get(chunk).copied() {
                     return Ok(id);
                 }
 
                 let chunk_len = chunk.len();
-                // Mirror prover-side behavior: chunk commitments are tracked at the
-                // global max multivariate log-size so reduced terms never mix domains.
-                let chunk_log_size = tracker
-                    .state
-                    .poly_log_sizes
-                    .values()
-                    .copied()
-                    .max()
-                    .unwrap_or(0);
+                // Mirror prover-side behavior: chunk commitments are tracked at
+                // the current bucket's target nv. In `Single` mode this equals
+                // the historical global max; in `ByClaimNumVars` mode it stays
+                // inside the current bucket's hypercube.
+                let chunk_log_size = target_nv;
                 let new_id = tracker.peek_next_id();
                 let _ = tracker.track_mv_com_by_id(new_id)?;
                 chunk_cache.insert(chunk.to_vec(), new_id);
@@ -489,6 +599,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     chunk_cache,
                     extra_zero_claims,
                     committed_chunks,
+                    target_nv,
                 )?;
 
                 let mut replaced_in_round = 0usize;
@@ -565,6 +676,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &mut replacements,
                 &mut expanded_terms_total,
                 &mut expanded_oversized_terms,
+                target_nv,
             )?;
             self.state
                 .mv_pcs_substate

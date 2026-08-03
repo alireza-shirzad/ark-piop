@@ -29,11 +29,15 @@ where
     where
         B: SnarkBackend,
     {
-        // Transform all the materialized polynomials to polynomials with the maximum
-        // number of variables needed
-        let max_nv = self.equalize_mat_poly_nv();
+        // `compile_sc_subproof` now dispatches on
+        // `config.sumcheck_bucketing`:
+        //   * `Single`  — lifts all mat polys to the global max nv and
+        //     produces one aggregated sumcheck (historical behaviour).
+        //   * `ByClaimNumVars` — partitions the pending claims by
+        //     `state.num_vars[claim]` and runs one sumcheck per distinct
+        //     size, lifting mat polys per bucket rather than globally.
         let compile_sc_subproof_started = Instant::now();
-        let sc_subproof = self.compile_sc_subproof(max_nv)?;
+        let sc_subproof = self.compile_sc_subproof()?;
         let compile_sc_subproof_time_s = compile_sc_subproof_started.elapsed().as_secs_f64();
 
         let compile_mv_pcs_subproof_started = Instant::now();

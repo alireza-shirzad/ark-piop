@@ -4,6 +4,7 @@
 //! verifier-side seam methods (`track_eq_x_r`) create succinct oracle
 //! closures rather than materializing polynomial data.
 
+use ark_ff::Zero;
 use std::mem::take;
 
 use crate::{
@@ -159,8 +160,24 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
     // ── Seam: verifier-specific ─────────────────────────────────────
 
     fn track_eq_x_r(&mut self, r: &[Self::F], max_nv: usize) -> SnarkResult<TrackerID> {
+        // In bucketed mode a downstream pass extends eval-claim points from
+        // their original bucket size (== `r.len() == max_nv`) up to the
+        // proof-global max, so this oracle may be queried at a point
+        // longer than `r`. That's semantically consistent with the way
+        // materialized MLEs lift by zero-padding (evaluating an nv-poly
+        // at (p || 0,…,0) reproduces its value at `p`): eq(p||0, r||0) =
+        // eq(p, r). So pad the shorter side with zeros before comparing.
         let r = r.to_vec();
-        let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> { eq_eval(&pt, r.as_ref()) };
+        let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> {
+            let mut pt = pt;
+            let mut r_local = r.clone();
+            if pt.len() < r_local.len() {
+                pt.resize(r_local.len(), B::F::zero());
+            } else if r_local.len() < pt.len() {
+                r_local.resize(pt.len(), B::F::zero());
+            }
+            eq_eval(&pt, &r_local)
+        };
         let eq_x_r_oracle = Oracle::new_multivariate(max_nv, eq_x_r_closure);
         Ok(self.track_base_oracle(eq_x_r_oracle))
     }

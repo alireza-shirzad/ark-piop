@@ -97,7 +97,7 @@ where
     ///
     /// The procedure is fully deterministic (stable ordering/tie-breaks) and
     /// mirrors verifier-side reduction.
-    fn reduce_sumcheck_dgree(&mut self) -> SnarkResult<ReduceSumcheckDegreeStats> {
+    fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<ReduceSumcheckDegreeStats> {
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
             "reduce_sumcheck_dgree expects no zerocheck claims"
@@ -245,6 +245,7 @@ where
             replacements: &mut usize,
             expanded_terms_total: &mut usize,
             expanded_oversized_terms: &mut usize,
+            target_nv: usize,
         ) -> SnarkResult<TrackerID> {
             let max_term_degree = tracker.config.sumcheck_term_degree_limit - 1;
 
@@ -316,15 +317,17 @@ where
                 extra_zero_claims: &mut Vec<TrackerID>,
                 eval_cache: &mut BTreeMap<(TrackerID, usize), Vec<B::F>>,
                 committed_chunks: &mut usize,
+                target_nv: usize,
             ) -> SnarkResult<TrackerID> {
                 if let Some(id) = chunk_cache.get(chunk).copied() {
                     return Ok(id);
                 }
-                // Keep all newly committed chunk polynomials on the global max domain.
-                // `equalize_mat_poly_nv` already lifted existing materialized polynomials
-                // to this nv before sumcheck compilation; using a smaller nv here would
-                // re-introduce mixed-nv products and break HP virtual-poly construction.
-                let nv = tracker.state.num_vars.values().max().copied().unwrap_or(0);
+                // Commit chunk polynomials at the current bucket's target
+                // num_vars. In `Single` mode this matches the historical
+                // global-max behaviour; in `ByClaimNumVars` mode it keeps
+                // row-bucket chunks off the char-bucket domain, which is the
+                // whole point of bucketing.
+                let nv = target_nv;
                 let mut evals = vec![B::F::one(); 1 << nv];
                 for id in chunk.iter().copied() {
                     let v = eval_vector(tracker, id, nv, eval_cache);
@@ -380,6 +383,7 @@ where
                     extra_zero_claims,
                     eval_cache,
                     committed_chunks,
+                    target_nv,
                 )?;
 
                 let mut replaced_in_round = 0usize;
@@ -435,6 +439,7 @@ where
                 &mut replacements,
                 &mut expanded_terms_total,
                 &mut expanded_oversized_terms,
+                target_nv,
             )?;
             self.state
                 .mv_pcs_substate
@@ -470,15 +475,17 @@ where
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn batch_nozero_check_claims(&mut self) -> SnarkResult<()> {
+    fn batch_nozero_check_claims(&mut self, target_nv: usize) -> SnarkResult<()> {
         let nozero_chunk_size = self.config.nozero_chunk_size;
         let nozero_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
         if nozero_claims.is_empty() {
             return Ok(());
         }
 
-        // Use the largest nv in the tracker so all committed chunk polys share a domain.
-        let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
+        // Commit chunk polys at the current bucket's target nv. In `Single`
+        // mode this equals the historical global max; in `ByClaimNumVars`
+        // mode this stays inside the current bucket's hypercube.
+        let max_nv = target_nv;
         let num_claims = nozero_claims.len();
         let mut chunk_comm_ids = Vec::new(); // committed chunk products (materialized)
         let mut master_prod_id = None; // virtual product of chunk commitments
@@ -578,40 +585,42 @@ where
         Ok(())
     }
 
-    /// Reduces every zero-check claim, sum-check claim in
-    /// the prover state, into a list of evaluation claims. These evaluation
-    /// claims will be proved using a PCS
-    #[instrument(level = "debug", skip(self))]
-    pub(super) fn compile_sc_subproof(
+    /// Runs the full sumcheck compile pipeline for **one bucket** at a
+    /// specific `target_nv`. Consumes whatever is currently sitting in
+    /// `state.{no_zero_check_claims, zero_check_claims, sum_check_claims}` and
+    /// leaves those lists empty; produces at most one [`SumcheckBucketProof`]
+    /// plus the individual pre-batching sumcheck claim map to embed in the
+    /// proof (so downstream consumers of `SumcheckSubproof::sumcheck_claims`
+    /// still see every original claim). Returns `(None, empty_map)` when the
+    /// bucket has no sumcheck claims after the zero→sumcheck conversion.
+    #[allow(clippy::type_complexity)]
+    fn run_bucket_pipeline(
         &mut self,
-        max_nv: usize,
-    ) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        target_nv: usize,
+    ) -> SnarkResult<(Option<SumcheckBucketProof<B::F>>, BTreeMap<TrackerID, B::F>)> {
         let mut timing_breakdown = ScCompileTimingBreakdown::default();
         let before_initial = self.current_claim_stage_stats();
         let nozero_batching_started = Instant::now();
-        self.batch_nozero_check_claims()?;
+        self.batch_nozero_check_claims(target_nv)?;
         timing_breakdown.nozerocheck_batching_time_s =
             nozero_batching_started.elapsed().as_secs_f64();
         let before_after_nozero_batching = self.current_claim_stage_stats();
-        // Batch all the zero-check claims into one claim, remove old zerocheck claims
         let first_batch_zerocheck_started = Instant::now();
         self.batch_z_check_claims()?;
         timing_breakdown.first_batch_zerocheck_time_s =
             first_batch_zerocheck_started.elapsed().as_secs_f64();
         let before_after_zero_batching = self.current_claim_stage_stats();
-        // Convert the only zerocheck claim to a sumcheck claim
         let first_zerocheck_to_sumcheck_started = Instant::now();
-        self.z_check_claim_to_s_check_claim(max_nv)?;
+        self.z_check_claim_to_s_check_claim(target_nv)?;
         timing_breakdown.first_zerocheck_to_sumcheck_time_s =
             first_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
-        // Batch all the sumcheck claims into one sumcheck claim
         let first_batch_sumcheck_started = Instant::now();
         let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
         timing_breakdown.first_batch_sumcheck_time_s =
             first_batch_sumcheck_started.elapsed().as_secs_f64();
         let before_after_sum_batching = self.current_claim_stage_stats();
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
-            debug!("No sumcheck claims to prove",);
+            debug!("No sumcheck claims to prove in this bucket");
             let after_initial = ClaimStageStats::default();
             let after_after_zero_batching = ClaimStageStats::default();
             let after_after_sum_batching = ClaimStageStats::default();
@@ -625,37 +634,28 @@ where
                 &after_after_sum_batching,
             );
             self.emit_sc_compile_timing_breakdown(timing_breakdown);
-            return Ok(None);
+            return Ok((None, individual_sumcheck_claims));
         }
 
-        // Reduce high-degree terms deterministically before sumcheck.
         let reduce_sumcheck_started = Instant::now();
-        let _reduce_stats = self.reduce_sumcheck_dgree()?;
+        let _reduce_stats = self.reduce_sumcheck_dgree(target_nv)?;
         timing_breakdown.reduce_sumcheck_time_s = reduce_sumcheck_started.elapsed().as_secs_f64();
         let after_initial = self.current_claim_stage_stats();
 
-        // Batch all the zero-check claims into one claim, remove old zerocheck claims
         let second_batch_zerocheck_started = Instant::now();
         self.batch_z_check_claims()?;
         timing_breakdown.second_batch_zerocheck_time_s =
             second_batch_zerocheck_started.elapsed().as_secs_f64();
         let after_after_zero_batching = self.current_claim_stage_stats();
-        // Convert the only zerocheck claim to a sumcheck claim
         let second_zerocheck_to_sumcheck_started = Instant::now();
-        self.z_check_claim_to_s_check_claim(max_nv)?;
+        self.z_check_claim_to_s_check_claim(target_nv)?;
         timing_breakdown.second_zerocheck_to_sumcheck_time_s =
             second_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
-        // Batch all the sumcheck claims into one sumcheck claim
         let additional_sumcheck_claims = self.batch_s_check_claims()?;
         let after_after_sum_batching = self.current_claim_stage_stats();
         for (id, claim) in additional_sumcheck_claims {
             individual_sumcheck_claims.entry(id).or_insert(claim);
         }
-        // if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
-        //     debug!("No sumcheck claims to prove",);
-        //     return Ok(None);
-        // }
-        // Perform the one batched sumcheck
         let sumcheck_started = Instant::now();
         let (sc_proof, sc_aux_info, _sumcheck_stats) = self.perform_single_sumcheck()?;
         timing_breakdown.sumcheck_time_s = sumcheck_started.elapsed().as_secs_f64();
@@ -669,13 +669,130 @@ where
             &after_after_sum_batching,
         );
         self.emit_sc_compile_timing_breakdown(timing_breakdown);
-        // Assemble the sumcheck subproof of the prover. Phase-1 wraps the
-        // single sumcheck in a one-element bucket vector; Phase 5 fills in
-        // multiple buckets for `SumcheckBucketing::ByClaimNumVars`.
-        let sc_subproof = SumcheckSubproof::new(
-            vec![SumcheckBucketProof::new(sc_proof.clone(), sc_aux_info.clone())],
+
+        // Drop the leftover aggregated sumcheck claim from state so the
+        // next bucket iteration starts clean. (`perform_single_sumcheck`
+        // reads but doesn't consume it; single-bucket mode never notices.)
+        self.state.mv_pcs_substate.sum_check_claims.clear();
+
+        Ok((
+            Some(SumcheckBucketProof::new(sc_proof, sc_aux_info)),
             individual_sumcheck_claims,
-        );
-        Ok(Some(sc_subproof))
+        ))
+    }
+
+    /// Reduces every zero-check claim, sum-check claim in the prover state
+    /// into a list of evaluation claims. Dispatches on
+    /// [`SharedArgConfig::sumcheck_bucketing`]:
+    ///   * `Single`  — one bucket at the global max `num_vars` (historical).
+    ///   * `ByClaimNumVars` — partitions the pending claims by
+    ///     `state.num_vars[claim.id()]`, then runs [`run_bucket_pipeline`]
+    ///     once per distinct size in ascending order. Claims must be
+    ///     size-homogeneous within their virt-poly graph (enforced
+    ///     implicitly by MLE eval assertions when it isn't).
+    #[instrument(level = "debug", skip(self))]
+    pub(super) fn compile_sc_subproof(&mut self) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        match self.config.sumcheck_bucketing {
+            crate::types::SumcheckBucketing::Single => {
+                // Lift every materialized poly to the global max, mirroring
+                // the pre-Phase-5 behaviour byte-for-byte on the transcript.
+                let max_nv = self.equalize_mat_poly_nv();
+                let (bucket, claims) = self.run_bucket_pipeline(max_nv)?;
+                match bucket {
+                    None => Ok(None),
+                    Some(bucket) => Ok(Some(SumcheckSubproof::new(vec![bucket], claims))),
+                }
+            }
+            crate::types::SumcheckBucketing::ByClaimNumVars => {
+                // Snapshot every pending claim, then re-populate state per
+                // bucket. Claims land in the bucket keyed by the num_vars of
+                // their virt-poly root as recorded in `state.num_vars`.
+                let zc_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+                let sc_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+                let nzc_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+
+                let mut zc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerZerocheckClaim>,
+                > = BTreeMap::new();
+                let mut sc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerSumcheckClaim<B::F>>,
+                > = BTreeMap::new();
+                let mut nzc_buckets: BTreeMap<
+                    usize,
+                    Vec<crate::types::claim::TrackerNoZerocheckClaim>,
+                > = BTreeMap::new();
+                for c in zc_claims {
+                    let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
+                    zc_buckets.entry(nv).or_default().push(c);
+                }
+                for c in sc_claims {
+                    let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
+                    sc_buckets.entry(nv).or_default().push(c);
+                }
+                for c in nzc_claims {
+                    let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
+                    nzc_buckets.entry(nv).or_default().push(c);
+                }
+
+                // Union of bucket keys, ascending.
+                let mut nvs: std::collections::BTreeSet<usize> =
+                    std::collections::BTreeSet::new();
+                nvs.extend(zc_buckets.keys().copied());
+                nvs.extend(sc_buckets.keys().copied());
+                nvs.extend(nzc_buckets.keys().copied());
+
+                let mut bucket_proofs: Vec<SumcheckBucketProof<B::F>> =
+                    Vec::with_capacity(nvs.len());
+                let mut all_individual_claims: BTreeMap<TrackerID, B::F> = BTreeMap::new();
+
+                // Pre-scaling target so recorded `individual_sumcheck_claims`
+                // values look identical to what Single mode would emit —
+                // required so downstream gadgets (e.g. keyed_sumcheck's
+                // `sum_claim_v / 2^(local_max - log_size)` un-scaling) get
+                // the value they expect. The verifier undoes this scaling
+                // inside `equalize_sumcheck_claims` so the aggregated
+                // sumcheck still runs on raw values at each bucket's
+                // `target_nv`.
+                let global_max_for_recording = nvs.iter().copied().max().unwrap_or(0);
+
+                for target_nv in nvs {
+                    // Re-populate state for this bucket.
+                    self.state.mv_pcs_substate.zero_check_claims =
+                        zc_buckets.remove(&target_nv).unwrap_or_default();
+                    self.state.mv_pcs_substate.sum_check_claims =
+                        sc_buckets.remove(&target_nv).unwrap_or_default();
+                    self.state.mv_pcs_substate.no_zero_check_claims =
+                        nzc_buckets.remove(&target_nv).unwrap_or_default();
+
+                    // Lift mat polys as needed for this bucket. The helper
+                    // only lifts polys with native nv < target_nv, so char
+                    // polys stay at nv=22 even in the row bucket.
+                    self.equalize_mat_poly_nv_to(target_nv);
+
+                    let (bucket, claims) = self.run_bucket_pipeline(target_nv)?;
+                    if let Some(bucket) = bucket {
+                        bucket_proofs.push(bucket);
+                    }
+                    let scale = if global_max_for_recording > target_nv {
+                        B::F::from(1u64 << (global_max_for_recording - target_nv))
+                    } else {
+                        B::F::one()
+                    };
+                    for (id, v) in claims {
+                        all_individual_claims.entry(id).or_insert(v * scale);
+                    }
+                }
+
+                if bucket_proofs.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some(SumcheckSubproof::new(
+                    bucket_proofs,
+                    all_individual_claims,
+                )))
+            }
+        }
     }
 }

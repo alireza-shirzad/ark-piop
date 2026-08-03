@@ -20,34 +20,52 @@ pub struct SharedArgConfig {
     /// the number of committed chunks but increase the degree of each chunk.
     pub nozero_chunk_size: usize,
     /// How the final sumcheck stage partitions its claims into rounds.
-    /// [`SumcheckBucketing::Single`] (currently the only variant) matches the
-    /// historical behaviour — every claim is padded to the global max
-    /// `num_vars` and batched into one sumcheck. A future
-    /// `ByClaimNumVars` variant will group claims by their pre-batch
-    /// `num_vars` and run one sumcheck per distinct size, so proofs that
-    /// mix row-size and char-size claims stop paying padding overhead.
-    /// The proof-wire shape ([`SumcheckSubproof`]) already carries a
-    /// `Vec<SumcheckBucketProof>` in anticipation of that variant.
+    /// [`SumcheckBucketing::Single`] matches the historical behaviour — every
+    /// claim is padded to the global max `num_vars` and batched into one
+    /// sumcheck. [`SumcheckBucketing::ByClaimNumVars`] groups claims by
+    /// their pre-batch `num_vars` and runs one sumcheck per distinct size,
+    /// ascending, so proofs that mix row-size and char-size claims stop
+    /// paying padding overhead on the smaller-size claims.
     pub sumcheck_bucketing: SumcheckBucketing,
 }
 
-/// Partitioning strategy for the final aggregated sumcheck stage. Only
-/// [`SumcheckBucketing::Single`] is implemented today; the enum exists so
-/// downstream callers can begin passing an explicit choice ahead of the
-/// per-bucket compile refactor.
+/// Partitioning strategy for the final aggregated sumcheck stage.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SumcheckBucketing {
     /// One sumcheck at global max `num_vars`. Original behaviour.
     #[default]
     Single,
+    /// One sumcheck per distinct claim `num_vars`, ascending. Requires that
+    /// no virtual polynomial mixes constituents of different `num_vars` —
+    /// which the tracker enforces implicitly by only ever creating virtual
+    /// polys whose leaves share a hypercube (any attempted mixed-size
+    /// evaluation trips MLE's `point.len() == num_vars()` assertion).
+    ByClaimNumVars,
 }
 
 impl Default for SharedArgConfig {
     fn default() -> Self {
+        // `ARK_PIOP_SUMCHECK_BUCKETING` lets an operator flip bucketing
+        // without threading a custom `SharedArgConfig` through every
+        // downstream caller. Values: `single` (default) or `by_claim_num_vars`.
+        // Both prover and verifier read the env var during `default()` so
+        // they land on the same policy without any explicit plumbing.
+        let sumcheck_bucketing = match std::env::var("ARK_PIOP_SUMCHECK_BUCKETING")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("by_claim_num_vars") | Some("bucketed") | Some("by_num_vars") => {
+                SumcheckBucketing::ByClaimNumVars
+            }
+            _ => SumcheckBucketing::Single,
+        };
         Self {
             sumcheck_term_degree_limit: 6,
             nozero_chunk_size: 1,
-            sumcheck_bucketing: SumcheckBucketing::Single,
+            sumcheck_bucketing,
         }
     }
 }
