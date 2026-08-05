@@ -69,8 +69,13 @@ impl<F: PrimeField> SumcheckProverState<F> {
         //    g(r_1, ..., r_{m-1}, x_m ... x_n)
         //
         // eval g over r_m, and mutate g to g(r_1, ... r_m,, x_{m+1}... x_n)
+        //
+        // `to_field_owned` handles the tracker-side compressed → Field
+        // promotion at this boundary: subsequent code (Index<usize>,
+        // fix_variables) requires Field storage. For polys already in Field
+        // storage it's a plain `Vec<F>` clone.
         let mut flattened_mles: Vec<MLE<F>> = cfg_iter!(self.poly.flattened_ml_extensions)
-            .map(|x| x.as_ref().clone())
+            .map(|x| x.as_ref().to_field_owned())
             .collect();
         if let Some(chal) = challenge {
             if self.round == 0 {

@@ -11,7 +11,11 @@ where
     /// moves the polynomial to heap, assigns a TracckerID to it in map and
     /// returns the TrackerID
     pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackerID {
-        let polynomial = Arc::new(polynomial);
+        // Auto-compress consistently with `track_and_commit_mat_mv_p` and
+        // `track_mat_mv_p_with_commitment`. Callers that skip commit (e.g.
+        // tt-core's `track_arith_table_without_commitment` for the output
+        // table) still get the storage-width reduction.
+        let polynomial = Arc::new(polynomial.compressed());
         self.track_mat_arc_mv_poly(polynomial)
     }
 
@@ -90,11 +94,21 @@ where
         use_cache: bool,
     ) -> SnarkResult<Either<TrackerID, (TrackerID, B::F)>> {
         if polynomial.is_constant() {
-            let cnst = polynomial[0];
+            // Storage-aware read: `polynomial[0]` (Index<usize>) only supports
+            // Field storage; the constant is available via the storage lift
+            // for every variant.
+            let cnst = polynomial.storage().lift(0);
             let id = self.track_and_commit_mv_constant(cnst, polynomial.num_vars())?;
             return Ok(Either::Right((id, cnst)));
         }
-        let polynomial = Arc::new(polynomial.clone());
+        // Auto-compress: if the incoming poly is `Field`-backed but every
+        // element fits in a small integer type (bit/u8/u32/u64), rebuild it
+        // with the tightest storage variant. This eliminates the per-caller
+        // classification burden — any upstream gadget that produces a `Vec<F>`
+        // of small-integer values automatically gets 8×-256× smaller tracker
+        // storage. Non-Field storage is a no-op. Only requires `PrimeField`,
+        // which every real prover backend satisfies.
+        let polynomial = Arc::new(polynomial.clone().compressed());
         let commitment = if use_cache {
             let digest = crate::arithmetic::mat_poly::digest::mle_digest(polynomial.as_ref());
             if let Some(cached) = self.state.mv_pcs_substate.commitment_cache.get(&digest) {
@@ -160,7 +174,11 @@ where
         binding: CommitmentBinding,
         use_cache: bool,
     ) -> SnarkResult<TrackerID> {
-        let polynomial = Arc::new(polynomial.clone());
+        // Auto-compress: same policy as `track_and_commit_mat_mv_p`. Callers
+        // supplying externally-committed polys (e.g. tt-core's main-table
+        // tracking pass) get the same 8×-256× tracker-storage reduction
+        // without having to compress at each call site.
+        let polynomial = Arc::new(polynomial.clone().compressed());
 
         if use_cache {
             // Populate the commitment cache so future commits to the same

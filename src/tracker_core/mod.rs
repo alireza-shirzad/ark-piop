@@ -7,6 +7,7 @@
 //! `batch_s_check_claims`, `z_check_claim_to_s_check_claim`) can be written
 //! once in generic form.
 
+pub mod bucketing;
 pub mod pipeline;
 
 use crate::{

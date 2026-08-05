@@ -164,7 +164,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn equalize_sumcheck_claims(&mut self, max_nv: usize) -> SnarkResult<()> {
+    fn equalize_sumcheck_claims(&mut self, target_nv: usize) -> SnarkResult<()> {
         let poly_log_sizes: IndexMap<TrackerID, usize> = self.state.poly_log_sizes.clone();
         let proof_claims = self
             .proof
@@ -172,44 +172,36 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .and_then(|proof| proof.sc_subproof.as_ref())
             .map(|subproof| subproof.sumcheck_claims().clone());
 
-        // When bucketing, prover recorded values pre-scaled by
-        // `2^(global_max - poly_nv)` so tt-core gadgets that un-scale by
-        // their local max recover raw. That leaves state.claim at the
-        // *global-max* scale, but the aggregated sumcheck inside this
-        // bucket runs at `max_nv = target_nv`; we need state.claim at
-        // raw to match. So divide by the same factor for gadget-added
-        // claims (those that match a proof-recorded value).
-        let is_bucketed = matches!(
-            self.config.sumcheck_bucketing,
-            crate::types::SumcheckBucketing::ByClaimNumVars
-        );
-        let global_max_for_recording = if is_bucketed {
-            self.equalize_mat_com_nv()
-        } else {
-            max_nv
-        };
+        // The prover records every proof-map value pre-scaled to
+        // `raw * 2^(global_max - poly_nv)` so tt-core gadgets that un-scale
+        // by their local max still recover `raw`. But this bucket's
+        // aggregated sumcheck runs at `target_nv`, not `global_max`, and
+        // it needs to see `raw * 2^(target_nv - poly_nv)` (which is what
+        // the prover's `equalize_mat_poly_nv_to(target_nv)` produced before
+        // the sumcheck). Divide by `2^(global_max - target_nv)` — that is
+        // a no-op in a single-bucket plan (`target_nv == global_max`) and
+        // matches the prover pre-scale in every multi-bucket plan.
+        let global_max_for_recording = self.equalize_mat_com_nv();
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             if let Some(proof_claims) = proof_claims.as_ref()
                 && let Some(proof_claim) = proof_claims.get(&claim.id())
                 && claim.claim() == *proof_claim
             {
-                if is_bucketed {
-                    let poly_nv = poly_log_sizes
-                        .get(&claim.id())
-                        .copied()
-                        .unwrap_or(global_max_for_recording);
-                    if global_max_for_recording > poly_nv {
-                        let factor = B::F::from(1u64 << (global_max_for_recording - poly_nv));
-                        claim.set_claim(claim.claim() / factor);
-                    }
+                if global_max_for_recording > target_nv {
+                    let factor =
+                        B::F::from(1u64 << (global_max_for_recording - target_nv));
+                    claim.set_claim(claim.claim() / factor);
                 }
                 continue;
             }
 
-            let nv = poly_log_sizes.get(&claim.id()).copied().unwrap_or(max_nv);
-            if nv < max_nv {
-                claim.set_claim(claim.claim() * B::F::from(1 << (max_nv - nv)));
+            // Gadget-added claim not present in the proof map (post-bucket
+            // additions from the second batching round). Mirror the
+            // prover's `equalize_mat_poly_nv_to(target_nv)` scaling.
+            let nv = poly_log_sizes.get(&claim.id()).copied().unwrap_or(target_nv);
+            if nv < target_nv {
+                claim.set_claim(claim.claim() * B::F::from(1u64 << (target_nv - nv)));
             }
         }
         Ok(())
@@ -244,82 +236,110 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self, max_nv: usize) -> SnarkResult<()> {
-        match self.config.sumcheck_bucketing {
-            crate::types::SumcheckBucketing::Single => {
-                self.run_bucket_pipeline_verify(max_nv, 0)?;
-            }
-            crate::types::SumcheckBucketing::ByClaimNumVars => {
-                // Snapshot and partition every pending claim by
-                // `state.poly_log_sizes[claim.id()]`, then run one bucket per
-                // distinct size, ascending. Must match prover-side bucket
-                // ordering for the transcript to line up.
-                let global_max_for_recording = self.equalize_mat_com_nv();
-                let zc_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
-                let sc_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-                let nzc_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        // Rebuild the same plan the prover picked: snapshot every pending
+        // claim, group by `poly_log_sizes[claim.id()]` (mirrors the prover's
+        // `state.num_vars` on the corresponding TrackerIDs), and feed the
+        // (nv, count) vector to `pick_bucket_plan`. Because the picker is
+        // deterministic and both sides observe the same nvs and counts, no
+        // wire-format hint is needed to keep them in lockstep.
+        let global_max_for_recording = self.equalize_mat_com_nv();
+        let zc_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        let sc_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+        let nzc_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
 
-                let mut zc_buckets: BTreeMap<
-                    usize,
-                    Vec<crate::types::claim::TrackerZerocheckClaim>,
-                > = BTreeMap::new();
-                let mut sc_buckets: BTreeMap<
-                    usize,
-                    Vec<crate::types::claim::TrackerSumcheckClaim<B::F>>,
-                > = BTreeMap::new();
-                let mut nzc_buckets: BTreeMap<
-                    usize,
-                    Vec<crate::types::claim::TrackerNoZerocheckClaim>,
-                > = BTreeMap::new();
-                for c in zc_claims {
-                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
-                    zc_buckets.entry(nv).or_default().push(c);
-                }
-                for c in sc_claims {
-                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
-                    sc_buckets.entry(nv).or_default().push(c);
-                }
-                for c in nzc_claims {
-                    let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
-                    nzc_buckets.entry(nv).or_default().push(c);
-                }
-
-                let mut nvs: std::collections::BTreeSet<usize> =
-                    std::collections::BTreeSet::new();
-                nvs.extend(zc_buckets.keys().copied());
-                nvs.extend(sc_buckets.keys().copied());
-                nvs.extend(nzc_buckets.keys().copied());
-
-                for (bucket_index, target_nv) in nvs.into_iter().enumerate() {
-                    self.state.mv_pcs_substate.zero_check_claims =
-                        zc_buckets.remove(&target_nv).unwrap_or_default();
-                    self.state.mv_pcs_substate.sum_check_claims =
-                        sc_buckets.remove(&target_nv).unwrap_or_default();
-                    self.state.mv_pcs_substate.no_zero_check_claims =
-                        nzc_buckets.remove(&target_nv).unwrap_or_default();
-                    self.run_bucket_pipeline_verify(target_nv, bucket_index)?;
-                }
-                // Prover's `equalize_mat_poly_nv_to` extends every
-                // eval-claim point to `global_max` inside the per-bucket
-                // loop, so all recorded points sit on the same domain by
-                // the time PCS batch-open runs. Mirror that here so the
-                // verifier's batch_verify_inner sees uniform-length points
-                // when it computes `eq_eval(a2, point_i)`.
-                let extended: crate::verifier::structs::VerifierEvalClaimMap<
-                    B::F,
-                    B::MvPCS,
-                > = std::mem::take(&mut self.state.mv_pcs_substate.eval_claims)
-                    .into_iter()
-                    .map(|((id, mut point), eval)| {
-                        if point.len() < global_max_for_recording {
-                            point.resize(global_max_for_recording, B::F::zero());
-                        }
-                        ((id, point), eval)
-                    })
-                    .collect();
-                self.state.mv_pcs_substate.eval_claims = extended;
-                let _ = max_nv;
-            }
+        let mut zc_by_nv: BTreeMap<
+            usize,
+            Vec<crate::types::claim::TrackerZerocheckClaim>,
+        > = BTreeMap::new();
+        let mut sc_by_nv: BTreeMap<
+            usize,
+            Vec<crate::types::claim::TrackerSumcheckClaim<B::F>>,
+        > = BTreeMap::new();
+        let mut nzc_by_nv: BTreeMap<
+            usize,
+            Vec<crate::types::claim::TrackerNoZerocheckClaim>,
+        > = BTreeMap::new();
+        for c in zc_claims {
+            let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+            zc_by_nv.entry(nv).or_default().push(c);
         }
+        for c in sc_claims {
+            let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+            sc_by_nv.entry(nv).or_default().push(c);
+        }
+        for c in nzc_claims {
+            let nv = self.state.poly_log_sizes.get(&c.id()).copied().unwrap_or(0);
+            nzc_by_nv.entry(nv).or_default().push(c);
+        }
+
+        let mut nvs: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        nvs.extend(zc_by_nv.keys().copied());
+        nvs.extend(sc_by_nv.keys().copied());
+        nvs.extend(nzc_by_nv.keys().copied());
+
+        let nv_claim_counts: Vec<(usize, usize)> = nvs
+            .iter()
+            .map(|nv| {
+                let n = zc_by_nv.get(nv).map_or(0, |v| v.len())
+                    + sc_by_nv.get(nv).map_or(0, |v| v.len())
+                    + nzc_by_nv.get(nv).map_or(0, |v| v.len());
+                (*nv, n)
+            })
+            .collect();
+
+        if nv_claim_counts.is_empty() {
+            let _ = max_nv;
+            self.perform_eval_check()?;
+            return Ok(());
+        }
+
+        let plan = crate::tracker_core::bucketing::pick_bucket_plan(&nv_claim_counts);
+        debug!(
+            plan = ?plan.iter().map(|b| (b.target_nv, b.included_nvs.clone())).collect::<Vec<_>>(),
+            "sumcheck bucketing plan"
+        );
+
+        for (bucket_index, bucket) in plan.iter().enumerate() {
+            let mut zc: Vec<crate::types::claim::TrackerZerocheckClaim> = Vec::new();
+            let mut sc: Vec<crate::types::claim::TrackerSumcheckClaim<B::F>> = Vec::new();
+            let mut nzc: Vec<crate::types::claim::TrackerNoZerocheckClaim> = Vec::new();
+            for nv in &bucket.included_nvs {
+                if let Some(v) = zc_by_nv.remove(nv) {
+                    zc.extend(v);
+                }
+                if let Some(v) = sc_by_nv.remove(nv) {
+                    sc.extend(v);
+                }
+                if let Some(v) = nzc_by_nv.remove(nv) {
+                    nzc.extend(v);
+                }
+            }
+            self.state.mv_pcs_substate.zero_check_claims = zc;
+            self.state.mv_pcs_substate.sum_check_claims = sc;
+            self.state.mv_pcs_substate.no_zero_check_claims = nzc;
+            self.run_bucket_pipeline_verify(bucket.target_nv, bucket_index)?;
+        }
+
+        // Prover's per-bucket `equalize_mat_poly_nv_to` extends every
+        // eval-claim point to the bucket's `target_nv`; after the last
+        // bucket that means every recorded point is padded up to
+        // `global_max_for_recording`. Mirror that here so PCS
+        // `batch_verify_inner` sees uniform-length points when computing
+        // `eq_eval(a2, point_i)`. When the plan has one bucket at the
+        // global max this is a no-op.
+        let extended: crate::verifier::structs::VerifierEvalClaimMap<B::F, B::MvPCS> =
+            std::mem::take(&mut self.state.mv_pcs_substate.eval_claims)
+                .into_iter()
+                .map(|((id, mut point), eval)| {
+                    if point.len() < global_max_for_recording {
+                        point.resize(global_max_for_recording, B::F::zero());
+                    }
+                    ((id, point), eval)
+                })
+                .collect();
+        self.state.mv_pcs_substate.eval_claims = extended;
+        let _ = max_nv;
+
         // Verify all evaluation claims once, after every bucket.
         self.perform_eval_check()?;
         Ok(())

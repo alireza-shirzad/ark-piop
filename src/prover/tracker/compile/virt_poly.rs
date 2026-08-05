@@ -177,34 +177,27 @@ where
         (other_terms, optimized_terms)
     }
 
-    /// Iterates through the materialized polynomials and increases the number
-    /// of variables to the max number of variables in the tracker
-    /// Used as a preprocessing step before batching polynomials,
-    // TODO: This can be potentially reduced
-    #[instrument(level = "debug", skip(self))]
-    pub(super) fn equalize_mat_poly_nv(&mut self) -> usize {
-        let max_nv = self.state.num_vars.values().max().copied().unwrap_or(0);
-        self.equalize_mat_poly_nv_to(max_nv);
-        max_nv
-    }
-
-    /// Lift-only variant of [`equalize_mat_poly_nv`]. Every materialized
-    /// polynomial whose current `num_vars < target_nv` gets a virtual
-    /// override to `target_nv`; polynomials already at or above `target_nv`
-    /// are left untouched. Sumcheck claims are re-scaled by
-    /// `2^(target_nv - poly_nv)` for the same reason as the global helper
-    /// (padding a poly by repetition multiplies its hypercube sum by the
-    /// repeat factor), and eval-claim points are only *extended* — never
-    /// truncated. This is what the bucketed compile calls per bucket so
-    /// polys that don't participate in a bucket keep their native size.
+    /// Lift every materialized polynomial with `num_vars < target_nv` to
+    /// `target_nv` via a virtual override; polynomials already at or above
+    /// `target_nv` are left untouched. Sumcheck claims scaled by
+    /// `2^(target_nv - poly_nv)` (padding a poly by repetition multiplies
+    /// its hypercube sum by the repeat factor), and eval-claim points are
+    /// only *extended* — never truncated. Called once per bucket during
+    /// sumcheck compile so polys that don't participate in a bucket keep
+    /// their native size.
     #[instrument(level = "debug", skip(self))]
     pub(super) fn equalize_mat_poly_nv_to(&mut self, target_nv: usize) {
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv < target_nv {
+                // Zero-cost path: just update the virtual nv on the existing
+                // storage. For Field-backed polys this is unchanged behaviour
+                // (nv semantics do the cyclic repetition on access); for
+                // compressed-backed polys this critically avoids materializing
+                // to a full-size Vec<F>, keeping the tracker's memory
+                // footprint at inner-size for the whole compile pipeline.
                 let inner_poly = Arc::get_mut(poly).unwrap();
-                let inner = inner_poly.mat_mle().clone();
-                *poly = Arc::new(MLE::new(inner, Some(target_nv)));
+                inner_poly.set_virtual_nv(target_nv);
             }
         }
 

@@ -29,26 +29,31 @@ where
     where
         B: SnarkBackend,
     {
-        // `compile_sc_subproof` now dispatches on
-        // `config.sumcheck_bucketing`:
-        //   * `Single`  — lifts all mat polys to the global max nv and
-        //     produces one aggregated sumcheck (historical behaviour).
-        //   * `ByClaimNumVars` — partitions the pending claims by
-        //     `state.num_vars[claim]` and runs one sumcheck per distinct
-        //     size, lifting mat polys per bucket rather than globally.
+        // `compile_sc_subproof` partitions pending claims into buckets by
+        // running the cost-model picker in `tracker_core::bucketing`
+        // against `state.num_vars`, then emits one aggregated sumcheck per
+        // bucket. One-nv queries collapse to a single bucket that mirrors
+        // the historical (pre-bucketing) transcript byte-for-byte.
+        //
+        // Snapshots at each phase boundary let the dashboard correlate
+        // spikes in the RSS-over-time curve with which polys are alive.
+        self.emit_tracker_snapshot("compile_start");
         let compile_sc_subproof_started = Instant::now();
         let sc_subproof = self.compile_sc_subproof()?;
         let compile_sc_subproof_time_s = compile_sc_subproof_started.elapsed().as_secs_f64();
+        self.emit_tracker_snapshot("after_compile_sc_subproof");
 
         let compile_mv_pcs_subproof_started = Instant::now();
         let mv_pcs_subproof = self.compile_mv_pcs_subproof()?;
         let compile_mv_pcs_subproof_time_s =
             compile_mv_pcs_subproof_started.elapsed().as_secs_f64();
+        self.emit_tracker_snapshot("after_compile_mv_pcs_subproof");
 
         let compile_uv_pcs_subproof_started = Instant::now();
         let uv_pcs_subproof = self.compile_uv_pcs_subproof()?;
         let compile_uv_pcs_subproof_time_s =
             compile_uv_pcs_subproof_started.elapsed().as_secs_f64();
+        self.emit_tracker_snapshot("after_compile_uv_pcs_subproof");
 
         info!(
             target: "bench_stats",

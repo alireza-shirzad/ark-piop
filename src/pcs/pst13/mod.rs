@@ -96,6 +96,9 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
+        // Materializes on demand for compressed-storage polys; borrows for
+        // Field storage. Held in a local so the Cow (and any owned dense
+        // form) survives the commit call.
         let committed_poly = poly.mat_mle();
         let committed_nv = committed_poly.num_vars;
 
@@ -105,7 +108,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 prover_param.num_vars,
             )));
         }
-        Self::commit_dense_mle(prover_param, committed_poly)
+        Self::commit_dense_mle(prover_param, committed_poly.as_ref())
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
@@ -554,7 +557,7 @@ mod tests {
         let (ck, _) = PST13::trim(&params, None, Some(6))?;
 
         let inner = MLE::rand(3, &mut rng);
-        let wrapped = Arc::new(MLE::new(inner.mat_mle().clone(), Some(6)));
+        let wrapped = Arc::new(MLE::new(inner.mat_mle().into_owned(), Some(6)));
         let inner = Arc::new(inner);
 
         let wrapped_commit = PST13::commit(&ck, &wrapped)?;

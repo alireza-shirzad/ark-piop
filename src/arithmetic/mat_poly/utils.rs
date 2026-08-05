@@ -19,9 +19,14 @@ pub(crate) fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
 }
 
 pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
-    assert_eq!(poly.mat_mle().num_vars, eq.num_vars());
-    ark_std::cfg_iter!(eq.mat_mle().evaluations)
-        .zip(&poly.mat_mle().evaluations)
+    // Bind Cow returns to locals so their (potentially owned) storage lives
+    // long enough for the zipped iteration below. For Field-backed MLEs this
+    // is a zero-cost borrow; compressed-backed MLEs materialize once here.
+    let eq_field = eq.mat_mle();
+    let poly_field = poly.mat_mle();
+    assert_eq!(poly_field.num_vars, eq.num_vars());
+    ark_std::cfg_iter!(eq_field.evaluations)
+        .zip(&poly_field.evaluations)
         .filter_map(|(e, p)| (!p.is_zero()).then(|| if p.is_one() { *e } else { *e * p }))
         .sum::<F>()
 }

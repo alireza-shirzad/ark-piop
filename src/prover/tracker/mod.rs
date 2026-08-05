@@ -105,6 +105,88 @@ struct ScCompileTimingBreakdown {
     second_zerocheck_to_sumcheck_time_s: f64,
     sumcheck_time_s: f64,
 }
+
+impl ScCompileTimingBreakdown {
+    fn add_assign(&mut self, other: &Self) {
+        self.nozerocheck_batching_time_s += other.nozerocheck_batching_time_s;
+        self.first_batch_zerocheck_time_s += other.first_batch_zerocheck_time_s;
+        self.first_zerocheck_to_sumcheck_time_s += other.first_zerocheck_to_sumcheck_time_s;
+        self.first_batch_sumcheck_time_s += other.first_batch_sumcheck_time_s;
+        self.reduce_sumcheck_time_s += other.reduce_sumcheck_time_s;
+        self.second_batch_zerocheck_time_s += other.second_batch_zerocheck_time_s;
+        self.second_zerocheck_to_sumcheck_time_s += other.second_zerocheck_to_sumcheck_time_s;
+        self.sumcheck_time_s += other.sumcheck_time_s;
+    }
+
+    fn total_time_s(&self) -> f64 {
+        self.nozerocheck_batching_time_s
+            + self.first_batch_zerocheck_time_s
+            + self.first_zerocheck_to_sumcheck_time_s
+            + self.first_batch_sumcheck_time_s
+            + self.reduce_sumcheck_time_s
+            + self.second_batch_zerocheck_time_s
+            + self.second_zerocheck_to_sumcheck_time_s
+            + self.sumcheck_time_s
+    }
+}
+
+impl ClaimStageStats {
+    /// Merge `other` into `self` by summing counts and concatenating degree
+    /// distributions. Used to build aggregate claim stats across buckets so
+    /// the dashboard's Claims tab (single-stage view) shows totals rather
+    /// than only the last bucket's snapshot.
+    fn merge(&mut self, other: &ClaimStageStats) {
+        self.non_zero_checks_count += other.non_zero_checks_count;
+        self.non_zero_checks_degree_distribution
+            .extend_from_slice(&other.non_zero_checks_degree_distribution);
+        self.zero_checks_count += other.zero_checks_count;
+        self.zero_checks_degree_distribution
+            .extend_from_slice(&other.zero_checks_degree_distribution);
+        self.sum_checks_count += other.sum_checks_count;
+        self.sum_checks_degree_distribution
+            .extend_from_slice(&other.sum_checks_degree_distribution);
+    }
+}
+
+/// Per-bucket stats collected inside [`ProverTracker::run_bucket_pipeline`]
+/// and returned so the caller can emit both per-bucket events and their
+/// aggregate. Emission was pulled out of the bucket pipeline so multi-bucket
+/// compiles no longer silently overwrite each other in the bench-stats
+/// subscriber's flat field map.
+///
+/// `wall_start_ms` / `wall_end_ms` are wall-clock timestamps (millis since
+/// UNIX epoch) captured at bucket entry/exit so the dashboard's memory
+/// tab can overlay bucket boundaries on the RSS-over-time curve emitted
+/// by the bench-stats subscriber. Wall-clock is the only reference frame
+/// shared with the sampler thread (which lives one crate over in
+/// `tt-exec`) without threading an extra clock through the API.
+#[derive(Clone, Debug, Default)]
+struct BucketRunStats {
+    bucket_index: usize,
+    target_nv: usize,
+    included_nvs: Vec<usize>,
+    n_zerocheck_claims: usize,
+    n_sumcheck_claims: usize,
+    n_nozerocheck_claims: usize,
+    before_initial: ClaimStageStats,
+    before_after_nozero_batching: ClaimStageStats,
+    before_after_zero_batching: ClaimStageStats,
+    before_after_sum_batching: ClaimStageStats,
+    after_initial: ClaimStageStats,
+    after_after_zero_batching: ClaimStageStats,
+    after_after_sum_batching: ClaimStageStats,
+    timing_breakdown: ScCompileTimingBreakdown,
+    wall_start_ms: u64,
+    wall_end_ms: u64,
+}
+
+fn wall_clock_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
 /// The Tracker is a data structure for creating and managing virtual
 /// polynomials and their comitments. It is in charge of
 ///  1) Recording the structure of virtual polynomials and
@@ -227,6 +309,82 @@ where
         );
     }
 
+    /// Emit a snapshot of the tracker's `materialized_polys` state:
+    /// how many are alive, their total on-heap byte size (assuming 32-byte
+    /// field elements), and the top-K by size. Streamed on the
+    /// `bench_stats` target and picked up by the tt-exec subscriber as a
+    /// `kind: "tracker_snapshot"` line so it survives an OOM kill — this
+    /// is the missing data for "which polys were live when RSS spiked."
+    ///
+    /// `phase` is a free-form label ("compile_start", "bucket_0_end",
+    /// "before_mv_pcs", ...) so the dashboard can correlate snapshots
+    /// against the RSS-over-time curve.
+    fn emit_tracker_snapshot(&self, phase: &str) {
+        // Physical heap bytes of each poly's storage backing. The `storage`
+        // enum captures small-scalar variants (`Bit` = 1/8 byte per point,
+        // `U8` = 1 byte, `U32` = 4, `U64` = 8) alongside the traditional
+        // `Field` (32-byte) variant, so this now reflects true memory use
+        // rather than a virtual field-element upper bound.
+        let materialized = &self.state.mv_pcs_substate.materialized_polys;
+        let mut entries: Vec<(TrackerID, u64, usize, &'static str)> = materialized
+            .iter()
+            .map(|(id, mle)| {
+                let bytes = mle.storage().heap_bytes();
+                let nv = mle.num_vars();
+                let kind = match mle.storage() {
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Field(_) => "field",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Bit { .. } => "bit",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::U8 { .. } => "u8",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::U32 { .. } => "u32",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::U64 { .. } => "u64",
+                };
+                (*id, bytes, nv, kind)
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        let total_bytes: u64 = entries.iter().map(|(_, sz, _, _)| *sz).sum();
+        let top_polys: Vec<_> = entries
+            .iter()
+            .take(10)
+            .map(|(id, sz, nv, kind)| {
+                serde_json::json!({
+                    "id": id.to_int(),
+                    "num_vars": nv,
+                    "bytes": sz,
+                    "kind": kind,
+                })
+            })
+            .collect();
+        // Per-storage-kind roll-up so the dashboard can plot compression
+        // effectiveness at a glance.
+        let mut by_kind: std::collections::BTreeMap<&'static str, (usize, u64)> =
+            std::collections::BTreeMap::new();
+        for (_, sz, _, kind) in &entries {
+            let entry = by_kind.entry(*kind).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += *sz;
+        }
+        let kind_rollup: Vec<_> = by_kind
+            .into_iter()
+            .map(|(k, (count, bytes))| {
+                serde_json::json!({ "kind": k, "count": count, "bytes": bytes })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "phase": phase,
+            "wall_ms": wall_clock_ms(),
+            "materialized_polys_count": materialized.len(),
+            "materialized_polys_total_bytes": total_bytes,
+            "top_polys": top_polys,
+            "by_kind": kind_rollup,
+        });
+        info!(
+            target: "bench_stats",
+            tracker_snapshot_json = %payload.to_string(),
+            "tracker_snapshot"
+        );
+    }
+
     fn emit_sc_compile_timing_breakdown(&self, breakdown: ScCompileTimingBreakdown) {
         info!(
             target: "bench_stats",
@@ -240,6 +398,119 @@ where
             snark_prover_piop_sumcheck_time_s = breakdown.sumcheck_time_s,
             "snark_prover_piop_breakdown"
         );
+    }
+
+    /// Emit the traditional `sc_claim_counts` and `snark_prover_piop_breakdown`
+    /// events, aggregated across every bucket. Aggregation rules:
+    ///   * `ClaimStageStats` — sum counts and concat degree distributions
+    ///     across buckets. Preserves the shape the existing dashboard's
+    ///     Claims tab renders while making multi-bucket totals meaningful.
+    ///   * `ScCompileTimingBreakdown` — sum each field across buckets so
+    ///     the existing piop-breakdown pie shows total work.
+    fn emit_aggregate_bucket_stats(&self, buckets: &[BucketRunStats]) {
+        if buckets.is_empty() {
+            return;
+        }
+        let mut before_initial = ClaimStageStats::default();
+        let mut before_after_nozero_batching = ClaimStageStats::default();
+        let mut before_after_zero_batching = ClaimStageStats::default();
+        let mut before_after_sum_batching = ClaimStageStats::default();
+        let mut after_initial = ClaimStageStats::default();
+        let mut after_after_zero_batching = ClaimStageStats::default();
+        let mut after_after_sum_batching = ClaimStageStats::default();
+        let mut agg_timing = ScCompileTimingBreakdown::default();
+        for b in buckets {
+            before_initial.merge(&b.before_initial);
+            before_after_nozero_batching.merge(&b.before_after_nozero_batching);
+            before_after_zero_batching.merge(&b.before_after_zero_batching);
+            before_after_sum_batching.merge(&b.before_after_sum_batching);
+            after_initial.merge(&b.after_initial);
+            after_after_zero_batching.merge(&b.after_after_zero_batching);
+            after_after_sum_batching.merge(&b.after_after_sum_batching);
+            agg_timing.add_assign(&b.timing_breakdown);
+        }
+        self.emit_claim_pipeline_stats(
+            &before_initial,
+            &before_after_nozero_batching,
+            &before_after_zero_batching,
+            &before_after_sum_batching,
+            &after_initial,
+            &after_after_zero_batching,
+            &after_after_sum_batching,
+        );
+        self.emit_sc_compile_timing_breakdown(agg_timing);
+    }
+
+    /// Emit one `bench_stats` event carrying every bucket's stats as a
+    /// single JSON blob. tracing's field names must be static, so we can't
+    /// stream one field per (bucket, metric); the JSON string is what the
+    /// subscriber unpacks into a `buckets` array in the JSON record.
+    fn emit_per_bucket_stats(&self, buckets: &[BucketRunStats]) {
+        let payload = serde_json::json!({
+            "count": buckets.len(),
+            "buckets": buckets.iter().map(|b| {
+                let total = b.timing_breakdown.total_time_s();
+                serde_json::json!({
+                    "index": b.bucket_index,
+                    "target_nv": b.target_nv,
+                    "included_nvs": b.included_nvs,
+                    "n_zerocheck_claims": b.n_zerocheck_claims,
+                    "n_sumcheck_claims": b.n_sumcheck_claims,
+                    "n_nozerocheck_claims": b.n_nozerocheck_claims,
+                    "n_claims_total": b.n_zerocheck_claims + b.n_sumcheck_claims + b.n_nozerocheck_claims,
+                    "wall_start_ms": b.wall_start_ms,
+                    "wall_end_ms": b.wall_end_ms,
+                    "timing": {
+                        "nozerocheck_batching_time_s": b.timing_breakdown.nozerocheck_batching_time_s,
+                        "first_batch_zerocheck_time_s": b.timing_breakdown.first_batch_zerocheck_time_s,
+                        "first_zerocheck_to_sumcheck_time_s": b.timing_breakdown.first_zerocheck_to_sumcheck_time_s,
+                        "first_batch_sumcheck_time_s": b.timing_breakdown.first_batch_sumcheck_time_s,
+                        "reduce_sumcheck_time_s": b.timing_breakdown.reduce_sumcheck_time_s,
+                        "second_batch_zerocheck_time_s": b.timing_breakdown.second_batch_zerocheck_time_s,
+                        "second_zerocheck_to_sumcheck_time_s": b.timing_breakdown.second_zerocheck_to_sumcheck_time_s,
+                        "sumcheck_time_s": b.timing_breakdown.sumcheck_time_s,
+                        "total_time_s": total,
+                    },
+                    "claims": {
+                        "before_degree_reduction": {
+                            "initial": Self::claim_stage_json(&b.before_initial),
+                            "after_nozero_batching": Self::claim_stage_json(&b.before_after_nozero_batching),
+                            "after_zero_batching": Self::claim_stage_json(&b.before_after_zero_batching),
+                            "after_sum_batching": Self::claim_stage_json(&b.before_after_sum_batching),
+                        },
+                        "after_degree_reduction": {
+                            "initial": Self::claim_stage_json(&b.after_initial),
+                            "after_zero_batching": Self::claim_stage_json(&b.after_after_zero_batching),
+                            "after_sum_batching": Self::claim_stage_json(&b.after_after_sum_batching),
+                        },
+                    },
+                })
+            }).collect::<Vec<_>>(),
+        });
+        let json_str = serde_json::to_string(&payload)
+            .unwrap_or_else(|_| "{\"count\":0,\"buckets\":[]}".to_string());
+        info!(
+            target: "bench_stats",
+            sc_buckets_json = %json_str,
+            "sc_buckets_summary"
+        );
+    }
+
+    fn claim_stage_json(stage: &ClaimStageStats) -> serde_json::Value {
+        serde_json::json!({
+            "non_zero_checks": {
+                "count": stage.non_zero_checks_count,
+                "degree_distribution": stage.non_zero_checks_degree_distribution,
+            },
+            "zero_checks": {
+                "count": stage.zero_checks_count,
+                "degree_distribution": stage.zero_checks_degree_distribution,
+            },
+            "sum_checks": {
+                "count": stage.sum_checks_count,
+                "degree_distribution": stage.sum_checks_degree_distribution,
+            },
+        })
     }
 
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
