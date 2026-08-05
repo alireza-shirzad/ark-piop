@@ -1,7 +1,7 @@
 use ark_ff::{Field, Zero};
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Valid, Validate};
-use ark_std::{cfg_chunks, cfg_iter, rand::Rng};
+use ark_std::{cfg_chunks, cfg_chunks_mut, cfg_iter, rand::Rng};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{
@@ -470,6 +470,76 @@ impl<F: Field> MLE<F> {
                 storage: MLEStorage::Field(self.storage.to_field().into_owned()),
                 nv: self.nv,
             },
+        }
+    }
+
+    /// Fold one variable at `p`, in place, with zero fresh allocations.
+    /// Halves the underlying `Vec<F>` (parallel fold into `c[0]` of each pair
+    /// followed by a serial compact of even-index fold heads into `[0..len/2]`),
+    /// then decrements `inner_num_vars` and — if the poly is virtually padded —
+    /// the outer `nv` by one.
+    ///
+    /// Requires `Field` storage: compressed variants have no mutable slice of
+    /// field elements to fold and must be lifted first via
+    /// [`MLE::to_field_owned`]. This is the sumcheck round loop's replacement
+    /// for `fix_variables(&[p])`: instead of allocating a fresh half-sized
+    /// `Vec<F>` per round, we reuse the same buffer for every round of a
+    /// single sumcheck, eliminating the round-loop's dominant allocation
+    /// traffic (and the fragmentation that came with it).
+    ///
+    /// # Correctness of the in-place scheme
+    ///
+    /// Pass 1 partitions `evals` into disjoint 2-element chunks; each chunk
+    /// writes only to its own `c[0]`, so parallel execution is race-free.
+    /// After pass 1 the fold heads sit at even indices `0, 2, …, 2·(N/2 − 1)`.
+    /// Pass 2 compacts them: for `i in 1..N/2` we set `evals[i] = evals[2·i]`.
+    /// The read index `2·i` is strictly greater than every previously written
+    /// index (which are `1..i`), so the compaction never reads a value it has
+    /// itself already overwritten.
+    ///
+    /// # Virtual padding
+    ///
+    /// Folding one *outer* variable of a virtually repeated MLE is equivalent
+    /// to folding one *inner* variable plus decrementing `nv` (the outer fold
+    /// projects the repetition to the same repetition of half the length).
+    /// We update both counters and clear `nv` when the outer size no longer
+    /// exceeds inner storage.
+    pub fn fix_one_variable_in_place(&mut self, p: &F) {
+        match &mut self.storage {
+            MLEStorage::Field(m) => {
+                let old_len = m.evaluations.len();
+                if old_len > 1 {
+                    debug_assert!(old_len.is_power_of_two());
+                    let new_len = old_len / 2;
+                    let evals = &mut m.evaluations;
+                    // Pass 1 (parallel over disjoint pairs): fold into c[0].
+                    cfg_chunks_mut!(evals, 2).for_each(|c| {
+                        let lo = c[0];
+                        let hi = c[1];
+                        let diff = hi - lo;
+                        c[0] = if diff.is_zero() { lo } else { lo + diff * p };
+                    });
+                    // Pass 2 (serial memcpy-style): pull fold heads at even
+                    // indices into `[0..new_len]`. Safe because `2·i > i`
+                    // dominates every previously written slot.
+                    for i in 1..new_len {
+                        evals[i] = evals[2 * i];
+                    }
+                    evals.truncate(new_len);
+                    m.num_vars = m.num_vars.saturating_sub(1);
+                }
+            }
+            _ => panic!(
+                "fix_one_variable_in_place requires Field storage; call \
+                 `to_field_owned` first"
+            ),
+        }
+        // Reduce virtual padding to match the outer-fold ratio; drop it when
+        // the outer size no longer exceeds inner storage.
+        if let Some(nv) = self.nv {
+            let new_nv = nv.saturating_sub(1);
+            let inner_nv = self.storage.inner_num_vars();
+            self.nv = (new_nv > inner_nv).then_some(new_nv);
         }
     }
 
@@ -1292,6 +1362,79 @@ mod tests {
         assert_eq!(optimized.evaluations(), materialized.evaluations());
         assert_eq!(optimized.num_vars(), 1);
         assert_eq!(optimized.nv, Some(1));
+    }
+
+    // ── fix_one_variable_in_place ───────────────────────────────────
+
+    #[test]
+    fn fix_one_variable_in_place_matches_fix_variables_single_step() {
+        // Small enough to hit every branch. Verify equivalence for a range of
+        // sizes, both `nv = None` and `nv = Some(_)`.
+        for nv_inner in 1usize..=4 {
+            let n = 1usize << nv_inner;
+            let evals: Vec<Fr> = (0..n).map(|i| fr(i as u64 * 7 + 3)).collect();
+            for &outer_nv in &[None, Some(nv_inner + 1), Some(nv_inner + 2)] {
+                let fresh_source = match outer_nv {
+                    Some(outer) => MLE::new(
+                        DenseMultilinearExtension::from_evaluations_vec(nv_inner, evals.clone()),
+                        Some(outer),
+                    ),
+                    None => MLE::from_evaluations_vec(nv_inner, evals.clone()),
+                };
+                let baseline = fresh_source.fix_variables(&[fr(11)]);
+                let mut fresh = fresh_source;
+                fresh.fix_one_variable_in_place(&fr(11));
+                assert_eq!(fresh.num_vars(), baseline.num_vars(), "nv_inner={nv_inner} outer={outer_nv:?}");
+                assert_eq!(fresh.evaluations(), baseline.evaluations(), "nv_inner={nv_inner} outer={outer_nv:?}");
+                assert_eq!(fresh.nv, baseline.nv, "nv_inner={nv_inner} outer={outer_nv:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fix_one_variable_in_place_matches_after_repeated_folds() {
+        // Fold the same MLE 4 times in a row via in-place; compare to the
+        // batched `fix_variables(&[r1, r2, r3, r4])`. This exercises the
+        // Vec::truncate-then-cfg_chunks_mut path across many rounds — the
+        // exact shape sumcheck's round loop generates.
+        let evals: Vec<Fr> = (0..16u64).map(|i| fr(i * 3 + 1)).collect();
+        let points = vec![fr(2), fr(5), fr(11), fr(17)];
+        let baseline = MLE::from_evaluations_vec(4, evals.clone()).fix_variables(&points);
+
+        let mut folded = MLE::from_evaluations_vec(4, evals);
+        for r in &points {
+            folded.fix_one_variable_in_place(r);
+        }
+        assert_eq!(folded.num_vars(), baseline.num_vars());
+        assert_eq!(folded.evaluations(), baseline.evaluations());
+    }
+
+    #[test]
+    fn fix_one_variable_in_place_matches_when_virtually_padded() {
+        // Virtual padding: inner nv=2 but outer nv=4. Sumcheck should fold the
+        // outer variable, which we implement as inner fold + nv--.
+        let mut wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(2, vec![fr(1), fr(2), fr(3), fr(4)]),
+            Some(4),
+        );
+        let baseline = wrapped.fix_variables(&[fr(9)]);
+        wrapped.fix_one_variable_in_place(&fr(9));
+        assert_eq!(wrapped.num_vars(), baseline.num_vars());
+        assert_eq!(wrapped.evaluations(), baseline.evaluations());
+        assert_eq!(wrapped.nv, baseline.nv);
+    }
+
+    #[test]
+    fn fix_one_variable_in_place_on_single_evaluation_is_a_noop_on_inner() {
+        // inner_num_vars == 0 (single element): only nv should be decremented,
+        // the evaluation itself is unchanged (a constant absorbs any r).
+        let mut wrapped = MLE::new(
+            DenseMultilinearExtension::from_evaluations_vec(0, vec![fr(42)]),
+            Some(3),
+        );
+        wrapped.fix_one_variable_in_place(&fr(999));
+        assert_eq!(wrapped.evaluations(), vec![fr(42); 4]);
+        assert_eq!(wrapped.nv, Some(2));
     }
 
     // ── Small-scalar storage ────────────────────────────────────────

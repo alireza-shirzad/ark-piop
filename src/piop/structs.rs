@@ -3,7 +3,7 @@
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
+use crate::arithmetic::{mat_poly::mle::MLE, virt_poly::hp_interface::HPVirtualPolynomial};
 /// An IOP proof is a collections of
 /// - messages from prover to verifier at each round through the interactive
 ///   protocol.
@@ -32,6 +32,20 @@ pub struct SumcheckProverState<F: PrimeField> {
     /// points with precomputed barycentric weights for extrapolating smaller
     /// degree uni-polys to `max_degree + 1` evaluations.
     pub(crate) extrapolation_aux: Vec<(Vec<F>, Vec<F>)>,
+    /// Owned working set of Field-storage MLEs. Populated on the first call
+    /// to `prove_round_and_update_state` by lifting the Arc-shared MLEs out
+    /// of `poly.flattened_ml_extensions` into owned `Vec<F>` buffers (via
+    /// `Arc::try_unwrap` when refcount == 1, else `to_field_owned`). Every
+    /// subsequent round folds these buffers in place via
+    /// [`MLE::fix_one_variable_in_place`]. This is what keeps sumcheck's
+    /// round-loop allocation traffic to a single lift plus in-place
+    /// truncations across all rounds — instead of a fresh clone-plus-fix
+    /// pair per round as the previous scheme did.
+    pub(crate) flattened_mles: Vec<MLE<F>>,
+    /// True after the first call to `prove_round_and_update_state` has
+    /// moved evaluations into `flattened_mles` and cleared
+    /// `poly.flattened_ml_extensions`.
+    pub(crate) mles_initialized: bool,
 }
 
 /// Prover State of a PolyIOP

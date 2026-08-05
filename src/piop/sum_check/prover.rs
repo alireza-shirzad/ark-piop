@@ -1,8 +1,5 @@
 use crate::{
-    arithmetic::{
-        mat_poly::{mle::MLE, utils::fix_variables},
-        virt_poly::hp_interface::HPVirtualPolynomial,
-    },
+    arithmetic::virt_poly::hp_interface::HPVirtualPolynomial,
     piop::errors::PolyIOPErrors,
 };
 use ark_ff::{PrimeField, batch_inversion};
@@ -42,6 +39,8 @@ impl<F: PrimeField> SumcheckProverState<F> {
                     (points, weights)
                 })
                 .collect(),
+            flattened_mles: Vec::new(),
+            mles_initialized: false,
         })
     }
 
@@ -70,13 +69,32 @@ impl<F: PrimeField> SumcheckProverState<F> {
         //
         // eval g over r_m, and mutate g to g(r_1, ... r_m,, x_{m+1}... x_n)
         //
-        // `to_field_owned` handles the tracker-side compressed → Field
-        // promotion at this boundary: subsequent code (Index<usize>,
-        // fix_variables) requires Field storage. For polys already in Field
-        // storage it's a plain `Vec<F>` clone.
-        let mut flattened_mles: Vec<MLE<F>> = cfg_iter!(self.poly.flattened_ml_extensions)
-            .map(|x| x.as_ref().to_field_owned())
-            .collect();
+        // Round 1 lifts the Arc-shared MLEs into an owned per-prover working
+        // buffer (using `Arc::try_unwrap` to skip the clone when we're the
+        // sole reference, else falling back to `to_field_owned`). Every
+        // subsequent round folds that buffer in place via
+        // `fix_one_variable_in_place`, which reuses the same `Vec<F>` for
+        // the entire sumcheck — no per-round allocations. The previous scheme
+        // cloned every poly at every round and produced a fresh half-sized
+        // `Vec<F>` per fold, generating O(nv) full-size heap traffic per
+        // sumcheck and the fragmentation that came with it.
+        if !self.mles_initialized {
+            let drained = std::mem::take(&mut self.poly.flattened_ml_extensions);
+            self.flattened_mles = cfg_into_iter!(drained)
+                .map(|arc| match Arc::try_unwrap(arc) {
+                    // Sole owner: promote the owned MLE to Field storage
+                    // without cloning the underlying Vec if it's already
+                    // Field-backed. Compressed variants still allocate the
+                    // inner-len Vec — unavoidable, sumcheck needs Field.
+                    Ok(mle) => match mle.storage() {
+                        crate::arithmetic::mat_poly::mle::MLEStorage::Field(_) => mle,
+                        _ => mle.to_field_owned(),
+                    },
+                    Err(arc) => arc.to_field_owned(),
+                })
+                .collect();
+            self.mles_initialized = true;
+        }
         if let Some(chal) = challenge {
             if self.round == 0 {
                 return Err(PolyIOPErrors::Prover(
@@ -86,13 +104,16 @@ impl<F: PrimeField> SumcheckProverState<F> {
             self.challenges.push(*chal);
 
             let r = self.challenges[self.round - 1];
-            cfg_iter_mut!(flattened_mles).for_each(|mle| *mle = fix_variables(mle, &[r]));
+            cfg_iter_mut!(self.flattened_mles)
+                .for_each(|mle| mle.fix_one_variable_in_place(&r));
         } else if self.round > 0 {
             return Err(PolyIOPErrors::Prover(
                 "verifier message is empty".to_string(),
             ));
         }
         // end_timer!(fix_argument);
+
+        let flattened_mles = &self.flattened_mles;
 
         self.round += 1;
 
@@ -226,8 +247,12 @@ impl<F: PrimeField> SumcheckProverState<F> {
         // products_sum.iter_mut().enumerate().for_each(|(i, acc)| {
         //     *acc += cfg_iter!(sums).map(|v| v[i]).sum::<F>();
         // });
-        // update prover's state to the partial evaluated polynomial
-        self.poly.flattened_ml_extensions = cfg_into_iter!(flattened_mles).map(Arc::new).collect();
+        // No write-back to `self.poly.flattened_ml_extensions`: the round-fold
+        // result lives in `self.flattened_mles` and is consumed by the next
+        // round via `fix_one_variable_in_place`. Nothing outside the prover
+        // state ever reads `self.poly.flattened_ml_extensions` after the
+        // sumcheck loop, so skipping the re-wrap into `Vec<Arc<MLE<F>>>` also
+        // drops per-round Arc allocation traffic.
 
         Ok(SumcheckProverMessage {
             evaluations: products_sum,
