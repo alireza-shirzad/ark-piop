@@ -183,6 +183,22 @@ where
             out
         }
 
+        /// Evaluate poly `id` to a `Vec<F>` at its NATIVE size (never larger
+        /// than `1 << target_nv`). "Native" means:
+        /// - Leaf materialized poly: min(inner_len, target_len). If the
+        ///   poly's inner storage covers fewer variables than the bucket
+        ///   target, its Vec is returned at inner size — downstream consumers
+        ///   apply cyclic broadcast (`v[i % v.len()]`) to reach target
+        ///   positions, matching the semantics of MLE's virtual-nv repetition.
+        /// - Virtual poly: min(max native size of its factors, target_len).
+        ///   `acc` and `term` allocations happen at that native size, not
+        ///   the full target_len.
+        ///
+        /// This is the key memory optimization for large buckets: an eval at
+        /// bucket target_nv=28 used to allocate 8 GiB per intermediate Vec;
+        /// with native-size eval the same intermediate for a poly with
+        /// inner_num_vars=24 uses only 512 MiB (16× reduction). Cache
+        /// entries also shrink proportionally.
         fn eval_vector<B: SnarkBackend>(
             tracker: &ProverTracker<B>,
             id: TrackerID,
@@ -195,30 +211,50 @@ where
 
             let target_len = 1usize << target_nv;
             let res = if let Some(mat) = tracker.mat_mv_poly(id) {
-                let base = mat.evaluations();
-                if base.len() == target_len {
-                    base
-                } else {
-                    let mut expanded = Vec::with_capacity(target_len);
-                    let repeat = target_len / base.len();
-                    for _ in 0..repeat {
-                        expanded.extend_from_slice(&base);
-                    }
-                    expanded
-                }
+                // Native = min(inner_len, target_len). Read directly from
+                // storage via `lift` so we never materialize the virtual-nv
+                // repetition into a Vec.
+                let inner_len = 1usize << mat.storage().inner_num_vars();
+                let native_len = inner_len.min(target_len).max(1);
+                (0..native_len).map(|i| mat.storage().lift(i)).collect()
             } else if let Some(vpoly) = tracker.virt_poly(id) {
-                let mut acc = vec![B::F::zero(); target_len];
-                for (coeff, factors) in vpoly.iter() {
-                    let mut term = vec![*coeff; target_len];
+                // Recursively evaluate all factors first so we can find the
+                // max native length before allocating `acc`. Each factor
+                // eval returns at its own native size (may be smaller than
+                // target_len), and we broadcast smaller factors cyclically
+                // when they multiply into `term`.
+                let mut term_factors: Vec<Vec<Vec<B::F>>> = Vec::with_capacity(vpoly.len());
+                let mut max_len: usize = 1;
+                for (_, factors) in vpoly.iter() {
+                    let mut fv_list: Vec<Vec<B::F>> = Vec::with_capacity(factors.len());
                     for fid in factors.iter().copied() {
                         let fv = eval_vector(tracker, fid, target_nv, cache);
-                        cfg_iter_mut!(term).zip(fv).for_each(|(a, b)| *a *= b);
+                        max_len = max_len.max(fv.len());
+                        fv_list.push(fv);
+                    }
+                    term_factors.push(fv_list);
+                }
+                // Cap at target_len (belt-and-suspenders; factor eval already
+                // caps its own results).
+                let max_len = max_len.min(target_len).max(1);
+                let mut acc = vec![B::F::zero(); max_len];
+                for ((coeff, _), fv_list) in vpoly.iter().zip(term_factors.into_iter()) {
+                    let mut term = vec![*coeff; max_len];
+                    for fv in fv_list {
+                        let fv_len = fv.len();
+                        if fv_len == max_len {
+                            // Same-size multiply; fast path (no modulo).
+                            cfg_iter_mut!(term).zip(fv).for_each(|(a, b)| *a *= b);
+                        } else {
+                            // Cyclic broadcast: term[i] *= fv[i % fv_len].
+                            cfg_iter_mut!(term).enumerate().for_each(|(i, a)| *a *= fv[i % fv_len]);
+                        }
                     }
                     cfg_iter_mut!(acc).zip(term).for_each(|(a, b)| *a += b);
                 }
                 acc
             } else {
-                vec![B::F::zero(); target_len]
+                vec![B::F::zero(); 1]
             };
             cache.insert((id, target_nv), res.clone());
             res
@@ -328,12 +364,26 @@ where
                 // it keeps a smaller bucket's chunks off the larger bucket's
                 // hypercube, which is the point of bucketing.
                 let nv = target_nv;
-                let mut evals = vec![B::F::one(); 1 << nv];
+                let target_len = 1usize << nv;
+                let mut evals = vec![B::F::one(); target_len];
                 for id in chunk.iter().copied() {
                     let v = eval_vector(tracker, id, nv, eval_cache);
-                    cfg_iter_mut!(evals).zip(v).for_each(|(a, b)| *a *= b);
+                    let v_len = v.len();
+                    if v_len == target_len {
+                        // Same-size multiply; fast path.
+                        cfg_iter_mut!(evals).zip(v).for_each(|(a, b)| *a *= b);
+                    } else {
+                        // Cyclic broadcast — the native-size eval repeats
+                        // to cover the target hypercube.
+                        cfg_iter_mut!(evals)
+                            .enumerate()
+                            .for_each(|(i, a)| *a *= v[i % v_len]);
+                    }
                 }
-                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals.clone()));
+                // Move `evals` into the MLE — no clone. At target_nv=28 this
+                // Vec is 8 GiB; cloning it here was one of the largest
+                // transient spikes during bucket-3 chunk commits.
+                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
                 let prover_param = tracker.pk.mv_pcs_param.clone();
                 let com = B::MvPCS::commit(prover_param.as_ref(), &mle)?;
                 let committed_id = tracker.track_mat_mv_p_with_commitment(
@@ -344,7 +394,13 @@ where
                 )?;
                 chunk_cache.insert(chunk.to_vec(), committed_id);
                 *committed_chunks += 1;
-                eval_cache.insert((committed_id, nv), evals);
+                // Do NOT re-cache `evals` in `eval_cache`: the poly is now a
+                // leaf on the tracker, and future `eval_vector` calls for
+                // `committed_id` will read it at its native size directly
+                // (fast path — no `evals` regeneration needed). Keeping the
+                // 8 GiB Vec alive as a cache entry across the rest of the
+                // compile phase would defeat the whole native-size point.
+                let _ = eval_cache;
                 let mut chunk_poly = VirtualPoly::new();
                 chunk_poly.push((B::F::one(), chunk.to_vec()));
                 let chunk_id = tracker.track_virt_poly(chunk_poly);
