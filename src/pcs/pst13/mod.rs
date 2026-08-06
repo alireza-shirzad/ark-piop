@@ -1,5 +1,7 @@
+pub(crate) mod small_scalar_msm;
 pub(crate) mod srs;
 pub mod structs;
+use crate::arithmetic::mat_poly::mle::MLEStorage;
 use crate::arithmetic::mat_poly::utils::build_eq_x_r;
 use crate::arithmetic::mat_poly::utils::eq_eval;
 use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
@@ -91,24 +93,68 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ///
     /// This function takes `2^num_vars` number of scalar multiplications over
     /// G1.
+    ///
+    /// # Storage-aware fast paths
+    ///
+    /// When the MLE's backing is one of the compressed variants (`Bit`, `U8`,
+    /// `U32`, `U64`), we feed the raw small-scalar slice directly to the
+    /// matching [`small_scalar_msm`] entry point instead of materializing the
+    /// evaluations into a `Vec<F>` via `poly.mat_mle()`. That materialization
+    /// was:
+    /// * an 8×–256× temporary heap alloc (compressed width → 32 B/element), and
+    /// * a general-purpose Pippenger MSM over full 254-bit scalars.
+    /// Both go away on this path — the small-scalar MSMs skip windows that
+    /// would only touch high bits and, for `Bit`, drop bucketing entirely and
+    /// just add bases where the bit is set.
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
-        // Materializes on demand for compressed-storage polys; borrows for
-        // Field storage. Held in a local so the Cow (and any owned dense
-        // form) survives the commit call.
-        let committed_poly = poly.mat_mle();
-        let committed_nv = committed_poly.num_vars;
-
+        // `inner_num_vars()` is the nv of the physically-stored hypercube,
+        // regardless of virtual padding (`nv`). The commitment is over the
+        // stored hypercube — never over the padding, which is a cyclic
+        // repetition that we don't want the SRS to consume.
+        let committed_nv = poly.storage().inner_num_vars();
         if prover_param.num_vars < committed_nv {
             return Err(PCSErrors(TooLargePolynomial(
                 committed_nv,
                 prover_param.num_vars,
             )));
         }
-        Self::commit_dense_mle(prover_param, committed_poly.as_ref())
+        let ignored = prover_param.num_vars - committed_nv;
+        let bases = &prover_param.powers_of_g[ignored].evals;
+
+        let com = match poly.storage() {
+            MLEStorage::Field(m) => {
+                E::G1::msm_unchecked(bases, &m.evaluations).into_affine()
+            }
+            MLEStorage::Bit { bits, .. } => {
+                // Unpack the packed-bit backing on the fly (little-endian per
+                // byte, matching `MLEStorage::Bit`'s contract). One boolean
+                // per inner hypercube slot; the tail beyond `inner_len` is
+                // sliced off by `msm_u1`'s length-min.
+                let inner_len = 1usize << committed_nv;
+                let scalars: Vec<bool> = (0..inner_len)
+                    .map(|i| (bits[i >> 3] >> (i & 7)) & 1 == 1)
+                    .collect();
+                small_scalar_msm::msm_u1::<E::G1>(bases, &scalars).into_affine()
+            }
+            MLEStorage::U8 { bytes, .. } => {
+                small_scalar_msm::msm_u8::<E::G1>(bases, bytes).into_affine()
+            }
+            MLEStorage::U32 { words, .. } => {
+                small_scalar_msm::msm_u32::<E::G1>(bases, words).into_affine()
+            }
+            MLEStorage::U64 { words, .. } => {
+                small_scalar_msm::msm_u64::<E::G1>(bases, words).into_affine()
+            }
+        };
+
+        Ok(PST13Commitment {
+            com,
+            nv: committed_nv as u8,
+        })
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
@@ -485,22 +531,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     }
 }
 
-impl<E: Pairing> PST13<E> {
-    fn commit_dense_mle(
-        prover_param: &PST13ProverParam<E>,
-        poly: &ark_poly::DenseMultilinearExtension<E::ScalarField>,
-    ) -> SnarkResult<PST13Commitment<E>> {
-        let ignored = prover_param.num_vars - poly.num_vars;
-        let commitment =
-            E::G1::msm_unchecked(&prover_param.powers_of_g[ignored].evals, &poly.evaluations)
-                .into_affine();
-
-        Ok(PST13Commitment {
-            com: commitment,
-            nv: poly.num_vars as u8,
-        })
-    }
-}
+// (`commit_dense_mle` was folded into `commit_impl_inner`, which now
+//  dispatches on `MLEStorage` and uses the small-scalar MSMs when possible.)
 
 #[cfg(test)]
 mod tests {
