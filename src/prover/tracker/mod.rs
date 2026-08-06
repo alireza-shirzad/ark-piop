@@ -337,6 +337,8 @@ where
                     crate::arithmetic::mat_poly::mle::MLEStorage::U8 { .. } => "u8",
                     crate::arithmetic::mat_poly::mle::MLEStorage::U32 { .. } => "u32",
                     crate::arithmetic::mat_poly::mle::MLEStorage::U64 { .. } => "u64",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Constant { .. } => "const",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Rle { .. } => "rle",
                 };
                 (*id, bytes, nv, kind)
             })

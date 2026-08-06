@@ -149,6 +149,50 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             MLEStorage::U64 { words, .. } => {
                 small_scalar_msm::msm_u64::<E::G1>(bases, words).into_affine()
             }
+            MLEStorage::Constant { value, .. } => {
+                // `value * Σ bases[..2^committed_nv]`. We compute the sum on
+                // the fly — Ω(N) point additions, same total cost as the
+                // prior full-materialization commit but with **zero heap
+                // allocated** for a Vec<F> of size N. When `value == 0` we
+                // short-circuit to the identity; when `value == 1` we skip
+                // the final scalar mul.
+                if value.is_zero() {
+                    E::G1::zero().into_affine()
+                } else {
+                    let inner_len = 1usize << committed_nv;
+                    let mut sum: E::G1 = E::G1::zero();
+                    for base in bases.iter().take(inner_len) {
+                        sum += base;
+                    }
+                    if value.is_one() {
+                        sum.into_affine()
+                    } else {
+                        sum.mul(*value).into_affine()
+                    }
+                }
+            }
+            MLEStorage::Rle { runs, .. } => {
+                // For each run `(v, count)` contribute `v * Σ bases[cursor..cursor+count]`.
+                // Zero-value runs contribute nothing and are skipped.
+                let mut acc: E::G1 = E::G1::zero();
+                let mut cursor: usize = 0;
+                for (value, count) in runs.iter() {
+                    let count = *count as usize;
+                    if !value.is_zero() {
+                        let mut run_sum: E::G1 = E::G1::zero();
+                        for base in bases.iter().skip(cursor).take(count) {
+                            run_sum += base;
+                        }
+                        if value.is_one() {
+                            acc += run_sum;
+                        } else {
+                            acc += run_sum.mul(*value);
+                        }
+                    }
+                    cursor += count;
+                }
+                acc.into_affine()
+            }
         };
 
         Ok(PST13Commitment {

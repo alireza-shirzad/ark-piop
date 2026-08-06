@@ -13,6 +13,13 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     // Discriminant byte so the (Field, [0,1,0,1,...]) collision-with-Bit case
     // can't happen even if the byte payloads were identical.
+    // For the compact `Constant` and `Rle` variants we hash a lifted byte
+    // slice built on the fly (Constant → one F payload; Rle → parallel
+    // value/count arrays). Discriminant tags are unique per variant so
+    // cross-variant collisions remain impossible even when the lifted bytes
+    // happen to match (e.g. Constant(0) vs an all-zero Bit).
+    let mut constant_bytes: Vec<u8> = Vec::new();
+    let mut rle_bytes: Vec<u8> = Vec::new();
     let (tag, byte_slice): (u8, &[u8]) = match mle.storage() {
         MLEStorage::Field(inner) => {
             let evals = &inner.evaluations;
@@ -39,6 +46,30 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
                 std::mem::size_of_val(&**words),
             )
         }),
+        MLEStorage::Constant { value, .. } => {
+            let bs = unsafe {
+                std::slice::from_raw_parts(
+                    (value as *const F) as *const u8,
+                    std::mem::size_of::<F>(),
+                )
+            };
+            constant_bytes.extend_from_slice(bs);
+            (5, constant_bytes.as_slice())
+        }
+        MLEStorage::Rle { runs, .. } => {
+            rle_bytes.reserve(runs.len() * (std::mem::size_of::<F>() + 4));
+            for (v, c) in runs {
+                let vs = unsafe {
+                    std::slice::from_raw_parts(
+                        (v as *const F) as *const u8,
+                        std::mem::size_of::<F>(),
+                    )
+                };
+                rle_bytes.extend_from_slice(vs);
+                rle_bytes.extend_from_slice(&c.to_le_bytes());
+            }
+            (6, rle_bytes.as_slice())
+        }
     };
     hasher.update(&[tag]);
     hasher.update_rayon(byte_slice);

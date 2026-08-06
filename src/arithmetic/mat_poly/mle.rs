@@ -57,6 +57,83 @@ pub enum MLEStorage<F: Field> {
         words: Vec<u64>,
         inner_num_vars: usize,
     },
+    /// Every inner slot equals `value`. `1 << inner_num_vars` logical entries
+    /// but only one `F` and one `usize` of storage — the most extreme form of
+    /// per-column compression, catching all-zero / all-one / all-X columns
+    /// (null columns, unfiltered activators, `SELECT 1 …` outputs).
+    ///
+    /// `lift(i)` is O(1) and returns `value` for every `i < inner_len`.
+    Constant {
+        value: F,
+        inner_num_vars: usize,
+    },
+    /// Run-length encoded storage: a sequence of `(value, count)` runs whose
+    /// counts sum to exactly `1 << inner_num_vars`. Catches every kind of
+    /// column with structural redundancy — the classic "127 zeros then 1
+    /// one" activator (2 runs = ~72 B) and every prefix / suffix pattern.
+    /// Constructed only when the run count fits under
+    /// [`Self::RLE_MAX_RUNS`], so mixed-value columns still fall back to
+    /// their dense native form.
+    ///
+    /// Invariants (enforced by [`Self::new_rle`]):
+    /// - `runs` is non-empty
+    /// - `Σ counts == 1 << inner_num_vars`
+    /// - No two adjacent runs share the same `value` (would violate
+    ///   "shortest RLE" and confuse `lift`'s binary search prefix)
+    ///
+    /// `lift(i)` walks a prefix-sum table computed lazily on the caller
+    /// side (or a linear scan for `runs.len() <= 8`); for the ≤ 256-run
+    /// threshold used in [`MLE::detect_compression`] a linear scan wins
+    /// on branch predictability.
+    Rle {
+        runs: Vec<(F, u32)>,
+        inner_num_vars: usize,
+    },
+}
+
+impl<F: Field> MLEStorage<F> {
+    /// Maximum number of runs an `Rle` variant is willing to hold. Above this
+    /// the column is dense enough that the RLE form no longer beats the
+    /// native small-int storage, and detection returns `None` so the caller
+    /// keeps the original form. Chosen so 256 runs × ~36 B ≈ 9 KiB stays
+    /// dwarfed by any full-column storage we'd otherwise carry.
+    pub const RLE_MAX_RUNS: usize = 256;
+
+    /// Construct an `Rle` variant, enforcing the invariants. Merges
+    /// consecutive runs sharing a value; returns `None` if `runs` is empty,
+    /// if the counts don't sum to `1 << inner_num_vars`, or if after
+    /// merging the run count exceeds [`Self::RLE_MAX_RUNS`].
+    pub fn new_rle(runs: Vec<(F, u32)>, inner_num_vars: usize) -> Option<Self> {
+        if runs.is_empty() {
+            return None;
+        }
+        // Merge adjacent same-value runs so the storage matches the
+        // "shortest RLE" invariant.
+        let mut merged: Vec<(F, u32)> = Vec::with_capacity(runs.len());
+        for (v, c) in runs {
+            if c == 0 {
+                continue;
+            }
+            match merged.last_mut() {
+                Some((prev_v, prev_c)) if *prev_v == v => {
+                    *prev_c = prev_c.checked_add(c)?;
+                }
+                _ => merged.push((v, c)),
+            }
+        }
+        if merged.is_empty() || merged.len() > Self::RLE_MAX_RUNS {
+            return None;
+        }
+        let expected: u64 = 1u64 << inner_num_vars;
+        let actual: u64 = merged.iter().map(|(_, c)| *c as u64).sum();
+        if actual != expected {
+            return None;
+        }
+        Some(Self::Rle {
+            runs: merged,
+            inner_num_vars,
+        })
+    }
 }
 
 impl<F: Field> Default for MLEStorage<F> {
@@ -112,6 +189,28 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                 words.serialize_with_mode(&mut writer, compress)?;
                 (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
             }
+            Self::Constant {
+                value,
+                inner_num_vars,
+            } => {
+                5u8.serialize_with_mode(&mut writer, compress)?;
+                value.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
+            Self::Rle {
+                runs,
+                inner_num_vars,
+            } => {
+                6u8.serialize_with_mode(&mut writer, compress)?;
+                // Serialize the runs as two parallel vectors so we can reuse
+                // arkworks' `Vec` impl without wrapping `(F, u32)` in a
+                // struct/derive.
+                let values: Vec<F> = runs.iter().map(|(v, _)| *v).collect();
+                let counts: Vec<u32> = runs.iter().map(|(_, c)| *c).collect();
+                values.serialize_with_mode(&mut writer, compress)?;
+                counts.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
         }
         Ok(())
     }
@@ -141,6 +240,22 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
             } => {
                 words.serialized_size(compress) + (*inner_num_vars as u64).serialized_size(compress)
             }
+            Self::Constant {
+                value,
+                inner_num_vars,
+            } => {
+                value.serialized_size(compress) + (*inner_num_vars as u64).serialized_size(compress)
+            }
+            Self::Rle {
+                runs,
+                inner_num_vars,
+            } => {
+                let values: Vec<F> = runs.iter().map(|(v, _)| *v).collect();
+                let counts: Vec<u32> = runs.iter().map(|(_, c)| *c).collect();
+                values.serialized_size(compress)
+                    + counts.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
         };
         1u8.serialized_size(compress) + payload
     }
@@ -154,6 +269,13 @@ impl<F: Field> Valid for MLEStorage<F> {
             Self::U8 { bytes, .. } => bytes.check(),
             Self::U32 { words, .. } => words.check(),
             Self::U64 { words, .. } => words.check(),
+            Self::Constant { value, .. } => value.check(),
+            Self::Rle { runs, .. } => {
+                for (v, _) in runs {
+                    v.check()?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -201,6 +323,27 @@ impl<F: Field> CanonicalDeserialize for MLEStorage<F> {
                     inner_num_vars: n,
                 })
             }
+            5 => {
+                let value = F::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                Ok(Self::Constant {
+                    value,
+                    inner_num_vars: n,
+                })
+            }
+            6 => {
+                let values = Vec::<F>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let counts = Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if values.len() != counts.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                let runs: Vec<(F, u32)> = values.into_iter().zip(counts).collect();
+                Ok(Self::Rle {
+                    runs,
+                    inner_num_vars: n,
+                })
+            }
             _ => Err(ark_serialize::SerializationError::InvalidData),
         }
     }
@@ -217,7 +360,9 @@ impl<F: Field> MLEStorage<F> {
             Self::Bit { inner_num_vars, .. }
             | Self::U8 { inner_num_vars, .. }
             | Self::U32 { inner_num_vars, .. }
-            | Self::U64 { inner_num_vars, .. } => *inner_num_vars,
+            | Self::U64 { inner_num_vars, .. }
+            | Self::Constant { inner_num_vars, .. }
+            | Self::Rle { inner_num_vars, .. } => *inner_num_vars,
         }
     }
 
@@ -243,6 +388,26 @@ impl<F: Field> MLEStorage<F> {
             Self::U8 { bytes, .. } => F::from(bytes[i] as u64),
             Self::U32 { words, .. } => F::from(words[i] as u64),
             Self::U64 { words, .. } => F::from(words[i]),
+            Self::Constant { value, .. } => *value,
+            Self::Rle { runs, .. } => {
+                // Linear scan is fastest for `runs.len() <= 256` because
+                // branch prediction handles run-boundary crossings well
+                // and there's no allocation for a prefix-sum table.
+                let mut cursor: usize = 0;
+                for (val, count) in runs {
+                    let end = cursor + *count as usize;
+                    if i < end {
+                        return *val;
+                    }
+                    cursor = end;
+                }
+                // Unreachable when invariants hold (`Σ counts == inner_len`).
+                panic!(
+                    "Rle::lift out of range: i={} inner_len={}",
+                    i,
+                    1usize << self.inner_num_vars()
+                );
+            }
         }
     }
 
@@ -255,6 +420,10 @@ impl<F: Field> MLEStorage<F> {
             Self::U8 { bytes, .. } => bytes.len() as u64,
             Self::U32 { words, .. } => (words.len() as u64) * 4,
             Self::U64 { words, .. } => (words.len() as u64) * 8,
+            Self::Constant { .. } => std::mem::size_of::<F>() as u64,
+            Self::Rle { runs, .. } => {
+                (runs.len() as u64) * ((std::mem::size_of::<F>() as u64) + 4)
+            }
         }
     }
 
@@ -262,6 +431,168 @@ impl<F: Field> MLEStorage<F> {
     #[inline]
     pub fn is_field(&self) -> bool {
         matches!(self, Self::Field(_))
+    }
+
+    /// Scan the storage for structural redundancy and, if found, return the
+    /// most compact equivalent variant. Never rewrites `Constant`/`Rle` (they
+    /// are already the compact forms) and never allocates when the input
+    /// isn't compressible past its current shape.
+    ///
+    /// Detection is a single O(inner_len) linear walk that counts value
+    /// transitions:
+    /// - **0 transitions** → [`Self::Constant`] (single value across the whole
+    ///   inner hypercube)
+    /// - **1 …  [`Self::RLE_MAX_RUNS`]−1 transitions** → [`Self::Rle`] with
+    ///   `runs = transitions + 1`
+    /// - **more transitions** → returns `self` unchanged; the column is dense
+    ///   enough that the compact form no longer beats the native small-int
+    ///   storage
+    ///
+    /// Called from the tracker's auto-compression pass and from ingest-time
+    /// detection in `EncodedBacking::into_mle` — see those sites for how
+    /// upstream chooses to trigger it.
+    pub fn detect_redundancy(self) -> Self
+    where
+        F: ark_ff::PrimeField,
+    {
+        // Skip if already in a compact form — no faster representation exists.
+        if matches!(self, Self::Constant { .. } | Self::Rle { .. }) {
+            return self;
+        }
+        let inner_len = self.inner_len();
+        if inner_len == 0 {
+            return self;
+        }
+        // Per-variant native scan. Comparing in the native form (u8/u32/u64
+        // / raw bits) instead of lifting each element through `F::from(...)`
+        // matters a LOT: on BN254, `F::from` is a Montgomery-form conversion
+        // that costs ~100 ns per call — running it inside this loop for
+        // every registered poly turned into ~50% wall-clock regression on
+        // small-table benches. Native comparison is one integer eq per
+        // element, so we run at memory-bandwidth speed and bail after
+        // `RLE_MAX_RUNS` transitions for any dense column.
+        let inner_nv = self.inner_num_vars();
+        // Generic "count runs of Copy+Eq scalars, then materialize the
+        // (value, count) run vector" scan. Returns `Some(runs)` when the
+        // collapsed form is worth building (≤ RLE_MAX_RUNS runs), or `None`
+        // when the caller should keep dense storage.
+        //
+        // Comparing in the native scalar type instead of lifting each
+        // element through `F::from(...)` first matters a LOT: on BN254 the
+        // Montgomery-form conversion is ~100 ns per call, so a lift-based
+        // scan turned into ~50% wall-clock regression on small-table
+        // benches. This native version does one integer eq per element and
+        // pays the field conversion once per RUN (typically ≤ 3).
+        fn scan_runs_native<S, F>(
+            slice: &[S],
+            lift: impl Fn(S) -> F,
+            max_runs: usize,
+        ) -> Option<Vec<(F, u32)>>
+        where
+            S: Copy + Eq,
+        {
+            if slice.is_empty() {
+                return None;
+            }
+            let mut prev = slice[0];
+            let mut run_count: usize = 1;
+            for &v in &slice[1..] {
+                if v != prev {
+                    run_count += 1;
+                    if run_count > max_runs {
+                        return None;
+                    }
+                    prev = v;
+                }
+            }
+            if run_count == 1 {
+                return Some(vec![(lift(slice[0]), slice.len() as u32)]);
+            }
+            let mut runs: Vec<(F, u32)> = Vec::with_capacity(run_count);
+            let mut cursor: usize = 0;
+            let mut cur = slice[0];
+            for (i, &v) in slice.iter().enumerate().skip(1) {
+                if v != cur {
+                    runs.push((lift(cur), (i - cursor) as u32));
+                    cursor = i;
+                    cur = v;
+                }
+            }
+            runs.push((lift(cur), (slice.len() - cursor) as u32));
+            Some(runs)
+        }
+        // Bit needs its own loop: the "elements" are packed 1-bit values, so
+        // we unpack on the fly. Same short-circuit at RLE_MAX_RUNS.
+        fn scan_bits<F: Field>(
+            bits: &[u8],
+            len: usize,
+            max_runs: usize,
+        ) -> Option<Vec<(F, u32)>> {
+            if len == 0 {
+                return None;
+            }
+            let get = |i: usize| -> bool { (bits[i >> 3] >> (i & 7)) & 1 == 1 };
+            let mut prev = get(0);
+            let mut run_count: usize = 1;
+            for i in 1..len {
+                let v = get(i);
+                if v != prev {
+                    run_count += 1;
+                    if run_count > max_runs {
+                        return None;
+                    }
+                    prev = v;
+                }
+            }
+            let bool_to_f = |b: bool| if b { F::one() } else { F::zero() };
+            if run_count == 1 {
+                return Some(vec![(bool_to_f(get(0)), len as u32)]);
+            }
+            let mut runs: Vec<(F, u32)> = Vec::with_capacity(run_count);
+            let mut cursor: usize = 0;
+            let mut cur = get(0);
+            for i in 1..len {
+                let v = get(i);
+                if v != cur {
+                    runs.push((bool_to_f(cur), (i - cursor) as u32));
+                    cursor = i;
+                    cur = v;
+                }
+            }
+            runs.push((bool_to_f(cur), (len - cursor) as u32));
+            Some(runs)
+        }
+        // Per-variant dispatch: each call pays a per-element integer eq
+        // and a per-RUN `F::from`. The Field variant already has F elements,
+        // so its lift is the identity.
+        let max_runs = Self::RLE_MAX_RUNS;
+        let runs = match &self {
+            Self::Field(m) => scan_runs_native(&m.evaluations, |x: F| x, max_runs),
+            Self::Bit { bits, .. } => scan_bits::<F>(bits, inner_len, max_runs),
+            Self::U8 { bytes, .. } => {
+                scan_runs_native(bytes.as_slice(), |x: u8| F::from(x as u64), max_runs)
+            }
+            Self::U32 { words, .. } => {
+                scan_runs_native(words.as_slice(), |x: u32| F::from(x as u64), max_runs)
+            }
+            Self::U64 { words, .. } => {
+                scan_runs_native(words.as_slice(), |x: u64| F::from(x), max_runs)
+            }
+            // Constant/Rle already handled by the early-return above.
+            Self::Constant { .. } | Self::Rle { .. } => return self,
+        };
+        let Some(runs) = runs else {
+            // Too many runs — keep dense storage.
+            return self;
+        };
+        // Single-run → Constant (cheaper storage, O(1) lift).
+        if runs.len() == 1 {
+            return Self::Constant {
+                value: runs.into_iter().next().unwrap().0,
+                inner_num_vars: inner_nv,
+            };
+        }
+        Self::new_rle(runs, inner_nv).unwrap_or(self)
     }
 
     /// Materialize the storage into a `DenseMultilinearExtension<F>`. For
@@ -365,30 +696,48 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Build a bit-packed `MLE` whose first `active_len` bits are set and the
-    /// rest are zero. This matches the semantics of a "contiguous-one
-    /// activator" mask: bits `[0, active_len)` are 1, bits `[active_len, 2^num_vars)`
-    /// are 0. `active_len` must satisfy `active_len <= 1 << num_vars`.
+    /// Build a "contiguous-one activator" MLE: the first `active_len` inner
+    /// slots are `1`, the rest are `0`. `active_len` must satisfy
+    /// `active_len <= 1 << num_vars`.
+    ///
+    /// The shape is exactly known at call time — either a single all-ones or
+    /// all-zeros run (Constant), a "1s then 0s" prefix (2-run Rle), or an
+    /// empty poly — so we build the compact form directly instead of
+    /// allocating and then scanning a full bit vector. On a lineitem
+    /// `l_comment`-shaped char-level activator (`num_vars ≈ 31`, `active_len
+    /// ≈ 1.3B`) this drops per-poly storage from ~256 MiB of packed bits to
+    /// ~72 bytes of `Rle` runs — with no scan and no allocation of the bit
+    /// vector to begin with.
+    ///
+    /// Semantics unchanged: `mle[i]` returns `F::one()` for `i < active_len`
+    /// and `F::zero()` for `active_len <= i < 1 << num_vars`, matching the
+    /// prior `Bit`-backed construction bit-for-bit.
     pub fn from_prefix_activator(active_len: usize, num_vars: usize) -> Self {
         let len = 1usize << num_vars;
         assert!(active_len <= len, "active_len {} > 2^num_vars {}", active_len, len);
-        let mut bits = vec![0u8; len.div_ceil(8).max(1)];
-        // Set full bytes first, then the tail byte.
-        let full_bytes = active_len / 8;
-        for byte in bits.iter_mut().take(full_bytes) {
-            *byte = 0xff;
-        }
-        let tail = active_len % 8;
-        if tail > 0 && full_bytes < bits.len() {
-            bits[full_bytes] = (1u8 << tail) - 1;
-        }
-        Self {
-            storage: MLEStorage::Bit {
-                bits,
+        let storage = if active_len == 0 {
+            MLEStorage::Constant {
+                value: F::zero(),
                 inner_num_vars: num_vars,
-            },
-            nv: None,
-        }
+            }
+        } else if active_len == len {
+            MLEStorage::Constant {
+                value: F::one(),
+                inner_num_vars: num_vars,
+            }
+        } else {
+            // 2-run Rle: `active_len` ones, `len - active_len` zeros. The
+            // `new_rle` constructor validates the counts sum to `len`.
+            MLEStorage::<F>::new_rle(
+                vec![
+                    (F::one(), active_len as u32),
+                    (F::zero(), (len - active_len) as u32),
+                ],
+                num_vars,
+            )
+            .expect("prefix activator runs sum to inner_len by construction")
+        };
+        Self { storage, nv: None }
     }
 
     /// Build a `u8`-typed `MLE`. `bytes.len()` must be `<= 1 << num_vars`; if
@@ -668,6 +1017,23 @@ impl<F: Field> MLE<F> {
         }
     }
 
+    /// Additional structural-redundancy compression on top of [`Self::compressed`].
+    /// Separated so callers can opt in: [`Self::compressed`] stays a cheap
+    /// per-slot classifier that never touches the storage twice, while this
+    /// method does the linear-scan run detector that collapses `Constant` and
+    /// `Rle` patterns. Chain them (`.compressed().detect_redundancy()`) at
+    /// long-lived-storage boundaries where the extra scan pays back in
+    /// storage savings; skip it on hot paths where every registered poly is
+    /// small and would just pay the scan cost without a meaningful win.
+    pub fn detect_redundancy(self) -> Self
+    where
+        F: ark_ff::PrimeField,
+    {
+        let nv = self.nv;
+        let storage = self.storage.detect_redundancy();
+        Self { storage, nv }
+    }
+
     /// Update the virtual `nv` (outer hypercube size) in place, without
     /// touching the storage backing. `target_nv` must be `>= inner_num_vars()`.
     /// If `target_nv == inner_num_vars()`, clears `nv` (the inner hypercube is
@@ -819,7 +1185,15 @@ impl<F: Field> MLE<F> {
         if self.num_vars() == 0 {
             return true;
         }
-        // For any storage variant: fold via lift() to compare all inner points.
+        // Fast paths for the compact variants — they either KNOW they're
+        // constant (Constant variant) or KNOW how many distinct runs they
+        // hold (Rle variant), avoiding an O(N) walk.
+        match &self.storage {
+            MLEStorage::Constant { .. } => return true,
+            MLEStorage::Rle { runs, .. } => return runs.len() == 1,
+            _ => {}
+        }
+        // For any other storage variant: fold via lift() to compare all inner points.
         let inner_len = self.storage.inner_len();
         if inner_len == 0 {
             return true;
@@ -1539,5 +1913,217 @@ mod tests {
         assert_eq!(field_bytes, 131072);
         assert!(bit_bytes * 200 < field_bytes);
         assert!(byte_bytes * 20 < field_bytes);
+    }
+
+    // ── Constant / Rle redundancy compression ──────────────────────────
+
+    #[test]
+    fn constant_variant_lifts_uniformly() {
+        let inner_nv = 8;
+        let s: MLEStorage<Fr> = MLEStorage::Constant {
+            value: fr(42),
+            inner_num_vars: inner_nv,
+        };
+        assert_eq!(s.inner_num_vars(), inner_nv);
+        assert_eq!(s.inner_len(), 1 << inner_nv);
+        for i in 0..s.inner_len() {
+            assert_eq!(s.lift(i), fr(42));
+        }
+        // heap_bytes counts only the F payload (32 for BN254 Fr).
+        assert_eq!(s.heap_bytes(), std::mem::size_of::<Fr>() as u64);
+    }
+
+    #[test]
+    fn rle_variant_lifts_by_run_boundaries() {
+        // 8 slots: [7, 7, 7, 0, 0, 5, 5, 5] → 3 runs
+        let runs = vec![(fr(7), 3u32), (fr(0), 2u32), (fr(5), 3u32)];
+        let s = MLEStorage::<Fr>::new_rle(runs, 3).expect("valid Rle");
+        let expected = vec![
+            fr(7), fr(7), fr(7),
+            fr(0), fr(0),
+            fr(5), fr(5), fr(5),
+        ];
+        for (i, want) in expected.into_iter().enumerate() {
+            assert_eq!(s.lift(i), want, "at index {i}");
+        }
+    }
+
+    #[test]
+    fn rle_constructor_merges_adjacent_same_value_runs() {
+        // Input has three runs that are actually all the same value; must merge.
+        let runs = vec![(fr(1), 3u32), (fr(1), 2u32), (fr(1), 3u32)];
+        let s = MLEStorage::<Fr>::new_rle(runs, 3).expect("valid Rle");
+        match &s {
+            MLEStorage::Rle { runs, .. } => {
+                assert_eq!(runs.len(), 1, "adjacent same-value runs should collapse");
+                assert_eq!(runs[0].1, 8);
+            }
+            _ => panic!("expected Rle variant"),
+        }
+    }
+
+    #[test]
+    fn rle_constructor_rejects_wrong_total() {
+        // Counts sum to 7 but inner_num_vars=3 → expects 8.
+        let runs = vec![(fr(1), 4u32), (fr(0), 3u32)];
+        assert!(MLEStorage::<Fr>::new_rle(runs, 3).is_none());
+    }
+
+    #[test]
+    fn detect_redundancy_finds_constant_from_bit_storage() {
+        // 128 zeros packed as Bit → detected as Constant(0).
+        let storage = MLEStorage::<Fr>::Bit {
+            bits: vec![0u8; 16],
+            inner_num_vars: 7,
+        };
+        let out = storage.detect_redundancy();
+        match &out {
+            MLEStorage::Constant { value, inner_num_vars } => {
+                assert!(value.is_zero());
+                assert_eq!(*inner_num_vars, 7);
+            }
+            _ => panic!("expected Constant"),
+        }
+    }
+
+    #[test]
+    fn detect_redundancy_finds_the_127_zeros_1_one_pattern() {
+        // The user's motivating example: 127 zeros, 1 one → 2-run Rle.
+        let mut bits = vec![0u8; 16];
+        bits[15] = 0b1000_0000; // bit 127
+        let storage = MLEStorage::<Fr>::Bit {
+            bits,
+            inner_num_vars: 7,
+        };
+        let out = storage.detect_redundancy();
+        match &out {
+            MLEStorage::Rle { runs, inner_num_vars } => {
+                assert_eq!(*inner_num_vars, 7);
+                assert_eq!(runs.len(), 2);
+                assert_eq!(runs[0], (Fr::zero(), 127));
+                assert_eq!(runs[1], (Fr::one(), 1));
+            }
+            _ => panic!("expected 2-run Rle"),
+        }
+    }
+
+    #[test]
+    fn detect_redundancy_bails_when_too_many_runs() {
+        // Alternating 0/1 → inner_len runs → way above RLE_MAX_RUNS. Stays as Bit.
+        let inner_nv = 10; // 1024 bits, 1024 alternating runs
+        let mut bits = vec![0u8; 1024 / 8];
+        for i in (1..1024).step_by(2) {
+            bits[i >> 3] |= 1u8 << (i & 7);
+        }
+        let storage = MLEStorage::<Fr>::Bit {
+            bits: bits.clone(),
+            inner_num_vars: inner_nv,
+        };
+        let out = storage.detect_redundancy();
+        assert!(matches!(out, MLEStorage::Bit { .. }), "expected Bit fallback");
+    }
+
+    #[test]
+    fn detect_redundancy_is_noop_on_constant_and_rle() {
+        let c: MLEStorage<Fr> = MLEStorage::Constant { value: fr(3), inner_num_vars: 4 };
+        assert!(matches!(c.clone().detect_redundancy(), MLEStorage::Constant { .. }));
+        let r = MLEStorage::<Fr>::new_rle(vec![(fr(1), 4), (fr(0), 12)], 4).unwrap();
+        assert!(matches!(r.clone().detect_redundancy(), MLEStorage::Rle { .. }));
+    }
+
+    #[test]
+    fn compressed_then_detect_redundancy_collapses_all_zeros() {
+        // `.compressed()` alone lands us at Bit (native-int classifier);
+        // `.detect_redundancy()` then collapses to Constant. The two are
+        // separate so hot registration paths can pay for just the classifier.
+        let field_zeros = MLE::<Fr>::from_evaluations_vec(4, vec![Fr::zero(); 16]);
+        let out = field_zeros.compressed().detect_redundancy();
+        assert!(matches!(out.storage(), MLEStorage::Constant { value, .. } if value.is_zero()));
+    }
+
+    #[test]
+    fn mle_is_constant_short_circuits_on_constant_variant() {
+        let mle = MLE::<Fr> {
+            storage: MLEStorage::Constant { value: fr(99), inner_num_vars: 20 },
+            nv: None,
+        };
+        // Should be O(1) — we don't verify timing but we do verify correctness
+        // on a large `inner_num_vars` that would otherwise be an expensive scan.
+        assert!(mle.is_constant());
+    }
+
+    #[test]
+    fn constant_and_rle_serialize_roundtrip() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+
+        for storage in [
+            MLEStorage::<Fr>::Constant { value: fr(7), inner_num_vars: 5 },
+            MLEStorage::<Fr>::new_rle(vec![(fr(1), 4), (fr(0), 12)], 4).unwrap(),
+        ] {
+            let mut buf: Vec<u8> = Vec::new();
+            storage.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+            let round: MLEStorage<Fr> =
+                MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+            assert!(round == storage, "roundtrip mismatch");
+        }
+    }
+
+    // ── from_prefix_activator emits compact forms directly ─────────────
+
+    #[test]
+    fn from_prefix_activator_zero_active_len_is_constant_zero() {
+        let mle = MLE::<Fr>::from_prefix_activator(0, 6);
+        match mle.storage() {
+            MLEStorage::Constant { value, inner_num_vars } => {
+                assert!(value.is_zero());
+                assert_eq!(*inner_num_vars, 6);
+            }
+            _ => panic!("expected Constant(0)"),
+        }
+    }
+
+    #[test]
+    fn from_prefix_activator_full_active_len_is_constant_one() {
+        let n = 5;
+        let mle = MLE::<Fr>::from_prefix_activator(1 << n, n);
+        match mle.storage() {
+            MLEStorage::Constant { value, inner_num_vars } => {
+                assert!(value.is_one());
+                assert_eq!(*inner_num_vars, n);
+            }
+            _ => panic!("expected Constant(1)"),
+        }
+    }
+
+    #[test]
+    fn from_prefix_activator_partial_active_len_is_two_run_rle() {
+        // 5 active out of 8 → Rle [(1, 5), (0, 3)].
+        let mle = MLE::<Fr>::from_prefix_activator(5, 3);
+        match mle.storage() {
+            MLEStorage::Rle { runs, inner_num_vars } => {
+                assert_eq!(*inner_num_vars, 3);
+                assert_eq!(runs.len(), 2);
+                assert_eq!(runs[0], (Fr::one(), 5));
+                assert_eq!(runs[1], (Fr::zero(), 3));
+            }
+            _ => panic!("expected 2-run Rle"),
+        }
+        // Also verify the lifted evaluations match the semantic contract.
+        let expected: Vec<Fr> = (0..8).map(|i| if i < 5 { Fr::one() } else { Fr::zero() }).collect();
+        assert_eq!(mle.evaluations(), expected);
+    }
+
+    #[test]
+    fn from_prefix_activator_heap_bytes_dwarfs_prior_bit_backing() {
+        // A large-nv prefix activator: the compact form is ~72 bytes vs the
+        // prior packed-bit backing which would have been 2^(nv-3) bytes.
+        let nv = 24;
+        let active_len = 1_000_000;
+        let mle = MLE::<Fr>::from_prefix_activator(active_len, nv);
+        let bytes = mle.storage().heap_bytes();
+        // Rle with 2 runs: 2 × (size_of::<Fr> + 4) = 2 × 36 = 72 bytes on BN254.
+        assert!(bytes < 200, "prefix activator storage should be tiny, got {bytes} bytes");
+        // A packed-bit alternative would be (1 << 24) / 8 = 2 MiB.
+        assert!(bytes * 20_000 < (1u64 << nv) / 8);
     }
 }
