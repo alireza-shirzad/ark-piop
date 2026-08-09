@@ -164,7 +164,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn equalize_sumcheck_claims(&mut self, target_nv: usize) -> SnarkResult<()> {
+    fn equalize_sumcheck_claims(
+        &mut self,
+        target_nv: usize,
+        global_max_for_recording: usize,
+    ) -> SnarkResult<()> {
         let poly_log_sizes: IndexMap<TrackerID, usize> = self.state.poly_log_sizes.clone();
         let proof_claims = self
             .proof
@@ -181,7 +185,20 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // the sumcheck). Divide by `2^(global_max - target_nv)` — that is
         // a no-op in a single-bucket plan (`target_nv == global_max`) and
         // matches the prover pre-scale in every multi-bucket plan.
-        let global_max_for_recording = self.equalize_mat_com_nv();
+        //
+        // `global_max_for_recording` is threaded in from the dispatcher
+        // (snapshotted BEFORE the bucket loop starts, mirroring the
+        // prover's `global_max_for_recording` snapshot at the top of
+        // `compile_sc_subproof`). A previous version re-read it LIVE
+        // here — `let global_max_for_recording = self.equalize_mat_com_nv();`
+        // — which grew across buckets as `batch_nozero_check_claims` /
+        // `reduce_sumcheck_dgree` added chunk commits. In multi-bucket
+        // plans (which the cost model produces at nv≥16 for equality
+        // filters on `orders` / `lineitem`) this made bucket 1's divisor
+        // strictly larger than the prover's frozen multiplier, so recorded
+        // claims came out underscaled and every affected sumcheck round-0
+        // check tripped `p(0)+p(1) != asserted_sum`. Freezing at the
+        // dispatcher level restores exact prover/verifier symmetry.
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             if let Some(proof_claims) = proof_claims.as_ref()
@@ -217,11 +234,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         &mut self,
         target_nv: usize,
         bucket_index: usize,
+        global_max_for_recording: usize,
     ) -> SnarkResult<()> {
         self.batch_nozero_check_claims(target_nv)?;
         self.batch_z_check_claims(target_nv)?;
         self.z_check_claim_to_s_check_claim(target_nv)?;
-        self.equalize_sumcheck_claims(target_nv)?;
+        self.equalize_sumcheck_claims(target_nv, global_max_for_recording)?;
         self.batch_s_check_claims(target_nv)?;
         self.reduce_sumcheck_dgree(target_nv)?;
         self.batch_z_check_claims(target_nv)?;
@@ -317,7 +335,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             self.state.mv_pcs_substate.zero_check_claims = zc;
             self.state.mv_pcs_substate.sum_check_claims = sc;
             self.state.mv_pcs_substate.no_zero_check_claims = nzc;
-            self.run_bucket_pipeline_verify(bucket.target_nv, bucket_index)?;
+            self.run_bucket_pipeline_verify(
+                bucket.target_nv,
+                bucket_index,
+                global_max_for_recording,
+            )?;
         }
 
         // Prover's per-bucket `equalize_mat_poly_nv_to` extends every
