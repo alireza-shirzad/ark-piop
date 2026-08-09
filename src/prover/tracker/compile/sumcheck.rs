@@ -817,7 +817,28 @@ where
         // bucket's aggregated sumcheck still sees raw values scaled to its
         // own `target_nv`. When the plan has one bucket at the global max
         // this pre-scale is a no-op.
-        let global_max_for_recording = plan.iter().map(|b| b.target_nv).max().unwrap_or(0);
+        //
+        // MUST match the verifier's `equalize_mat_com_nv` computation
+        // exactly, since the verifier divides recorded values by
+        // `2^(verifier_global_max - target_nv)`. Historically we computed
+        // this as `max(bucket target_nv)`; the verifier computes it as
+        // `max(materialized_comms log_size)`. These can diverge — e.g. a
+        // workload with a large-nv char-domain side poly (materialized at
+        // commit time) but no sumcheck bucket targeting that nv (because
+        // no claims live there). In that case prover records with a
+        // smaller scale than the verifier expects to divide by, so every
+        // proof-map claim value ends up off by `2^(comm_max - bucket_max)`
+        // and every sumcheck round-0 check trips
+        // `p(0)+p(1) != asserted_sum`. Compute it the verifier's way.
+        use crate::pcs::PolynomialCommitment;
+        let global_max_for_recording = self
+            .state
+            .mv_pcs_substate
+            .materialized_comms
+            .values()
+            .map(|c| c.log_size() as usize)
+            .max()
+            .unwrap_or(1);
 
         let mut bucket_proofs: Vec<SumcheckBucketProof<B::F>> = Vec::with_capacity(plan.len());
         let mut all_individual_claims: BTreeMap<TrackerID, B::F> = BTreeMap::new();
