@@ -23,35 +23,15 @@ where
         if poly.is_empty() {
             return HPVirtualPolynomial::new(1);
         }
-        // Effective nv for the compiled sumcheck polynomial. We take the
-        // max of the CURRENT `num_vars()` reported by each factor's
-        // materialized MLE — NOT the tracker's cached
-        // `state.num_vars[id]`, which is a snapshot from the moment the
-        // virtual poly was tracked and does not reflect subsequent
-        // `equalize_mat_poly_nv_to` bumps performed by the bucket
-        // compiler. Downstream this call `equalize` has already scaled
-        // the sumcheck claim's value by `2^(target_nv - stale_nv)`
-        // assuming the sumcheck runs at `target_nv`; if we compiled at
-        // the stale nv the scaled claim would exceed the actual
-        // hypercube sum by exactly that factor and round-0's
-        // `p(0)+p(1) == asserted_sum` would fail. See
-        // `equalize_mat_poly_nv_to` (this file) and the summation
-        // arithmetic in `piop/sum_check/verifier.rs`.
-        //
-        // Bare-constant terms (`(c, vec![])` from `add_scalar` — empty
-        // product = 1) contribute no factor, so they naturally fall
-        // out of the max. The `unwrap_or(0)` fallback covers a virt
-        // poly composed entirely of bare constants (nv=0, sumcheck
-        // trivially proves it as a single-round scalar identity).
-        let nv = poly
-            .iter()
-            .flat_map(|(_, prod_ids)| {
-                prod_ids
-                    .iter()
-                    .map(|fid| self.mat_mv_poly(*fid).unwrap().num_vars())
-            })
-            .max()
-            .unwrap_or(0);
+        // Use the tracker's registered nv rather than peeking at the first
+        // factor: with the empty-product convention for bare constants
+        // (see `add_scalar`), a term may have an empty factor list and
+        // `poly[0].1[0]` would panic. The cached value is what
+        // `equalize_mat_poly_nv_to` scaled the sumcheck claim to expect;
+        // using the current material `num_vars()` (which might have been
+        // bumped by an earlier bucket's `equalize`) would compile the
+        // sumcheck at a nv that no longer matches the claim.
+        let nv = self.poly_nv(id);
 
         // Optimize away linear combinations of committed polynomials by
         // materializing them into fresh MLEs (no new commitments). Identical
