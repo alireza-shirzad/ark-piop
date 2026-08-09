@@ -65,9 +65,13 @@ pub struct SumcheckProverState<F: PrimeField> {
     /// moved MLEs into `mle_slots` and cleared `poly.flattened_ml_extensions`.
     pub(crate) mles_initialized: bool,
     /// Number of streaming rounds before transitioning to eager fold. `0`
-    /// means fully eager (current default); `num_vars` means never
-    /// materialize. Read once at init from the `TT_SUMCHECK_STREAM_K` env
-    /// var; capped at `poly.aux_info.num_variables`.
+    /// means fully eager; `num_vars` means never materialize.
+    ///
+    /// Resolved at [`SumcheckProverState::prover_init`] time from the
+    /// `TT_SUMCHECK_STREAM_K` env var (see `stream_policy` /
+    /// `StreamPolicy`) — under [`StreamPolicy::Auto`] (the default) the
+    /// effective `k` is computed from the poly's factor mix via
+    /// `decide_auto_stream_k`. Capped at `poly.aux_info.num_variables`.
     pub(crate) stream_k: usize,
     /// Equality table `eq_r_table[b] = Π_j (b_j == 1 ? r_j : 1 - r_j)`
     /// for the accumulated streaming challenges `r_1..r_m`, laid out with

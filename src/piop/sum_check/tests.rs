@@ -158,6 +158,75 @@ mod streaming_parity {
         assert_eq!(eager, partial);
     }
 
+    /// The auto-detection heuristic
+    /// ([`crate::piop::sum_check::prover::decide_auto_stream_k`])
+    /// should:
+    ///   - never enable streaming below `nv=20` (too small to matter)
+    ///   - never enable streaming when all factors are Field-backed
+    ///     (streaming can't help them)
+    ///   - enable streaming when enough compressed factors are present
+    ///     to save more than an eq_table's worth of materialization
+    ///
+    /// We drive this indirectly through the parity infra by running the
+    /// same virtual poly with `stream_k = 0` (eager) and comparing to
+    /// what a hypothetical auto call would emit — but the sumcheck round
+    /// messages are the observable, so we just check that streaming and
+    /// eager agree, which is already covered above. This test asserts
+    /// the *decision* directly.
+    #[test]
+    fn auto_stream_k_decision_matches_expected_shape() {
+        use crate::piop::sum_check::prover::decide_auto_stream_k;
+        // Small poly: never stream.
+        {
+            let nv = 5;
+            let n = 1usize << nv;
+            let a = Arc::new(MLE::<Fr>::from_u32s(vec![7u32; n], nv));
+            let b = Arc::new(MLE::<Fr>::from_u32s(vec![9u32; n], nv));
+            let mut poly = HPVirtualPolynomial::<Fr>::new(nv);
+            poly.add_mle_list([a, b], Fr::from(1u64)).unwrap();
+            assert_eq!(
+                decide_auto_stream_k(&poly),
+                0,
+                "small nv should not auto-stream"
+            );
+        }
+        // Large-nv but all Field storage: never stream (streaming can't
+        // help Field-backed factors).
+        {
+            let nv = 22;
+            let n = 1usize << nv;
+            use ark_std::rand::SeedableRng;
+            let mut rng = StdRng::seed_from_u64(1);
+            use ark_ff::UniformRand;
+            let evals: Vec<Fr> = (0..n).map(|_| Fr::rand(&mut rng)).collect();
+            let a = Arc::new(MLE::<Fr>::from_evaluations_vec(nv, evals));
+            let mut poly = HPVirtualPolynomial::<Fr>::new(nv);
+            poly.add_mle_list([a], Fr::from(1u64)).unwrap();
+            assert_eq!(
+                decide_auto_stream_k(&poly),
+                0,
+                "Field-only factors should not trigger auto-streaming"
+            );
+        }
+        // Large-nv with several compressed factors above the threshold:
+        // enable streaming to `nv`.
+        {
+            let nv = 22;
+            let n = 1usize << nv;
+            let mut poly = HPVirtualPolynomial::<Fr>::new(nv);
+            // 5 distinct U32-backed factors — above the 4-factor threshold.
+            for i in 0..5 {
+                let arc = Arc::new(MLE::<Fr>::from_u32s(vec![i as u32; n], nv));
+                poly.add_mle_list([arc], Fr::from(1u64)).unwrap();
+            }
+            assert_eq!(
+                decide_auto_stream_k(&poly),
+                nv,
+                "several large-nv compressed factors should trigger auto-streaming"
+            );
+        }
+    }
+
     /// Sum-of-products with mixed storage kinds — a Field-storage MLE
     /// mixed with a U32-storage MLE. The Field one is always
     /// Materialized (streaming can't help it); the U32 one goes into

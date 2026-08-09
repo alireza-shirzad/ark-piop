@@ -14,24 +14,117 @@ use tracing::instrument;
 
 use crate::piop::structs::{MleSlot, SumcheckProverMessage, SumcheckProverState};
 
-/// Read the configured number of streaming rounds from the environment,
-/// with a permanent per-process cache. `0` = fully eager fold (current
-/// default, no memory optimization); `num_variables` = fully streaming
-/// (never materialize, minimum peak memory, `n×` compute cost); values in
-/// between give partial streaming — the first `k` rounds are streamed,
-/// then the poly is materialized at its shrunk `2^(n-k)` size and eager
-/// folding resumes.
+/// The user-configurable streaming policy, cached per-process.
+/// See [`stream_policy`] for the environment-variable interpretation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum StreamPolicy {
+    /// Fully eager fold. Materialize every poly at `2^n` field storage
+    /// on the first round; fold in place thereafter. Minimum wall time,
+    /// maximum peak memory.
+    Eager,
+    /// Explicit streaming window: the first `k` rounds are streamed
+    /// (compressed storage stays compact, fold is virtual via
+    /// `stream_eq_table`), then the poly is materialized at its shrunk
+    /// `2^(n-k)` size and eager folding resumes.
+    Explicit(usize),
+    /// Auto-detect at [`prover_init`] time: scan the virtual poly's
+    /// factors and enable streaming (`k = num_variables`) iff the
+    /// compressed-storage footprint would benefit — see
+    /// [`decide_auto_stream_k`].
+    Auto,
+}
+
+/// Read the streaming policy from the environment, with a permanent
+/// per-process cache. Interpretation of `TT_SUMCHECK_STREAM_K`:
 ///
-/// The cap-at-`num_variables` clamp is applied by the caller, not here;
-/// this reader returns the raw env value.
-pub(crate) fn stream_first_k_rounds() -> usize {
-    static CACHED: OnceLock<usize> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("TT_SUMCHECK_STREAM_K")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .unwrap_or(0)
+///   - unset, or `auto` (case-insensitive) → [`StreamPolicy::Auto`]
+///   - `0` → [`StreamPolicy::Eager`]
+///   - positive integer `N` → [`StreamPolicy::Explicit(N)`] (capped at
+///     `num_variables` by [`prover_init_with_stream_k`])
+///
+/// Any unrecognized value is treated as `Auto`.
+pub(crate) fn stream_policy() -> StreamPolicy {
+    static CACHED: OnceLock<StreamPolicy> = OnceLock::new();
+    *CACHED.get_or_init(|| match std::env::var("TT_SUMCHECK_STREAM_K") {
+        Err(_) => StreamPolicy::Auto,
+        Ok(s) => {
+            let trimmed = s.trim();
+            if trimmed.eq_ignore_ascii_case("auto") {
+                StreamPolicy::Auto
+            } else if let Ok(n) = trimmed.parse::<usize>() {
+                if n == 0 {
+                    StreamPolicy::Eager
+                } else {
+                    StreamPolicy::Explicit(n)
+                }
+            } else {
+                StreamPolicy::Auto
+            }
+        }
     })
+}
+
+/// Decide whether to enable full streaming (`k = num_variables`) or stay
+/// eager (`k = 0`) based on the virtual poly's factor mix.
+///
+/// The trade-off: streaming avoids per-factor materialization to
+/// `2^n × sizeof(F)` field storage, but pays for a single `stream_eq_table`
+/// of the same shape that grows over the sumcheck. We enable streaming
+/// when the sum of would-materialize storage (across unique compressed
+/// factors) is a multiple of the eq_table cost — the multiplier is the
+/// "at least this many factors would each save an eq_table's worth"
+/// threshold, tuned to opt-in only when the win is clearly worth the
+/// wall-time cost.
+///
+/// Field-storage factors don't contribute: they're always materialized
+/// regardless of `stream_k`, so streaming can't help them. Only
+/// compressed variants (Bit / U8 / U32 / U64 / Rle / Sparse / Constant
+/// / LazyInverseShifted*) count toward the savings side. Duplicate Arcs
+/// are counted once (same MLE reused across terms shares the lift).
+pub(crate) fn decide_auto_stream_k<F: PrimeField>(
+    polynomial: &HPVirtualPolynomial<F>,
+) -> usize {
+    use crate::arithmetic::mat_poly::mle::MLEStorage;
+    use std::collections::HashSet;
+
+    let n = polynomial.aux_info.num_variables;
+    // A poly this small won't benefit even if fully compressed — the
+    // eq_table + streaming compute dominates.
+    if n < 20 {
+        return 0;
+    }
+    let field_size = std::mem::size_of::<F>();
+    let materialize_cost_per_factor = (1usize << n).saturating_mul(field_size);
+
+    let mut seen: HashSet<*const MLE<F>> = HashSet::new();
+    let mut compressed_factor_count = 0usize;
+    for arc in &polynomial.flattened_ml_extensions {
+        // Dedup by Arc pointer — the same MLE reused across terms only
+        // needs to be lifted once, so it should only count once toward
+        // "streaming savings".
+        let ptr = Arc::as_ptr(arc);
+        if !seen.insert(ptr) {
+            continue;
+        }
+        // Field storage always materializes; streaming can't help.
+        if !matches!(arc.storage(), MLEStorage::Field(_)) {
+            compressed_factor_count += 1;
+        }
+    }
+
+    // Enable streaming when at least `THRESHOLD_FACTORS` compressed
+    // factors would each save an eq_table's worth of memory. This is
+    // deliberately conservative — a single small compressed poly
+    // isn't worth the wall-time overhead of streaming, but a handful
+    // of them is.
+    const THRESHOLD_FACTORS: usize = 4;
+    let total_savings = compressed_factor_count.saturating_mul(materialize_cost_per_factor);
+    let eq_table_cost = materialize_cost_per_factor;
+    if total_savings >= THRESHOLD_FACTORS.saturating_mul(eq_table_cost) {
+        n
+    } else {
+        0
+    }
 }
 
 impl<F: PrimeField> SumcheckProverState<F> {
@@ -39,12 +132,21 @@ impl<F: PrimeField> SumcheckProverState<F> {
     // type ProverMessage = IOPProverMessage<F>;
 
     /// Initialize the prover state to argue for the sum of the input polynomial
-    /// over {0,1}^`num_vars`. Reads the streaming-window size from the
-    /// `TT_SUMCHECK_STREAM_K` env var; tests that need deterministic
-    /// control should call [`Self::prover_init_with_stream_k`] instead.
+    /// over {0,1}^`num_vars`. Reads the streaming policy from the
+    /// `TT_SUMCHECK_STREAM_K` env var — see [`stream_policy`] and
+    /// [`StreamPolicy`] for the interpretation. Under [`StreamPolicy::Auto`]
+    /// (the default when the env var is unset) the effective `k` is
+    /// computed from the virtual poly's factor mix — see
+    /// [`decide_auto_stream_k`]. Tests that need deterministic control
+    /// should call [`Self::prover_init_with_stream_k`] instead.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
-        Self::prover_init_with_stream_k(polynomial, stream_first_k_rounds())
+        let k = match stream_policy() {
+            StreamPolicy::Eager => 0,
+            StreamPolicy::Explicit(n) => n,
+            StreamPolicy::Auto => decide_auto_stream_k(polynomial),
+        };
+        Self::prover_init_with_stream_k(polynomial, k)
     }
 
     /// Same as [`Self::prover_init`] but takes an explicit `stream_k`
