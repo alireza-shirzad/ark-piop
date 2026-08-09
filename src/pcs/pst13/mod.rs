@@ -38,6 +38,54 @@ use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
 /// KZG Polynomial Commitment Scheme on multilinear polynomials.
 
+/// Shared commit path for all `Sparse*` storage variants: rewrites
+/// `MSM(bases, values)` as `default * Σ bases[..inner_len] + Σ bases[idx] * (val - default)`
+/// where the second sum runs over the sparse exceptions.
+///
+/// The fast path fires when `default == 0`: the first term drops to
+/// identity and we pay only `|exceptions|` scalar-muls — no `Ω(inner_len)`
+/// traversal at all. That's the case sparse commits are optimizing for
+/// (mostly-zero masks with a handful of set slots commit in a rounding
+/// error compared to the dense path).
+///
+/// When `default != 0` we still pay `Ω(inner_len)` group additions for
+/// the baseline sum, same asymptotic as the dense commit path, but
+/// avoid materializing any `Vec<F>` and skip the mixed-scalar MSM.
+///
+/// Callers pass the F-lifted `default` and an iterator of F-lifted
+/// `(index, value)` exceptions, so the native-typed sparse variants
+/// (`SparseU8` / `SparseU32` / `SparseU64`) all funnel through this same
+/// helper — each pays the `F::from` conversion once per exception rather
+/// than once per element.
+fn sparse_commit<E: Pairing>(
+    bases: &[E::G1Affine],
+    committed_nv: usize,
+    default: E::ScalarField,
+    exceptions: impl Iterator<Item = (u32, E::ScalarField)>,
+) -> E::G1Affine {
+    let inner_len = 1usize << committed_nv;
+    let mut acc: E::G1 = if default.is_zero() {
+        E::G1::zero()
+    } else {
+        let mut sum_bases: E::G1 = E::G1::zero();
+        for base in bases.iter().take(inner_len) {
+            sum_bases += base;
+        }
+        if default.is_one() {
+            sum_bases
+        } else {
+            sum_bases.mul(default)
+        }
+    };
+    for (idx, val) in exceptions {
+        let delta = val - default;
+        if !delta.is_zero() {
+            acc += bases[idx as usize].mul(delta);
+        }
+    }
+    acc.into_affine()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PST13<E: Pairing> {
     #[doc(hidden)]
@@ -192,6 +240,64 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                     cursor += count;
                 }
                 acc.into_affine()
+            }
+            MLEStorage::Sparse {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(bases, committed_nv, *default, exceptions.iter().map(|(i, v)| (*i, *v))),
+            MLEStorage::SparseU8 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default as u64),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v as u64))),
+            ),
+            MLEStorage::SparseU32 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default as u64),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v as u64))),
+            ),
+            MLEStorage::SparseU64 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v))),
+            ),
+            // Lazy variants (introduced for keyed_sumcheck's phat MLEs) are
+            // only ever *registered* to the tracker after their dense form
+            // has already been committed and the dense form dropped. Hitting
+            // this arm means a caller tried to commit a lazy MLE directly,
+            // which is a bug — the whole point of the lazy backing is to
+            // avoid ever again constructing a dense evaluation vector for
+            // committed phats. Materializing here would be O(2^nv)
+            // inversions and defeat the memory optimisation entirely.
+            MLEStorage::LazyInverseShifted { .. }
+            | MLEStorage::LazyInverseShiftedSum { .. } => {
+                panic!(
+                    "PST13::commit: cannot commit an MLE with lazy inverse-shifted storage. \
+                     Lazy backings are for post-commit re-registration only; commit the dense \
+                     source-based MLE first, then swap in the lazy backing via \
+                     `register_mat_mv_poly`."
+                );
             }
         };
 

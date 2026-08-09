@@ -32,9 +32,25 @@ where
                     vec![B::F::ZERO; 1 << nv],
                     |mut acc, (coeff, products)| {
                         let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
-                            cfg_iter_mut!(acc)
-                                .zip(self.mat_mv_poly(*id).unwrap().evaluations())
-                                .for_each(|(a, b)| *a *= b);
+                            let mle = self.mat_mv_poly(*id).unwrap();
+                            // Fix 6b: skip the 2^nv Vec allocation when the
+                            // factor is Constant-backed — one scalar multiply
+                            // per slot suffices. Saves an O(2^nv · sizeof(F))
+                            // heap alloc per Constant factor per product term,
+                            // which shows up in every virtual-poly materialise
+                            // on activator/all-same columns.
+                            if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
+                                value,
+                                ..
+                            } = mle.storage()
+                            {
+                                let v = *value;
+                                cfg_iter_mut!(acc).for_each(|a| *a *= v);
+                            } else {
+                                cfg_iter_mut!(acc)
+                                    .zip(mle.evaluations())
+                                    .for_each(|(a, b)| *a *= b);
+                            }
                             acc
                         });
                         cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);

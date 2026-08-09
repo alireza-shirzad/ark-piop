@@ -2,6 +2,7 @@
 
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use std::sync::Arc;
 
 use crate::arithmetic::{mat_poly::mle::MLE, virt_poly::hp_interface::HPVirtualPolynomial};
 /// An IOP proof is a collections of
@@ -21,6 +22,29 @@ pub struct SumcheckProverMessage<F: PrimeField> {
     pub(crate) evaluations: Vec<F>,
 }
 
+/// Per-MLE storage slot inside the sumcheck prover. Each factor of the
+/// virtual polynomial lives in one of two states:
+///
+/// - `Materialized(MLE<F>)` — Field-storage MLE that folds in place each
+///   round via [`MLE::fix_one_variable_in_place`]. The length halves each
+///   round; the buffer is reused across the entire sumcheck.
+///
+/// - `Streaming(Arc<MLE<F>>)` — Compressed-storage MLE that we're reading
+///   through *without* materializing. The original storage stays untouched
+///   across the streaming phase; virtual-folded values at position `j` are
+///   computed on demand as `Σ_k stream_eq_table[k] * original.lift(k | (j << m))`
+///   where `m` is the number of streaming challenges accumulated so far.
+///   At round `k` (the transition), streaming slots are materialized once
+///   into `Materialized`, and eager folding resumes.
+///
+/// The `Streaming` variant is the point of partial streaming: it defers
+/// the 8×–32× Field-materialization blowup that dominates sumcheck peak
+/// memory when compressed-storage columns enter the fold.
+pub(crate) enum MleSlot<F: PrimeField> {
+    Materialized(MLE<F>),
+    Streaming(Arc<MLE<F>>),
+}
+
 /// Prover State of a PolyIOP.
 pub struct SumcheckProverState<F: PrimeField> {
     /// sampled randomness given by the verifier
@@ -32,20 +56,25 @@ pub struct SumcheckProverState<F: PrimeField> {
     /// points with precomputed barycentric weights for extrapolating smaller
     /// degree uni-polys to `max_degree + 1` evaluations.
     pub(crate) extrapolation_aux: Vec<(Vec<F>, Vec<F>)>,
-    /// Owned working set of Field-storage MLEs. Populated on the first call
-    /// to `prove_round_and_update_state` by lifting the Arc-shared MLEs out
-    /// of `poly.flattened_ml_extensions` into owned `Vec<F>` buffers (via
-    /// `Arc::try_unwrap` when refcount == 1, else `to_field_owned`). Every
-    /// subsequent round folds these buffers in place via
-    /// [`MLE::fix_one_variable_in_place`]. This is what keeps sumcheck's
-    /// round-loop allocation traffic to a single lift plus in-place
-    /// truncations across all rounds — instead of a fresh clone-plus-fix
-    /// pair per round as the previous scheme did.
-    pub(crate) flattened_mles: Vec<MLE<F>>,
-    /// True after the first call to `prove_round_and_update_state` has
-    /// moved evaluations into `flattened_mles` and cleared
+    /// One slot per factor of the virtual polynomial. See [`MleSlot`] for
+    /// the two states (Materialized in-place fold, Streaming lazy read).
+    /// Populated on the first call to `prove_round_and_update_state` from
     /// `poly.flattened_ml_extensions`.
+    pub(crate) mle_slots: Vec<MleSlot<F>>,
+    /// True after the first call to `prove_round_and_update_state` has
+    /// moved MLEs into `mle_slots` and cleared `poly.flattened_ml_extensions`.
     pub(crate) mles_initialized: bool,
+    /// Number of streaming rounds before transitioning to eager fold. `0`
+    /// means fully eager (current default); `num_vars` means never
+    /// materialize. Read once at init from the `TT_SUMCHECK_STREAM_K` env
+    /// var; capped at `poly.aux_info.num_variables`.
+    pub(crate) stream_k: usize,
+    /// Equality table `eq_r_table[b] = Π_j (b_j == 1 ? r_j : 1 - r_j)`
+    /// for the accumulated streaming challenges `r_1..r_m`, laid out with
+    /// the first challenge at the low bit. Grows from length 1 (empty
+    /// product = [1]) to `2^stream_k` by the transition round, then
+    /// dropped once transition materializes the streamed slots.
+    pub(crate) stream_eq_table: Vec<F>,
 }
 
 /// Prover State of a PolyIOP

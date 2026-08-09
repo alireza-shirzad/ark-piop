@@ -291,12 +291,18 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         gamma: B::F,
     ) -> SnarkResult<()> {
         let nv = p.log_size();
-        // construct phat = 1/(p(x) - gamma), i.e. the denominator of the sum
-        let mut p_evals = p.evaluations().to_vec();
-        let mut p_minus_gamma: Vec<B::F> = p_evals.iter_mut().map(|x| *x - gamma).collect();
-        let phat_evals = p_minus_gamma.as_mut_slice();
-        ark_ff::fields::batch_inversion(phat_evals);
-        let phat_mle = MLE::from_evaluations_slice(nv, phat_evals);
+        // Construct phat = 1/(p(x) - gamma), i.e. the denominator of the sum.
+        // phat (A): drop the redundant `.to_vec()` on the already-owned Vec
+        // and the intermediate `.map().collect()` — subtract gamma in place
+        // and invert in place. Peak transient at this point:
+        //   1× 2^nv (the phat_evals Vec) instead of 3× before.
+        let mut phat_evals: Vec<B::F> = p.evaluations();
+        for x in phat_evals.iter_mut() {
+            *x -= gamma;
+        }
+        ark_ff::fields::batch_inversion(phat_evals.as_mut_slice());
+        // Move ownership into the MLE — no extra clone.
+        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals);
 
         // calculate what the final sum should be
         let mut v = B::F::zero();
@@ -316,6 +322,35 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
                 (phat.clone(), v)
             }
         };
+
+        // phat (B): if `p` is a materialized (committed) poly, swap the
+        // dense phat we handed to the tracker for a lazy `1/(p - γ)`
+        // backing that references p's already-tracked Arc. The
+        // commitment has been produced above, so the dense form is no
+        // longer needed — sumcheck reads phat via `storage().lift(i)`
+        // through the streaming path at `src/piop/sum_check/prover.rs`.
+        // Net: ~2^nv · sizeof(F) bytes freed per phat.
+        //
+        // When p is *virtual* (e.g. a fold-result linear combination —
+        // common in `Permutation::fold_table_to_single_col`), it has no
+        // Arc<MLE> to reference, so we keep the dense phat storage and
+        // skip the optimisation for this instance. p's virtual algebra
+        // still gets evaluated on demand downstream via the tracker's
+        // materialize_poly path — attempting to force it dense here
+        // would allocate 2^nv just to save phat's 2^nv, a wash.
+        let p_id = p.id();
+        let has_mat = tracker.tracker().borrow().has_materialized_mv_poly(p_id);
+        if has_mat {
+            drop(phat_mle);
+            let p_source = tracker.mat_mv_poly(p_id);
+            let lazy_phat = MLE::from_lazy_inverse_shifted(p_source, gamma);
+            tracker
+                .tracker()
+                .borrow_mut()
+                .register_mat_mv_poly(phat.id(), lazy_phat);
+        } else {
+            drop(phat_mle);
+        }
 
         // Create Zerocheck claim for proving phat(x) is created correctly,
         // i.e. ZeroCheck [(p(x)-gamma) * phat(x) - 1] = [(p * phat) - gamma * phat - 1]
@@ -337,21 +372,64 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         debug_assert_eq!(nv, p2.log_size());
 
         // Build phat = 1/(p1-gamma) + 1/(p2-gamma).
-        let mut p1_minus_gamma: Vec<B::F> = p1.evaluations().iter().map(|x| *x - gamma).collect();
-        let mut p2_minus_gamma: Vec<B::F> = p2.evaluations().iter().map(|x| *x - gamma).collect();
+        //
+        // phat (A): drop the map-collect intermediates and the phat_evals.clone().
+        // Steady state during this block:
+        //   - allocate 1× 2^nv for p1_minus_gamma (from p1.evaluations())
+        //   - allocate 1× 2^nv for p2_minus_gamma (from p2.evaluations())
+        //   - fold p1 into p2 in-place, then drop p1 → back to 1× 2^nv
+        //   - sum for `v` in the same pass, no extra buffer
+        //   - move ownership into MLE (no clone)
+        // Peak transient: 2× 2^nv (was ≥ 4× before). The two-side simultaneity
+        // is unavoidable because inversion needs the full vector at once.
+        let mut p1_minus_gamma: Vec<B::F> = p1.evaluations();
+        for x in p1_minus_gamma.iter_mut() {
+            *x -= gamma;
+        }
+        let mut p2_minus_gamma: Vec<B::F> = p2.evaluations();
+        for x in p2_minus_gamma.iter_mut() {
+            *x -= gamma;
+        }
         ark_ff::fields::batch_inversion(p1_minus_gamma.as_mut_slice());
         ark_ff::fields::batch_inversion(p2_minus_gamma.as_mut_slice());
 
-        let phat_evals = p1_minus_gamma
-            .iter()
-            .zip(p2_minus_gamma.iter())
-            .map(|(a, b)| *a + *b)
-            .collect::<Vec<_>>();
-        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals.clone());
+        // Fuse the two inverse tables into a single phat_evals in place —
+        // reuses p2_minus_gamma's allocation and simultaneously accumulates v.
+        let mut v = B::F::zero();
+        for (dst, add) in p2_minus_gamma.iter_mut().zip(p1_minus_gamma.iter()) {
+            *dst += *add;
+            v += *dst;
+        }
+        // p1_minus_gamma is done; drop it here to free 1× 2^nv before the
+        // MLE / tracker take over.
+        drop(p1_minus_gamma);
+        let phat_evals = p2_minus_gamma;
+        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals);
         let phat = tracker.track_and_commit_mat_mv_poly(&phat_mle)?;
 
-        // Sumcheck claim is over the paired contribution itself.
-        let v = phat_evals.iter().fold(B::F::zero(), |acc, x| acc + *x);
+        // phat (B): swap the dense phat_mle for a lazy backing wrapping
+        // p1 and p2 as `1/(p1 - γ) + 1/(p2 - γ)`. Only when BOTH sources
+        // are materialized — see the single-side branch for the
+        // virtual-p rationale.
+        let p1_id = p1.id();
+        let p2_id = p2.id();
+        let both_mat = {
+            let tracker_rc = tracker.tracker();
+            let borrow = tracker_rc.borrow();
+            borrow.has_materialized_mv_poly(p1_id) && borrow.has_materialized_mv_poly(p2_id)
+        };
+        if both_mat {
+            drop(phat_mle);
+            let p1_source = tracker.mat_mv_poly(p1_id);
+            let p2_source = tracker.mat_mv_poly(p2_id);
+            let lazy_phat = MLE::from_lazy_inverse_shifted_sum(p1_source, p2_source, gamma);
+            tracker
+                .tracker()
+                .borrow_mut()
+                .register_mat_mv_poly(phat.id(), lazy_phat);
+        } else {
+            drop(phat_mle);
+        }
 
         // Zerocheck:
         // phat*(p1-gamma)*(p2-gamma) - ((p1-gamma) + (p2-gamma)) == 0

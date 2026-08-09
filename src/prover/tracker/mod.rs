@@ -339,6 +339,16 @@ where
                     crate::arithmetic::mat_poly::mle::MLEStorage::U64 { .. } => "u64",
                     crate::arithmetic::mat_poly::mle::MLEStorage::Constant { .. } => "const",
                     crate::arithmetic::mat_poly::mle::MLEStorage::Rle { .. } => "rle",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Sparse { .. } => "sparse",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU8 { .. } => "sparseU8",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU32 { .. } => "sparseU32",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU64 { .. } => "sparseU64",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShifted { .. } => {
+                        "lazy_inv"
+                    }
+                    crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShiftedSum {
+                        ..
+                    } => "lazy_inv_sum",
                 };
                 (*id, bytes, nv, kind)
             })
@@ -385,6 +395,18 @@ where
             tracker_snapshot_json = %payload.to_string(),
             "tracker_snapshot"
         );
+        // Fallback dump to stderr when TT_MEMSNAP=1 — bypasses the tracing
+        // subscriber entirely so a caller running only the plain ark-piop
+        // subscriber (integration tests, one-off cli invocations) still sees
+        // the peak-allocation breakdown, and gets it flushed even if the
+        // process is later OOM-killed. One line per snapshot, prefixed with
+        // `[TT_MEMSNAP]` so a grep/tail workflow is trivial.
+        if std::env::var("TT_MEMSNAP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            eprintln!("[TT_MEMSNAP] {}", payload);
+        }
     }
 
     fn emit_sc_compile_timing_breakdown(&self, breakdown: ScCompileTimingBreakdown) {
@@ -703,6 +725,167 @@ mod tests {
         let eval = tracker.evaluate_mv(id, &pt).unwrap();
         let eval_shifted = tracker.evaluate_mv(id_shifted, &pt).unwrap();
         assert_eq!(eval_shifted, eval + scalar);
+    }
+
+    /// `add_scalar` must not materialize a fresh `2^n`-sized `Vec<F>` for
+    /// the scalar — that was the memory bug the empty-product convention
+    /// fixed. This test guards against a regression by asserting the
+    /// tracker's materialized_polys count is unchanged after `add_scalar`.
+    #[test]
+    fn add_scalar_does_not_materialize_scalar_mle() {
+        let mut tracker = make_tracker();
+        let id = tracker.track_mat_mv_poly(random_mle(4));
+        let before = tracker.state.mv_pcs_substate.materialized_polys.len();
+        let _shifted = tracker.add_scalar(id, F::from(42));
+        let after = tracker.state.mv_pcs_substate.materialized_polys.len();
+        assert_eq!(
+            before, after,
+            "add_scalar should not create any new materialized poly; \
+             expected empty-product convention (c, vec![]) not a materialized scalar MLE"
+        );
+    }
+
+    /// Adding a constant does not change the max multiplicative degree
+    /// of the polynomial. Under the empty-product convention the extra
+    /// term has factor-list length 0 (degree 0), so `max` is unchanged.
+    #[test]
+    fn add_scalar_preserves_multiplicative_degree() {
+        let mut tracker = make_tracker();
+        let a = tracker.track_mat_mv_poly(random_mle(3));
+        let b = tracker.track_mat_mv_poly(random_mle(3));
+        // A degree-2 expression: a * b
+        let ab = tracker.mul_polys(a, b);
+        assert_eq!(tracker.virt_poly_degree(ab), 2);
+        // Adding a scalar should preserve degree 2.
+        let ab_shifted = tracker.add_scalar(ab, F::from(99));
+        assert_eq!(tracker.virt_poly_degree(ab_shifted), 2);
+    }
+
+    /// `add_scalar` must compose correctly with `mul_polys` — the classic
+    /// `(p + c) * q = p*q + c*q` identity when evaluated at a point.
+    #[test]
+    fn add_scalar_composes_with_multiplication() {
+        let mut tracker = make_tracker();
+        let p = tracker.track_mat_mv_poly(random_mle(3));
+        let q = tracker.track_mat_mv_poly(random_mle(3));
+        let c = F::from(17);
+
+        let p_plus_c = tracker.add_scalar(p, c);
+        let prod = tracker.mul_polys(p_plus_c, q);
+
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+        let eval_p = tracker.evaluate_mv(p, &pt).unwrap();
+        let eval_q = tracker.evaluate_mv(q, &pt).unwrap();
+        let eval_prod = tracker.evaluate_mv(prod, &pt).unwrap();
+        assert_eq!(eval_prod, (eval_p + c) * eval_q);
+    }
+
+    /// Chained `add_scalar` calls must accumulate. `add_scalar(add_scalar(p, c1), c2)`
+    /// should equal `p + (c1 + c2)` at every point. Under the empty-product
+    /// convention this materializes as two separate constant terms in the
+    /// virtual poly — the evaluator sums them.
+    #[test]
+    fn add_scalar_chained_composes() {
+        let mut tracker = make_tracker();
+        let p = tracker.track_mat_mv_poly(random_mle(3));
+        let c1 = F::from(5);
+        let c2 = F::from(11);
+        let step1 = tracker.add_scalar(p, c1);
+        let step2 = tracker.add_scalar(step1, c2);
+
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+        let eval_p = tracker.evaluate_mv(p, &pt).unwrap();
+        let eval_step2 = tracker.evaluate_mv(step2, &pt).unwrap();
+        assert_eq!(eval_step2, eval_p + c1 + c2);
+    }
+
+    /// `add_scalar(p, 0)` must be a semantic no-op — no constant term
+    /// should be appended, otherwise `optimize_linear_terms` at compile
+    /// time would emit a spurious nv=0 MLE for a zero constant.
+    #[test]
+    fn add_scalar_with_zero_is_semantic_noop() {
+        let mut tracker = make_tracker();
+        let p = tracker.track_mat_mv_poly(random_mle(3));
+        let shifted = tracker.add_scalar(p, F::zero());
+
+        let pt = vec![F::from(2), F::from(3), F::from(5)];
+        let eval_p = tracker.evaluate_mv(p, &pt).unwrap();
+        let eval_shifted = tracker.evaluate_mv(shifted, &pt).unwrap();
+        assert_eq!(eval_shifted, eval_p);
+
+        // Structural check: the virt poly should have exactly one term
+        // (the original poly's wrapper), no bare-constant term for 0.
+        let vp = tracker.virt_poly(shifted).unwrap();
+        assert_eq!(vp.len(), 1, "zero scalar must not emit a constant term");
+        assert!(!vp[0].1.is_empty(), "the single term should not be empty-product");
+    }
+
+    /// The virt-poly built by `add_scalar` on a materialized poly must
+    /// have exactly the shape `[(1, [poly_id]), (c, vec![])]` — one wrapper
+    /// term for the input and one bare-constant term.
+    #[test]
+    fn add_scalar_produces_expected_virt_poly_shape() {
+        let mut tracker = make_tracker();
+        let p = tracker.track_mat_mv_poly(random_mle(3));
+        let c = F::from(42);
+        let shifted = tracker.add_scalar(p, c);
+
+        let vp = tracker.virt_poly(shifted).unwrap();
+        assert_eq!(vp.len(), 2, "expected wrapper + constant term");
+        // First term: (1, [p]) — the input wrapped
+        assert_eq!(vp[0].0, F::one());
+        assert_eq!(vp[0].1, vec![p]);
+        // Second term: (c, []) — the bare constant via empty product
+        assert_eq!(vp[1].0, c);
+        assert!(vp[1].1.is_empty(), "constant term must have empty factor list");
+    }
+
+    // ── Contig-one activator storage ────────────────────────────────
+
+    /// The activator MLE that flows into `get_or_build_contig_one_poly`
+    /// must be RLE-compressed (or Constant for edge cases), never a
+    /// full-size Field `Vec<F>`. This regression test wires the tracker
+    /// with a self-referencing `Rc` the way the real prover does, calls
+    /// `get_or_build_contig_one_poly`, and inspects the storage.
+    ///
+    /// A Field-vec activator at char-domain scale would be 512 MiB per
+    /// gadget instance (nv=24). The RLE form is ~72 bytes — a 7-million×
+    /// reduction.
+    #[test]
+    fn contig_one_poly_uses_compact_storage_not_field_vec() {
+        use crate::arithmetic::mat_poly::mle::MLEStorage;
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let tracker_rc = Rc::new(RefCell::new(make_tracker()));
+        tracker_rc
+            .borrow_mut()
+            .set_self_rc(Rc::downgrade(&tracker_rc));
+
+        // Non-trivial partial window at a large nv: 100k active out of 1M slots.
+        let nv = 20;
+        let active_rows = 100_000;
+        let tracked = tracker_rc
+            .borrow_mut()
+            .get_or_build_contig_one_poly(nv, active_rows)
+            .unwrap();
+        let id = tracked.id();
+        let tracker = tracker_rc.borrow();
+        let mle = tracker.mat_mv_poly(id).expect("activator should be materialized");
+
+        // Storage must be compact — an Rle (or Constant for edge cases), never Field.
+        let bytes = mle.storage().heap_bytes();
+        assert!(
+            !matches!(mle.storage(), MLEStorage::Field { .. }),
+            "activator storage must not be Field-vec (would be 32 MiB at nv=20)"
+        );
+        assert!(
+            matches!(mle.storage(), MLEStorage::Rle { .. } | MLEStorage::Constant { .. }),
+            "activator storage must be Rle or Constant"
+        );
+        // 2-run RLE on BN254: ~72 bytes. Compare against the Field-vec
+        // alternative which would be (1 << 20) * 32 = 32 MiB.
+        assert!(bytes < 500, "compact activator should be <500 bytes, got {bytes}");
     }
 
     // ── Degree computation ─────────────────────────────────────────

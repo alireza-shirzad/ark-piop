@@ -117,10 +117,25 @@ where
                 continue;
             }
 
-            // Ensure all factors have matching nv.
+            // Ensure all factors have matching nv AND are not backed by a
+            // lazy storage variant. Lazy-backed factors (see phat B in
+            // `keyed_sumcheck`) would trigger 2^nv on-demand inversions
+            // if we fell into the `.evaluations()` fold below — exactly
+            // the O(2^nv) cost we introduced the lazy backing to avoid.
+            // Sumcheck will consume these directly via its streaming path
+            // (`piop/sum_check/prover.rs:135-168`), so keeping them out
+            // of this linear-optimisation pass is both correct and the
+            // whole point.
             if signature_map.iter().any(|(id, _)| {
                 self.mat_mv_poly(*id)
-                    .map(|mle| mle.num_vars() != nv)
+                    .map(|mle| {
+                        mle.num_vars() != nv
+                            || matches!(
+                                mle.storage(),
+                                crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShifted { .. }
+                                    | crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShiftedSum { .. }
+                            )
+                    })
                     .unwrap_or(true)
             }) {
                 continue;
@@ -136,9 +151,23 @@ where
                     let mut evals = vec![B::F::zero(); 1 << nv];
                     for (id, coeff) in &signature {
                         let mle = self.mat_mv_poly(*id).unwrap();
-                        cfg_iter_mut!(evals)
-                            .zip(mle.evaluations())
-                            .for_each(|(acc, v)| *acc += *coeff * v);
+                        // Fix 6b: skip the 2^nv Vec allocation when the
+                        // factor is Constant-backed — the added contribution
+                        // is a uniform `coeff * value` per slot, so we just
+                        // add that scalar across the accumulator without
+                        // materialising a same-valued eval vector.
+                        if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
+                            value,
+                            ..
+                        } = mle.storage()
+                        {
+                            let cv = *coeff * *value;
+                            cfg_iter_mut!(evals).for_each(|acc| *acc += cv);
+                        } else {
+                            cfg_iter_mut!(evals)
+                                .zip(mle.evaluations())
+                                .for_each(|(acc, v)| *acc += *coeff * v);
+                        }
                     }
                     let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
                     linear_cache.push((signature.clone(), mle.clone()));
@@ -199,7 +228,20 @@ where
                 // compressed-backed polys this critically avoids materializing
                 // to a full-size Vec<F>, keeping the tracker's memory
                 // footprint at inner-size for the whole compile pipeline.
-                let inner_poly = Arc::get_mut(poly).unwrap();
+                //
+                // `Arc::make_mut` instead of `get_mut`: some polys are shared
+                // via multiple Arc holders — specifically, the keyed_sumcheck
+                // `LazyInverseShifted`/`LazyInverseShiftedSum` phat backings
+                // keep an Arc reference to their source `p` (or `p1`, `p2`).
+                // `get_mut` would panic on those (refcount > 1); `make_mut`
+                // clones-on-write only when actually shared, so the common
+                // unshared case still pays no allocation. When the source
+                // *is* shared, we get a fresh Arc for `materialized_polys[id]`
+                // while the lazy backing keeps its snapshot of the source at
+                // the pre-bump nv — which is semantically fine because our
+                // lazy `lift(i)` cycles `i` modulo the source's inner_len,
+                // producing the same values the bumped-in-place source would.
+                let inner_poly = Arc::make_mut(poly);
                 inner_poly.set_virtual_nv(target_nv);
             }
         }

@@ -695,4 +695,50 @@ mod tests {
         let tracked = prover.track_and_commit_mat_mv_poly(&mle).unwrap();
         assert!(tracked.id_or_const().is_left());
     }
+
+    // ── Shift poly compact storage ─────────────────────────────────
+
+    /// `get_or_insert_shift_poly` must not build a size-`2^log_size`
+    /// `Vec<F>` for the shift permutation — it should route through
+    /// `MLE::from_u32s` so the underlying storage is the compact `U32`
+    /// variant. This test guards against a regression that would
+    /// silently blow up peak memory for gadgets that pull in the shift
+    /// poly (contig_sort's shift=1 and prescr_perm's shift=0 identity),
+    /// each of which would otherwise cost 512 MiB at log_size=24.
+    #[test]
+    fn shift_poly_uses_u32_storage_not_field_vec() {
+        use crate::arithmetic::mat_poly::mle::MLEStorage;
+        use crate::prover::structs::polynomial::get_or_insert_shift_poly;
+        use either::Either;
+
+        let mut prover = setup();
+        // Small log_size for a fast test; the storage-variant choice is
+        // independent of log_size (as long as it's < 32).
+        let log_size = 4;
+        let shift = 1;
+        let is_right = true;
+        let tracked = get_or_insert_shift_poly(&mut prover, log_size, shift, is_right);
+        let id = match tracked.id_or_const() {
+            Either::Left(id) => id,
+            Either::Right(_) => panic!("shift poly is not a constant"),
+        };
+        let tracker = prover.tracker_rc.borrow();
+        let mle = tracker
+            .mat_mv_poly(id)
+            .expect("shift poly should be materialized in the tracker");
+
+        assert!(
+            matches!(mle.storage(), MLEStorage::U32 { .. }),
+            "shift poly storage must be U32 (compact), not Field (would be \
+             8× larger and route to the slow Field-vec MSM path)"
+        );
+
+        // Semantic contract: for `is_right = true, shift = 1`, the
+        // evaluations must be `[N-1, 0, 1, 2, …, N-2]`.
+        let n = 1usize << log_size;
+        let expected: Vec<F> = (0..n)
+            .map(|i| F::from(((i + n - 1) % n) as u64))
+            .collect();
+        assert_eq!(mle.evaluations(), expected);
+    }
 }

@@ -10,6 +10,7 @@ use std::{
     fmt::{self, Formatter},
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
     slice::IterMut,
+    sync::Arc,
 };
 
 /// The evaluation-table backing for an [`MLE`]. `Field` is the traditional
@@ -89,6 +90,91 @@ pub enum MLEStorage<F: Field> {
         runs: Vec<(F, u32)>,
         inner_num_vars: usize,
     },
+    /// **Sparse** storage: a single `default` value plus a list of index →
+    /// value overrides for slots that differ from the default. Beats the
+    /// dense native forms whenever `|exceptions|` is small compared to
+    /// `2^inner_num_vars`, and beats [`Self::Rle`] whenever the exceptions
+    /// are scattered enough to blow past `RLE_MAX_RUNS` runs (a 1M-slot
+    /// column with 1000 scattered non-zero entries → 2000 runs → RLE bails,
+    /// but Sparse fits it in `32 + 1000 * 36 ≈ 36 KB` vs the 1 MB (U8) or
+    /// 4 MB (U32) dense form).
+    ///
+    /// Invariants (enforced by [`Self::new_sparse`]):
+    /// - `exceptions` is sorted by index in strictly ascending order
+    /// - Every `exceptions[k].0 < 1 << inner_num_vars`
+    /// - Every `exceptions[k].1 != default` (matching-default entries drop
+    ///   into the implicit dense region)
+    ///
+    /// `lift(i)` is O(log |exceptions|) via binary search on the sorted
+    /// index vector.
+    Sparse {
+        default: F,
+        exceptions: Vec<(u32, F)>,
+        inner_num_vars: usize,
+    },
+    /// Native-typed sparse analog of [`Self::Sparse`] for `u8`-shaped
+    /// columns. `default` + a sorted list of `(index, value)` overrides;
+    /// invariants and semantics identical to [`Self::Sparse`], but the
+    /// per-exception cost drops from `4 + sizeof(F) ≈ 36 B` (BN254) to
+    /// `4 + 1 = 5 B` and the default drops from `sizeof(F)` to 1 B. Emitted
+    /// by [`Self::detect_redundancy`] when the input was `U8` storage.
+    SparseU8 {
+        default: u8,
+        exceptions: Vec<(u32, u8)>,
+        inner_num_vars: usize,
+    },
+    /// Native-typed sparse analog of [`Self::Sparse`] for `u32`-shaped
+    /// columns. Per-exception cost `4 + 4 = 8 B` vs `36 B` for the F-valued
+    /// form.
+    SparseU32 {
+        default: u32,
+        exceptions: Vec<(u32, u32)>,
+        inner_num_vars: usize,
+    },
+    /// Native-typed sparse analog of [`Self::Sparse`] for `u64`-shaped
+    /// columns. Per-exception cost `4 + 8 = 12 B` vs `36 B` for the F-valued
+    /// form.
+    SparseU64 {
+        default: u64,
+        exceptions: Vec<(u32, u64)>,
+        inner_num_vars: usize,
+    },
+    /// Lazy inverse-shifted: represents `1/(source(x) - shift)` at every
+    /// hypercube point. Storage cost is one `Arc<MLE<F>>` pointer + one `F`
+    /// + one `usize`, regardless of `inner_num_vars` — the whole point
+    /// versus materialising a dense `2^inner_num_vars` `Vec<F>`.
+    ///
+    /// Used specifically for `keyed_sumcheck`'s `phat = 1/(p - γ)` MLEs
+    /// after the PCS commitment has been produced. The commitment is what
+    /// the verifier consumes; the dense evaluation vector is only needed
+    /// for the commit itself and for sumcheck's round-0 fold. Sumcheck
+    /// automatically streams any non-`Field` storage via `storage().lift(i)`
+    /// (see `piop/sum_check/prover.rs:135-168`), so once phat is
+    /// re-registered with this lazy backing after commit, the ~2 GiB per
+    /// side of dense phat storage evaporates.
+    ///
+    /// Semantic contract: `lift(i) = (source.storage().lift(i) - shift).inverse().unwrap_or(F::zero())`.
+    /// Callers are responsible for ensuring `source(x) - shift != 0` at
+    /// every point they read — `keyed_sumcheck` picks `shift = γ` as a
+    /// transcript-derived challenge, so the exceptional set has measure
+    /// zero over a random challenge and the fallback zero is only there
+    /// for safety.
+    LazyInverseShifted {
+        source: Arc<MLE<F>>,
+        shift: F,
+        inner_num_vars: usize,
+    },
+    /// Lazy inverse-shifted sum: represents
+    /// `1/(s1(x) - shift) + 1/(s2(x) - shift)` at every hypercube point.
+    /// Same storage / streaming rationale as [`Self::LazyInverseShifted`],
+    /// used for the paired keyed-sumcheck path
+    /// (`prove_generate_pair_subclaim`).
+    LazyInverseShiftedSum {
+        s1: Arc<MLE<F>>,
+        s2: Arc<MLE<F>>,
+        shift: F,
+        inner_num_vars: usize,
+    },
 }
 
 impl<F: Field> MLEStorage<F> {
@@ -131,6 +217,121 @@ impl<F: Field> MLEStorage<F> {
         }
         Some(Self::Rle {
             runs: merged,
+            inner_num_vars,
+        })
+    }
+
+    /// Construct a `Sparse` variant, enforcing the invariants. Sorts
+    /// `exceptions` by index (stable) and drops entries whose value equals
+    /// `default`; returns `None` if any index is out of range or any two
+    /// entries share the same index.
+    pub fn new_sparse(
+        default: F,
+        mut exceptions: Vec<(u32, F)>,
+        inner_num_vars: usize,
+    ) -> Option<Self> {
+        let inner_len = 1u64 << inner_num_vars;
+        // Drop no-op entries (value equals default) up front so callers can
+        // hand us a heuristically-collected vector without pre-filtering.
+        exceptions.retain(|(_, v)| *v != default);
+        // Sort by index; use a stable sort so a mid-caller that happens to
+        // hand us duplicates surfaces them below rather than picking the
+        // last-inserted arbitrarily.
+        exceptions.sort_by_key(|(idx, _)| *idx);
+        for w in exceptions.windows(2) {
+            if w[0].0 == w[1].0 {
+                return None; // duplicate index
+            }
+        }
+        if let Some((last_idx, _)) = exceptions.last() {
+            if (*last_idx as u64) >= inner_len {
+                return None; // out-of-range index
+            }
+        }
+        Some(Self::Sparse {
+            default,
+            exceptions,
+            inner_num_vars,
+        })
+    }
+
+    /// Construct a `SparseU8` variant, enforcing the same invariants as
+    /// [`Self::new_sparse`] but on native-typed data. Sorts and drops
+    /// default-equal exceptions; returns `None` on duplicate or
+    /// out-of-range indices.
+    pub fn new_sparse_u8(
+        default: u8,
+        mut exceptions: Vec<(u32, u8)>,
+        inner_num_vars: usize,
+    ) -> Option<Self> {
+        let inner_len = 1u64 << inner_num_vars;
+        exceptions.retain(|(_, v)| *v != default);
+        exceptions.sort_by_key(|(idx, _)| *idx);
+        for w in exceptions.windows(2) {
+            if w[0].0 == w[1].0 {
+                return None;
+            }
+        }
+        if let Some((last_idx, _)) = exceptions.last() {
+            if (*last_idx as u64) >= inner_len {
+                return None;
+            }
+        }
+        Some(Self::SparseU8 {
+            default,
+            exceptions,
+            inner_num_vars,
+        })
+    }
+
+    /// Construct a `SparseU32` variant. See [`Self::new_sparse_u8`].
+    pub fn new_sparse_u32(
+        default: u32,
+        mut exceptions: Vec<(u32, u32)>,
+        inner_num_vars: usize,
+    ) -> Option<Self> {
+        let inner_len = 1u64 << inner_num_vars;
+        exceptions.retain(|(_, v)| *v != default);
+        exceptions.sort_by_key(|(idx, _)| *idx);
+        for w in exceptions.windows(2) {
+            if w[0].0 == w[1].0 {
+                return None;
+            }
+        }
+        if let Some((last_idx, _)) = exceptions.last() {
+            if (*last_idx as u64) >= inner_len {
+                return None;
+            }
+        }
+        Some(Self::SparseU32 {
+            default,
+            exceptions,
+            inner_num_vars,
+        })
+    }
+
+    /// Construct a `SparseU64` variant. See [`Self::new_sparse_u8`].
+    pub fn new_sparse_u64(
+        default: u64,
+        mut exceptions: Vec<(u32, u64)>,
+        inner_num_vars: usize,
+    ) -> Option<Self> {
+        let inner_len = 1u64 << inner_num_vars;
+        exceptions.retain(|(_, v)| *v != default);
+        exceptions.sort_by_key(|(idx, _)| *idx);
+        for w in exceptions.windows(2) {
+            if w[0].0 == w[1].0 {
+                return None;
+            }
+        }
+        if let Some((last_idx, _)) = exceptions.last() {
+            if (*last_idx as u64) >= inner_len {
+                return None;
+            }
+        }
+        Some(Self::SparseU64 {
+            default,
+            exceptions,
             inner_num_vars,
         })
     }
@@ -211,6 +412,70 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                 counts.serialize_with_mode(&mut writer, compress)?;
                 (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
             }
+            Self::Sparse {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                7u8.serialize_with_mode(&mut writer, compress)?;
+                default.serialize_with_mode(&mut writer, compress)?;
+                // Same parallel-vec trick as Rle: reuse arkworks' Vec impl
+                // without wrapping the (u32, F) pair.
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<F> = exceptions.iter().map(|(_, v)| *v).collect();
+                indices.serialize_with_mode(&mut writer, compress)?;
+                values.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
+            Self::SparseU8 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                8u8.serialize_with_mode(&mut writer, compress)?;
+                default.serialize_with_mode(&mut writer, compress)?;
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u8> = exceptions.iter().map(|(_, v)| *v).collect();
+                indices.serialize_with_mode(&mut writer, compress)?;
+                values.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
+            Self::SparseU32 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                9u8.serialize_with_mode(&mut writer, compress)?;
+                default.serialize_with_mode(&mut writer, compress)?;
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u32> = exceptions.iter().map(|(_, v)| *v).collect();
+                indices.serialize_with_mode(&mut writer, compress)?;
+                values.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
+            Self::SparseU64 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                10u8.serialize_with_mode(&mut writer, compress)?;
+                default.serialize_with_mode(&mut writer, compress)?;
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u64> = exceptions.iter().map(|(_, v)| *v).collect();
+                indices.serialize_with_mode(&mut writer, compress)?;
+                values.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
+            // Lazy variants are internal-only: they live in the prover's
+            // materialized_polys map to make sumcheck stream the phat MLE,
+            // but they are NEVER part of any serialized artifact (the
+            // proof carries the phat commitment, not the phat MLE, and
+            // proving-key files carry base-table MLEs which are never
+            // lazy). If a caller ever hits this path, that indicates a
+            // bug (e.g. a lazy phat leaked into a serialization boundary).
+            Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => {
+                return Err(ark_serialize::SerializationError::NotEnoughSpace);
+            }
         }
         Ok(())
     }
@@ -256,6 +521,59 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                     + counts.serialized_size(compress)
                     + (*inner_num_vars as u64).serialized_size(compress)
             }
+            Self::Sparse {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<F> = exceptions.iter().map(|(_, v)| *v).collect();
+                default.serialized_size(compress)
+                    + indices.serialized_size(compress)
+                    + values.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
+            Self::SparseU8 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u8> = exceptions.iter().map(|(_, v)| *v).collect();
+                default.serialized_size(compress)
+                    + indices.serialized_size(compress)
+                    + values.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
+            Self::SparseU32 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u32> = exceptions.iter().map(|(_, v)| *v).collect();
+                default.serialized_size(compress)
+                    + indices.serialized_size(compress)
+                    + values.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
+            Self::SparseU64 {
+                default,
+                exceptions,
+                inner_num_vars,
+            } => {
+                let indices: Vec<u32> = exceptions.iter().map(|(i, _)| *i).collect();
+                let values: Vec<u64> = exceptions.iter().map(|(_, v)| *v).collect();
+                default.serialized_size(compress)
+                    + indices.serialized_size(compress)
+                    + values.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
+            // Lazy variants are non-serializable (see `serialize_with_mode`).
+            // Return 0 so `serialized_size` callers who *estimate* buffer
+            // capacity don't over-allocate; the actual serialize call will
+            // error before writing anything.
+            Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => 0,
         };
         1u8.serialized_size(compress) + payload
     }
@@ -275,6 +593,33 @@ impl<F: Field> Valid for MLEStorage<F> {
                     v.check()?;
                 }
                 Ok(())
+            }
+            Self::Sparse {
+                default,
+                exceptions,
+                ..
+            } => {
+                default.check()?;
+                for (_, v) in exceptions {
+                    v.check()?;
+                }
+                Ok(())
+            }
+            // Native-typed sparse: default and exception values are integer
+            // primitives with no Valid state to check.
+            Self::SparseU8 { .. } | Self::SparseU32 { .. } | Self::SparseU64 { .. } => Ok(()),
+            // Lazy variants: nothing to validate beyond what the source
+            // MLEs already validate on their own via their own `check`.
+            // Construction always goes through the keyed_sumcheck
+            // re-registration flow with proven-valid Arc<MLE> sources.
+            Self::LazyInverseShifted { source, shift, .. } => {
+                source.storage().check()?;
+                shift.check()
+            }
+            Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
+                s1.storage().check()?;
+                s2.storage().check()?;
+                shift.check()
             }
         }
     }
@@ -344,6 +689,70 @@ impl<F: Field> CanonicalDeserialize for MLEStorage<F> {
                     inner_num_vars: n,
                 })
             }
+            7 => {
+                let default = F::deserialize_with_mode(&mut reader, compress, validate)?;
+                let indices =
+                    Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let values = Vec::<F>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if indices.len() != values.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                let exceptions: Vec<(u32, F)> = indices.into_iter().zip(values).collect();
+                Ok(Self::Sparse {
+                    default,
+                    exceptions,
+                    inner_num_vars: n,
+                })
+            }
+            8 => {
+                let default = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+                let indices =
+                    Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let values = Vec::<u8>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if indices.len() != values.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                let exceptions: Vec<(u32, u8)> = indices.into_iter().zip(values).collect();
+                Ok(Self::SparseU8 {
+                    default,
+                    exceptions,
+                    inner_num_vars: n,
+                })
+            }
+            9 => {
+                let default = u32::deserialize_with_mode(&mut reader, compress, validate)?;
+                let indices =
+                    Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let values = Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if indices.len() != values.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                let exceptions: Vec<(u32, u32)> = indices.into_iter().zip(values).collect();
+                Ok(Self::SparseU32 {
+                    default,
+                    exceptions,
+                    inner_num_vars: n,
+                })
+            }
+            10 => {
+                let default = u64::deserialize_with_mode(&mut reader, compress, validate)?;
+                let indices =
+                    Vec::<u32>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let values = Vec::<u64>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if indices.len() != values.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                let exceptions: Vec<(u32, u64)> = indices.into_iter().zip(values).collect();
+                Ok(Self::SparseU64 {
+                    default,
+                    exceptions,
+                    inner_num_vars: n,
+                })
+            }
             _ => Err(ark_serialize::SerializationError::InvalidData),
         }
     }
@@ -362,7 +771,13 @@ impl<F: Field> MLEStorage<F> {
             | Self::U32 { inner_num_vars, .. }
             | Self::U64 { inner_num_vars, .. }
             | Self::Constant { inner_num_vars, .. }
-            | Self::Rle { inner_num_vars, .. } => *inner_num_vars,
+            | Self::Rle { inner_num_vars, .. }
+            | Self::Sparse { inner_num_vars, .. }
+            | Self::SparseU8 { inner_num_vars, .. }
+            | Self::SparseU32 { inner_num_vars, .. }
+            | Self::SparseU64 { inner_num_vars, .. }
+            | Self::LazyInverseShifted { inner_num_vars, .. }
+            | Self::LazyInverseShiftedSum { inner_num_vars, .. } => *inner_num_vars,
         }
     }
 
@@ -408,6 +823,88 @@ impl<F: Field> MLEStorage<F> {
                     1usize << self.inner_num_vars()
                 );
             }
+            Self::Sparse {
+                default,
+                exceptions,
+                ..
+            } => {
+                // Binary search on the sorted exception indices; if `i`
+                // matches an exception key, return its value, else return
+                // the default.
+                let idx_u32 = i as u32;
+                match exceptions.binary_search_by_key(&idx_u32, |(k, _)| *k) {
+                    Ok(pos) => exceptions[pos].1,
+                    Err(_) => *default,
+                }
+            }
+            Self::SparseU8 {
+                default,
+                exceptions,
+                ..
+            } => {
+                let idx_u32 = i as u32;
+                let byte = match exceptions.binary_search_by_key(&idx_u32, |(k, _)| *k) {
+                    Ok(pos) => exceptions[pos].1,
+                    Err(_) => *default,
+                };
+                F::from(byte as u64)
+            }
+            Self::SparseU32 {
+                default,
+                exceptions,
+                ..
+            } => {
+                let idx_u32 = i as u32;
+                let word = match exceptions.binary_search_by_key(&idx_u32, |(k, _)| *k) {
+                    Ok(pos) => exceptions[pos].1,
+                    Err(_) => *default,
+                };
+                F::from(word as u64)
+            }
+            Self::SparseU64 {
+                default,
+                exceptions,
+                ..
+            } => {
+                let idx_u32 = i as u32;
+                let word = match exceptions.binary_search_by_key(&idx_u32, |(k, _)| *k) {
+                    Ok(pos) => exceptions[pos].1,
+                    Err(_) => *default,
+                };
+                F::from(word)
+            }
+            // Lazy inverse: compute `(source(i) - shift)^{-1}` on demand.
+            // Fallback to zero on the measure-zero exceptional set — this
+            // preserves the arithmetic identity `phat · (source - shift) = 1`
+            // only when the shifted value is invertible; the keyed-sumcheck
+            // caller draws `shift = γ` from the transcript AFTER the source
+            // is committed, so hitting a zero is a soundness event we'd
+            // rather signal via a downstream check than crash here.
+            //
+            // Cycle `i` modulo the source's inner_len so we handle the
+            // virtual-padding case correctly: after `equalize_mat_poly_nv_to`
+            // bumps phat's outer nv, sumcheck reads phat at outer indices
+            // that exceed the source's inner_len, and the source's outer
+            // nv may have been snapshotted at a smaller value. The modulo
+            // matches how a bumped source would cyclically repeat its
+            // inner backing, so phat's readings stay consistent.
+            Self::LazyInverseShifted { source, shift, .. } => {
+                let src_storage = source.storage();
+                let idx = i % src_storage.inner_len();
+                let v = src_storage.lift(idx) - *shift;
+                v.inverse().unwrap_or_else(F::zero)
+            }
+            // Lazy inverse-shifted sum: same on-demand shape, two inversions,
+            // same modulo-cycle handling per source.
+            Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
+                let s1_storage = s1.storage();
+                let s2_storage = s2.storage();
+                let idx1 = i % s1_storage.inner_len();
+                let idx2 = i % s2_storage.inner_len();
+                let v1 = (s1_storage.lift(idx1) - *shift).inverse().unwrap_or_else(F::zero);
+                let v2 = (s2_storage.lift(idx2) - *shift).inverse().unwrap_or_else(F::zero);
+                v1 + v2
+            }
         }
     }
 
@@ -421,9 +918,33 @@ impl<F: Field> MLEStorage<F> {
             Self::U32 { words, .. } => (words.len() as u64) * 4,
             Self::U64 { words, .. } => (words.len() as u64) * 8,
             Self::Constant { .. } => std::mem::size_of::<F>() as u64,
+            // Lazy variants own only pointer(s) + scalar + usize; the source
+            // MLE's heap is accounted for at its own tracker entry, so we
+            // don't double-count it here. The reported size is what the
+            // lazy backing itself adds beyond the source Arc pointer word.
+            Self::LazyInverseShifted { .. } => {
+                (std::mem::size_of::<Arc<MLE<F>>>() as u64)
+                    + (std::mem::size_of::<F>() as u64)
+                    + (std::mem::size_of::<usize>() as u64)
+            }
+            Self::LazyInverseShiftedSum { .. } => {
+                2 * (std::mem::size_of::<Arc<MLE<F>>>() as u64)
+                    + (std::mem::size_of::<F>() as u64)
+                    + (std::mem::size_of::<usize>() as u64)
+            }
             Self::Rle { runs, .. } => {
                 (runs.len() as u64) * ((std::mem::size_of::<F>() as u64) + 4)
             }
+            Self::Sparse {
+                exceptions, ..
+            } => {
+                // one F for default + (u32 index + F value) per exception.
+                (std::mem::size_of::<F>() as u64)
+                    + (exceptions.len() as u64) * (4 + std::mem::size_of::<F>() as u64)
+            }
+            Self::SparseU8 { exceptions, .. } => 1 + (exceptions.len() as u64) * (4 + 1),
+            Self::SparseU32 { exceptions, .. } => 4 + (exceptions.len() as u64) * (4 + 4),
+            Self::SparseU64 { exceptions, .. } => 8 + (exceptions.len() as u64) * (4 + 8),
         }
     }
 
@@ -456,7 +977,22 @@ impl<F: Field> MLEStorage<F> {
         F: ark_ff::PrimeField,
     {
         // Skip if already in a compact form — no faster representation exists.
-        if matches!(self, Self::Constant { .. } | Self::Rle { .. }) {
+        // Lazy variants are inherently symbolic and (a) don't benefit from RLE
+        // detection since their heap footprint is already O(1) plus a pointer
+        // to the source, and (b) attempting the run scan would trigger a full
+        // O(2^inner_nv) lift-per-slot pass which is the very allocation we're
+        // trying to avoid — so we bail early with the identity transform.
+        if matches!(
+            self,
+            Self::Constant { .. }
+                | Self::Rle { .. }
+                | Self::Sparse { .. }
+                | Self::SparseU8 { .. }
+                | Self::SparseU32 { .. }
+                | Self::SparseU64 { .. }
+                | Self::LazyInverseShifted { .. }
+                | Self::LazyInverseShiftedSum { .. }
+        ) {
             return self;
         }
         let inner_len = self.inner_len();
@@ -578,12 +1114,136 @@ impl<F: Field> MLEStorage<F> {
             Self::U64 { words, .. } => {
                 scan_runs_native(words.as_slice(), |x: u64| F::from(x), max_runs)
             }
-            // Constant/Rle already handled by the early-return above.
-            Self::Constant { .. } | Self::Rle { .. } => return self,
+            // Constant/Rle/Sparse* and Lazy* already handled by the early-return above.
+            Self::Constant { .. }
+            | Self::Rle { .. }
+            | Self::Sparse { .. }
+            | Self::SparseU8 { .. }
+            | Self::SparseU32 { .. }
+            | Self::SparseU64 { .. }
+            | Self::LazyInverseShifted { .. }
+            | Self::LazyInverseShiftedSum { .. } => return self,
         };
         let Some(runs) = runs else {
-            // Too many runs — keep dense storage.
-            return self;
+            // Rle bailed (too many runs). Try scattered-sparse detection
+            // before giving up. The mode candidate is the value at slot 0
+            // — cheap to read and catches the common "mostly-zero mask
+            // with a handful of set slots" case. We emit Sparse only if
+            // the compact form is at least 2× smaller than the current
+            // dense storage (otherwise compression overhead + slower lift
+            // aren't worth it).
+            //
+            // For native-typed inputs we emit the matching native-typed
+            // sparse variant — SparseU8 for U8 input, SparseU32 for U32,
+            // etc. — so the per-exception cost stays 5/8/12 B rather
+            // than paying the 36 B F-valued entry cost. For Field / Bit
+            // inputs we emit the F-valued `Sparse` variant.
+            //
+            // Generic helper: `default_val` + native scan → returns
+            // `Some((default, exceptions))` if under the exception cap,
+            // `None` if we should keep dense storage.
+            fn scan_sparse_native<S: Copy + Eq>(
+                slice: &[S],
+                max_exceptions: usize,
+            ) -> Option<(S, Vec<(u32, S)>)> {
+                if slice.is_empty() {
+                    return None;
+                }
+                let default = slice[0];
+                let mut exceptions: Vec<(u32, S)> = Vec::new();
+                for (i, &v) in slice.iter().enumerate() {
+                    if v != default {
+                        if exceptions.len() >= max_exceptions {
+                            return None;
+                        }
+                        exceptions.push((i as u32, v));
+                    }
+                }
+                Some((default, exceptions))
+            }
+            let current_bytes = self.heap_bytes();
+            let out = match &self {
+                Self::Field(m) => {
+                    let f_bytes = std::mem::size_of::<F>() as u64;
+                    let entry = 4u64 + f_bytes;
+                    let max_ex =
+                        (current_bytes.saturating_sub(f_bytes) / (2 * entry)) as usize;
+                    if max_ex == 0 {
+                        return self;
+                    }
+                    scan_sparse_native(&m.evaluations, max_ex).and_then(|(d, ex)| {
+                        Self::new_sparse(d, ex, inner_nv)
+                    })
+                }
+                Self::Bit { bits, .. } => {
+                    // Bit has only 2 distinct values; if RLE bailed, we're
+                    // in an alternating pattern. Encode as F-valued Sparse
+                    // with default=F::zero()/one() picked to minimize
+                    // exceptions. Scan once to count set bits, pick the
+                    // smaller side as exceptions.
+                    let f_bytes = std::mem::size_of::<F>() as u64;
+                    let entry = 4u64 + f_bytes;
+                    let max_ex =
+                        (current_bytes.saturating_sub(f_bytes) / (2 * entry)) as usize;
+                    if max_ex == 0 {
+                        return self;
+                    }
+                    let mut set_count = 0usize;
+                    for i in 0..inner_len {
+                        if (bits[i >> 3] >> (i & 7)) & 1 == 1 {
+                            set_count += 1;
+                        }
+                    }
+                    let clear_count = inner_len - set_count;
+                    let (default, ex_val, ex_count) = if set_count <= clear_count {
+                        (F::zero(), F::one(), set_count)
+                    } else {
+                        (F::one(), F::zero(), clear_count)
+                    };
+                    if ex_count > max_ex {
+                        return self;
+                    }
+                    let mut exceptions: Vec<(u32, F)> = Vec::with_capacity(ex_count);
+                    for i in 0..inner_len {
+                        let bit_set = (bits[i >> 3] >> (i & 7)) & 1 == 1;
+                        let is_exception = if default.is_zero() { bit_set } else { !bit_set };
+                        if is_exception {
+                            exceptions.push((i as u32, ex_val));
+                        }
+                    }
+                    Self::new_sparse(default, exceptions, inner_nv)
+                }
+                Self::U8 { bytes, .. } => {
+                    let entry = 4u64 + 1u64;
+                    let max_ex = (current_bytes.saturating_sub(1) / (2 * entry)) as usize;
+                    if max_ex == 0 {
+                        return self;
+                    }
+                    scan_sparse_native(bytes.as_slice(), max_ex)
+                        .and_then(|(d, ex)| Self::new_sparse_u8(d, ex, inner_nv))
+                }
+                Self::U32 { words, .. } => {
+                    let entry = 4u64 + 4u64;
+                    let max_ex = (current_bytes.saturating_sub(4) / (2 * entry)) as usize;
+                    if max_ex == 0 {
+                        return self;
+                    }
+                    scan_sparse_native(words.as_slice(), max_ex)
+                        .and_then(|(d, ex)| Self::new_sparse_u32(d, ex, inner_nv))
+                }
+                Self::U64 { words, .. } => {
+                    let entry = 4u64 + 8u64;
+                    let max_ex = (current_bytes.saturating_sub(8) / (2 * entry)) as usize;
+                    if max_ex == 0 {
+                        return self;
+                    }
+                    scan_sparse_native(words.as_slice(), max_ex)
+                        .and_then(|(d, ex)| Self::new_sparse_u64(d, ex, inner_nv))
+                }
+                // Compact variants short-circuited above.
+                _ => None,
+            };
+            return out.unwrap_or(self);
         };
         // Single-run → Constant (cheaper storage, O(1) lift).
         if runs.len() == 1 {
@@ -647,6 +1307,58 @@ impl<F: Field> MLE<F> {
         }
     }
 
+    /// Wrap a source MLE in a lazy `1/(source - shift)` backing. The
+    /// returned MLE reports the same `num_vars` as `source` — including
+    /// any virtual padding — and, at every point `i`, evaluates to
+    /// `(source(i) - shift)^{-1}`. The heap footprint is one
+    /// `Arc<MLE<F>>` pointer + one `F` + one `usize`. Intended for the
+    /// keyed-sumcheck post-commit re-registration flow: commit the
+    /// dense phat once for the PCS, then swap in this lazy backing so
+    /// downstream sumcheck reads phat via the streaming path.
+    ///
+    /// Padding preservation matters: if `source` reports `num_vars() >
+    /// inner_num_vars()` (virtual padding via a set outer nv), the
+    /// returned lazy MLE mirrors that outer nv so downstream sumcheck
+    /// term-nv comparisons stay consistent with what a dense phat would
+    /// have looked like. The lazy `lift(i)` cycles `i` modulo the
+    /// source's inner_len — same semantics as the source itself does.
+    pub fn from_lazy_inverse_shifted(source: Arc<MLE<F>>, shift: F) -> Self {
+        let inner_num_vars = source.inner_num_vars();
+        let outer_num_vars = source.num_vars();
+        Self {
+            storage: MLEStorage::LazyInverseShifted {
+                source,
+                shift,
+                inner_num_vars,
+            },
+            nv: (outer_num_vars > inner_num_vars).then_some(outer_num_vars),
+        }
+    }
+
+    /// Lazy `1/(s1 - shift) + 1/(s2 - shift)` variant for the paired
+    /// keyed-sumcheck path. Both sources must share the same
+    /// `num_vars()` (including any outer padding); asserts in debug
+    /// builds. See [`Self::from_lazy_inverse_shifted`] for the memory
+    /// and padding rationale.
+    pub fn from_lazy_inverse_shifted_sum(s1: Arc<MLE<F>>, s2: Arc<MLE<F>>, shift: F) -> Self {
+        let inner_num_vars = s1.inner_num_vars();
+        let outer_num_vars = s1.num_vars();
+        debug_assert_eq!(
+            outer_num_vars,
+            s2.num_vars(),
+            "lazy_inv_sum: source MLEs must share num_vars"
+        );
+        Self {
+            storage: MLEStorage::LazyInverseShiftedSum {
+                s1,
+                s2,
+                shift,
+                inner_num_vars,
+            },
+            nv: (outer_num_vars > inner_num_vars).then_some(outer_num_vars),
+        }
+    }
+
     /// Construct an `MLE` from a bit-packed backing (little-endian per byte).
     /// `bits.len()` must equal `(1 << inner_num_vars).div_ceil(8)`. If
     /// `num_vars > inner_num_vars`, the inner hypercube is virtually repeated
@@ -661,6 +1373,28 @@ impl<F: Field> MLE<F> {
             expected,
             num_vars
         );
+        // Bit storage packs at 8-bit (2^3-slot) granularity — a single byte
+        // already holds 8 slots. For `num_vars < 3` the target hypercube
+        // is smaller than one byte, so we can't represent it as `Bit`
+        // (the inner_num_vars would be inflated to 3, breaking the
+        // encoder contract of `num_vars() == num_vars`). Fall back to
+        // Field storage in that regime — the cost is at most 8 field
+        // elements, negligible for the tiny-table use case that
+        // triggers this path (e.g. TPC-H nation at test scale).
+        if num_vars < 3 {
+            let len = 1usize << num_vars;
+            let evals: Vec<F> = (0..len)
+                .map(|i| {
+                    let byte = bits.get(i >> 3).copied().unwrap_or(0);
+                    if (byte >> (i & 7)) & 1 == 1 {
+                        F::one()
+                    } else {
+                        F::zero()
+                    }
+                })
+                .collect();
+            return Self::from_evaluations_vec(num_vars, evals);
+        }
         let inner_bits = bits.len() * 8;
         let inner_num_vars = inner_bits.checked_ilog2().unwrap_or_default() as usize;
         Self {
@@ -712,30 +1446,127 @@ impl<F: Field> MLE<F> {
     /// Semantics unchanged: `mle[i]` returns `F::one()` for `i < active_len`
     /// and `F::zero()` for `active_len <= i < 1 << num_vars`, matching the
     /// prior `Bit`-backed construction bit-for-bit.
+    /// Build a `Sparse`-storage `MLE` directly from a `(default, exceptions)`
+    /// pair. Sorts and de-noises `exceptions` (drops entries equal to
+    /// `default`) via [`MLEStorage::new_sparse`]. Returns `None` if any
+    /// exception index is out of range or duplicates another.
+    ///
+    /// Callers that already know their column has structural sparsity —
+    /// e.g. an activator mask with a few holes, a computed selector poly
+    /// — get the compact form without paying the auto-detection cost.
+    pub fn from_sparse(
+        default: F,
+        exceptions: Vec<(u32, F)>,
+        num_vars: usize,
+    ) -> Option<Self>
+    where
+        F: ark_ff::PrimeField,
+    {
+        Some(Self {
+            storage: MLEStorage::new_sparse(default, exceptions, num_vars)?,
+            nv: None,
+        })
+    }
+
+    /// Native-typed sparse constructor for `u8`-shaped columns. See
+    /// [`Self::from_sparse`] for the semantics.
+    pub fn from_sparse_u8(
+        default: u8,
+        exceptions: Vec<(u32, u8)>,
+        num_vars: usize,
+    ) -> Option<Self>
+    where
+        F: ark_ff::PrimeField,
+    {
+        Some(Self {
+            storage: MLEStorage::new_sparse_u8(default, exceptions, num_vars)?,
+            nv: None,
+        })
+    }
+
+    /// Native-typed sparse constructor for `u32`-shaped columns.
+    pub fn from_sparse_u32(
+        default: u32,
+        exceptions: Vec<(u32, u32)>,
+        num_vars: usize,
+    ) -> Option<Self>
+    where
+        F: ark_ff::PrimeField,
+    {
+        Some(Self {
+            storage: MLEStorage::new_sparse_u32(default, exceptions, num_vars)?,
+            nv: None,
+        })
+    }
+
+    /// Native-typed sparse constructor for `u64`-shaped columns.
+    pub fn from_sparse_u64(
+        default: u64,
+        exceptions: Vec<(u32, u64)>,
+        num_vars: usize,
+    ) -> Option<Self>
+    where
+        F: ark_ff::PrimeField,
+    {
+        Some(Self {
+            storage: MLEStorage::new_sparse_u64(default, exceptions, num_vars)?,
+            nv: None,
+        })
+    }
+
     pub fn from_prefix_activator(active_len: usize, num_vars: usize) -> Self {
+        Self::from_window_activator(0, active_len, num_vars)
+    }
+
+    /// Build a window activator MLE: `skip` zeros, followed by `active_len`
+    /// ones, followed by `total - skip - active_len` zeros, where
+    /// `total = 1 << num_vars`. The result is stored as a
+    /// [`MLEStorage::Constant`] (edge cases where the window is empty or
+    /// the whole domain) or a [`MLEStorage::Rle`] (2-run when `skip == 0`
+    /// or the window reaches the end, 3-run otherwise) — never a
+    /// full-size `Vec<F>`. Memory is O(1) regardless of `num_vars`.
+    pub fn from_window_activator(skip: usize, active_len: usize, num_vars: usize) -> Self {
         let len = 1usize << num_vars;
-        assert!(active_len <= len, "active_len {} > 2^num_vars {}", active_len, len);
+        // RLE run counts are u32; ensure `len` (and therefore any segment
+        // length ≤ `len`) fits without silent truncation. In practice all
+        // truth-table nv values are ≤ 24; this guards against future misuse.
+        assert!(
+            len <= u32::MAX as usize,
+            "from_window_activator: 2^num_vars {} exceeds u32::MAX; RLE run counts would truncate",
+            len
+        );
+        let end = skip.checked_add(active_len)
+            .expect("from_window_activator: skip + active_len overflows usize");
+        assert!(
+            end <= len,
+            "skip {} + active_len {} > 2^num_vars {}",
+            skip, active_len, len
+        );
         let storage = if active_len == 0 {
             MLEStorage::Constant {
                 value: F::zero(),
                 inner_num_vars: num_vars,
             }
-        } else if active_len == len {
+        } else if skip == 0 && active_len == len {
             MLEStorage::Constant {
                 value: F::one(),
                 inner_num_vars: num_vars,
             }
         } else {
-            // 2-run Rle: `active_len` ones, `len - active_len` zeros. The
-            // `new_rle` constructor validates the counts sum to `len`.
-            MLEStorage::<F>::new_rle(
-                vec![
-                    (F::one(), active_len as u32),
-                    (F::zero(), (len - active_len) as u32),
-                ],
-                num_vars,
-            )
-            .expect("prefix activator runs sum to inner_len by construction")
+            // Compose 2- or 3-run RLE from the non-empty segments.
+            // `new_rle` merges adjacent same-value runs and validates the
+            // counts sum to `len`.
+            let mut runs: Vec<(F, u32)> = Vec::with_capacity(3);
+            if skip > 0 {
+                runs.push((F::zero(), skip as u32));
+            }
+            runs.push((F::one(), active_len as u32));
+            let tail = len - end;
+            if tail > 0 {
+                runs.push((F::zero(), tail as u32));
+            }
+            MLEStorage::<F>::new_rle(runs, num_vars)
+                .expect("window activator runs sum to inner_len by construction")
         };
         Self { storage, nv: None }
     }
@@ -1187,10 +2018,18 @@ impl<F: Field> MLE<F> {
         }
         // Fast paths for the compact variants — they either KNOW they're
         // constant (Constant variant) or KNOW how many distinct runs they
-        // hold (Rle variant), avoiding an O(N) walk.
+        // hold (Rle variant), avoiding an O(N) walk. Lazy variants
+        // conservatively return false: the underlying source could in
+        // principle be constant, but checking would run 2^n inversions
+        // — exactly the O(2^n) cost we introduced lazy storage to
+        // avoid. A wrong `false` here can at worst prevent a small
+        // downstream optimisation; it can never cause a soundness error.
         match &self.storage {
             MLEStorage::Constant { .. } => return true,
             MLEStorage::Rle { runs, .. } => return runs.len() == 1,
+            MLEStorage::LazyInverseShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
+                return false;
+            }
             _ => {}
         }
         // For any other storage variant: fold via lift() to compare all inner points.
@@ -2070,6 +2909,56 @@ mod tests {
 
     // ── from_prefix_activator emits compact forms directly ─────────────
 
+    // ── from_bit_backing: preserves caller-declared num_vars ───────────
+
+    /// Regression: for `num_vars < 3` (targets smaller than one byte),
+    /// the resulting MLE must report `num_vars == the caller-declared value`,
+    /// not `log2(bits.len() * 8) = 3`. This was the source of the
+    /// `row-domain segment num_vars 3 != table log_vars 2` failure in the
+    /// arithmetization pass at TPC-H nation test scale (4-row tables).
+    #[test]
+    fn from_bit_backing_small_num_vars_reports_correct_num_vars() {
+        for nv in 0..=2 {
+            let byte_len = (1usize << nv).div_ceil(8).max(1);
+            let bits = vec![0u8; byte_len];
+            let mle = MLE::<Fr>::from_bit_backing(bits, nv);
+            assert_eq!(
+                mle.num_vars(),
+                nv,
+                "from_bit_backing(_, {}) must report num_vars=={}", nv, nv
+            );
+        }
+    }
+
+    /// Same, but with non-zero bits — verifies the fallback Field-storage
+    /// path preserves values, not just num_vars.
+    #[test]
+    fn from_bit_backing_small_num_vars_preserves_values() {
+        // nv=2, 4 slots: bits [1, 0, 1, 1] → byte 0b0000_1101 = 13
+        let mle = MLE::<Fr>::from_bit_backing(vec![0b0000_1101], 2);
+        assert_eq!(mle.num_vars(), 2);
+        let evals: Vec<Fr> = mle.evaluations();
+        assert_eq!(
+            evals,
+            vec![Fr::one(), Fr::zero(), Fr::one(), Fr::one()],
+            "small-nv bit backing must preserve bit values in the Field fallback"
+        );
+    }
+
+    /// The `num_vars >= 3` path (one or more full bytes) still uses Bit
+    /// storage — the small-nv fallback only kicks in below the byte
+    /// granularity boundary.
+    #[test]
+    fn from_bit_backing_medium_num_vars_uses_bit_storage() {
+        // nv=3, 8 slots, one byte: still Bit storage.
+        let mle = MLE::<Fr>::from_bit_backing(vec![0b0000_1101], 3);
+        assert_eq!(mle.num_vars(), 3);
+        assert!(
+            matches!(mle.storage(), MLEStorage::Bit { .. }),
+            "num_vars >= 3 should retain the compact Bit storage variant"
+        );
+    }
+
     #[test]
     fn from_prefix_activator_zero_active_len_is_constant_zero() {
         let mle = MLE::<Fr>::from_prefix_activator(0, 6);
@@ -2125,5 +3014,433 @@ mod tests {
         assert!(bytes < 200, "prefix activator storage should be tiny, got {bytes} bytes");
         // A packed-bit alternative would be (1 << 24) / 8 = 2 MiB.
         assert!(bytes * 20_000 < (1u64 << nv) / 8);
+    }
+
+    // ── from_window_activator: [0 x skip, 1 x active, 0 x tail] ─────────
+
+    #[test]
+    fn from_window_activator_zero_active_is_constant_zero() {
+        let mle = MLE::<Fr>::from_window_activator(3, 0, 6);
+        match mle.storage() {
+            MLEStorage::Constant { value, inner_num_vars } => {
+                assert!(value.is_zero());
+                assert_eq!(*inner_num_vars, 6);
+            }
+            _ => panic!("expected Constant(0)"),
+        }
+    }
+
+    #[test]
+    fn from_window_activator_full_active_is_constant_one() {
+        let n = 5;
+        let mle = MLE::<Fr>::from_window_activator(0, 1 << n, n);
+        match mle.storage() {
+            MLEStorage::Constant { value, inner_num_vars } => {
+                assert!(value.is_one());
+                assert_eq!(*inner_num_vars, n);
+            }
+            _ => panic!("expected Constant(1)"),
+        }
+    }
+
+    #[test]
+    fn from_window_activator_prefix_shape_is_two_run_rle() {
+        // skip=0, active=5 in an 8-slot domain → 2-run [(1, 5), (0, 3)].
+        let mle = MLE::<Fr>::from_window_activator(0, 5, 3);
+        match mle.storage() {
+            MLEStorage::Rle { runs, inner_num_vars } => {
+                assert_eq!(*inner_num_vars, 3);
+                assert_eq!(runs.len(), 2);
+                assert_eq!(runs[0], (Fr::one(), 5));
+                assert_eq!(runs[1], (Fr::zero(), 3));
+            }
+            _ => panic!("expected 2-run Rle"),
+        }
+    }
+
+    #[test]
+    fn from_window_activator_suffix_shape_is_two_run_rle() {
+        // skip=3, active=5 in an 8-slot domain (window reaches end) →
+        // 2-run [(0, 3), (1, 5)].
+        let mle = MLE::<Fr>::from_window_activator(3, 5, 3);
+        match mle.storage() {
+            MLEStorage::Rle { runs, inner_num_vars } => {
+                assert_eq!(*inner_num_vars, 3);
+                assert_eq!(runs.len(), 2);
+                assert_eq!(runs[0], (Fr::zero(), 3));
+                assert_eq!(runs[1], (Fr::one(), 5));
+            }
+            _ => panic!("expected 2-run Rle"),
+        }
+    }
+
+    #[test]
+    fn from_window_activator_middle_is_three_run_rle() {
+        // skip=2, active=3 in an 8-slot domain → 3-run
+        // [(0, 2), (1, 3), (0, 3)].
+        let mle = MLE::<Fr>::from_window_activator(2, 3, 3);
+        match mle.storage() {
+            MLEStorage::Rle { runs, inner_num_vars } => {
+                assert_eq!(*inner_num_vars, 3);
+                assert_eq!(runs.len(), 3);
+                assert_eq!(runs[0], (Fr::zero(), 2));
+                assert_eq!(runs[1], (Fr::one(), 3));
+                assert_eq!(runs[2], (Fr::zero(), 3));
+            }
+            _ => panic!("expected 3-run Rle"),
+        }
+        // Semantic contract: the lifted evaluations exactly match the window.
+        let expected: Vec<Fr> = (0..8)
+            .map(|i| if i >= 2 && i < 5 { Fr::one() } else { Fr::zero() })
+            .collect();
+        assert_eq!(mle.evaluations(), expected);
+    }
+
+    #[test]
+    fn from_window_activator_large_nv_stays_tiny() {
+        // Char-domain-scale window: nv=24 (16.7M slots), a 1M-slot active
+        // window in the middle. Storage must remain O(runs) — a full
+        // Field `Vec<F>` would be 512 MiB on BN254.
+        let nv = 24;
+        let skip = 100_000;
+        let active_len = 1_000_000;
+        let mle = MLE::<Fr>::from_window_activator(skip, active_len, nv);
+        let bytes = mle.storage().heap_bytes();
+        // 3 runs × (size_of::<Fr> + size_of::<u32>) ≈ 3 × 36 = 108 bytes on BN254.
+        assert!(bytes < 300, "window activator storage should be tiny, got {bytes} bytes");
+    }
+
+    // ── Sparse variant ────────────────────────────────────────────────
+
+    #[test]
+    fn sparse_lift_returns_default_and_exception_values() {
+        // 8-slot column: default 0, exceptions at indices 2 and 5 with
+        // values 42 and 99 respectively.
+        let storage = MLEStorage::<Fr>::new_sparse(
+            fr(0),
+            vec![(2, fr(42)), (5, fr(99))],
+            3,
+        )
+        .unwrap();
+        for i in 0..8 {
+            let want = match i {
+                2 => fr(42),
+                5 => fr(99),
+                _ => fr(0),
+            };
+            assert_eq!(storage.lift(i), want, "slot {i}");
+        }
+    }
+
+    #[test]
+    fn sparse_constructor_sorts_and_drops_default_valued_entries() {
+        // Callers may hand us an unsorted vector with a redundant entry
+        // (value equals default); the constructor should normalize it.
+        let storage = MLEStorage::<Fr>::new_sparse(
+            fr(0),
+            vec![(5, fr(99)), (2, fr(42)), (4, fr(0))], // (4, 0) is a no-op
+            3,
+        )
+        .unwrap();
+        if let MLEStorage::Sparse { exceptions, .. } = &storage {
+            assert_eq!(*exceptions, vec![(2, fr(42)), (5, fr(99))]);
+        } else {
+            panic!("expected Sparse variant");
+        }
+    }
+
+    #[test]
+    fn sparse_constructor_rejects_duplicate_indices() {
+        let out = MLEStorage::<Fr>::new_sparse(
+            fr(0),
+            vec![(2, fr(1)), (2, fr(2))],
+            3,
+        );
+        assert!(out.is_none(), "duplicate indices should be rejected");
+    }
+
+    #[test]
+    fn sparse_constructor_rejects_out_of_range_index() {
+        // inner_len = 8, so index 8 is out of range.
+        let out = MLEStorage::<Fr>::new_sparse(
+            fr(0),
+            vec![(8, fr(1))],
+            3,
+        );
+        assert!(out.is_none(), "out-of-range index should be rejected");
+    }
+
+    #[test]
+    fn sparse_serialize_roundtrip() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+
+        let storage = MLEStorage::<Fr>::new_sparse(
+            fr(7),
+            vec![(1, fr(11)), (4, fr(13)), (9, fr(17))],
+            4,
+        )
+        .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        storage.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+        let round: MLEStorage<Fr> =
+            MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+        assert!(round == storage, "sparse roundtrip mismatch");
+    }
+
+    #[test]
+    fn sparse_matches_field_evaluations() {
+        // Materializing a Sparse MLE must yield the same evals as building
+        // the equivalent dense Field MLE from a Vec<F>.
+        let nv = 5;
+        let inner_len = 1usize << nv;
+        let mut dense = vec![fr(3); inner_len];
+        dense[7] = fr(100);
+        dense[19] = fr(200);
+        dense[31] = fr(300);
+
+        let sparse = MLE::<Fr>::from_sparse(
+            fr(3),
+            vec![(7, fr(100)), (19, fr(200)), (31, fr(300))],
+            nv,
+        )
+        .unwrap();
+        assert_eq!(sparse.evaluations(), dense);
+    }
+
+    #[test]
+    fn detect_redundancy_finds_sparse_from_field_storage() {
+        // Field-storage input (values that don't fit in u64 — anything past
+        // the u64 range) should collapse to the F-valued `Sparse` variant.
+        // Same "scattered with dominant mode" shape as the native-typed
+        // variants' tests: ~300 alternating transitions between two values,
+        // enough to blow past RLE_MAX_RUNS = 256.
+        let nv = 16;
+        let inner_len = 1usize << nv;
+        // Pick values that force Field storage (past u64 range) so
+        // `compressed()` doesn't reclassify to a smaller variant.
+        let a: Fr = fr(7);
+        let b: Fr = -fr(1); // MODULUS - 1, a 254-bit scalar
+        let mut evals = vec![a; inner_len];
+        for i in 0usize..300 {
+            if !i.is_multiple_of(2) {
+                evals[i] = b;
+            }
+        }
+        let dense = MLEStorage::<Fr>::Field(
+            DenseMultilinearExtension::from_evaluations_vec(nv, evals),
+        );
+        let compressed = dense.detect_redundancy();
+        match compressed {
+            MLEStorage::Sparse { default, exceptions, .. } => {
+                assert_eq!(default, a);
+                assert!(
+                    !exceptions.is_empty() && exceptions.len() < 200,
+                    "sparse exceptions in expected range, got {}",
+                    exceptions.len()
+                );
+            }
+            _ => panic!("expected Field → Sparse compression for scattered data"),
+        }
+    }
+
+    #[test]
+    fn detect_redundancy_keeps_dense_when_no_dominant_mode() {
+        // Genuinely dense: every slot different. Sparse detection should
+        // give up (exceptions to mode > threshold) and return self unchanged.
+        let nv = 10;
+        let inner_len = 1usize << nv;
+        let words: Vec<u32> = (0..inner_len as u32).collect();
+        let dense = MLEStorage::<Fr>::U32 {
+            words,
+            inner_num_vars: nv,
+        };
+        let compressed = dense.detect_redundancy();
+        assert!(
+            matches!(compressed, MLEStorage::U32 { .. }),
+            "genuinely dense storage must stay dense"
+        );
+    }
+
+    #[test]
+    fn sparse_heap_bytes_beats_dense_for_scattered_columns() {
+        // 2^20-slot column with 100 exceptions to a default value.
+        let nv = 20;
+        let sparse = MLE::<Fr>::from_sparse(
+            fr(0),
+            (0..100).map(|i| (i * 1000, fr(i as u64 + 1))).collect(),
+            nv,
+        )
+        .unwrap();
+        let sparse_bytes = sparse.storage().heap_bytes();
+        // 32 (default F) + 100 * (4 + 32) = 3632 bytes.
+        assert!(sparse_bytes < 4_000, "sparse should be ~3.6 KB, got {sparse_bytes}");
+        // A dense Field alternative would be 2^20 * 32 = 32 MiB.
+        assert!(sparse_bytes * 8_000 < (1u64 << nv) * 32);
+    }
+
+    // ── Native-typed sparse variants (SparseU8 / SparseU32 / SparseU64) ────
+
+    #[test]
+    fn sparse_u8_lift_matches_dense_u8_field_evaluations() {
+        // 32-slot U8 column: default 7, exceptions at indices 3, 11, 20.
+        let nv = 5;
+        let inner_len = 1usize << nv;
+        let mut dense = vec![7u8; inner_len];
+        dense[3] = 100;
+        dense[11] = 200;
+        dense[20] = 250;
+        let mle = MLE::<Fr>::from_sparse_u8(
+            7u8,
+            vec![(3, 100), (11, 200), (20, 250)],
+            nv,
+        )
+        .unwrap();
+        let want: Vec<Fr> = dense.iter().map(|b| fr(*b as u64)).collect();
+        assert_eq!(mle.evaluations(), want);
+    }
+
+    #[test]
+    fn sparse_u32_lift_matches_dense() {
+        let nv = 4;
+        let inner_len = 1usize << nv;
+        let mut dense = vec![42u32; inner_len];
+        dense[5] = 1_000_000;
+        let mle = MLE::<Fr>::from_sparse_u32(42u32, vec![(5, 1_000_000)], nv).unwrap();
+        let want: Vec<Fr> = dense.iter().map(|w| fr(*w as u64)).collect();
+        assert_eq!(mle.evaluations(), want);
+    }
+
+    #[test]
+    fn sparse_u64_lift_matches_dense() {
+        let nv = 3;
+        let inner_len = 1usize << nv;
+        let mut dense = vec![u64::MAX; inner_len];
+        dense[0] = 0;
+        dense[7] = u64::MAX - 1;
+        let mle = MLE::<Fr>::from_sparse_u64(
+            u64::MAX,
+            vec![(0, 0), (7, u64::MAX - 1)],
+            nv,
+        )
+        .unwrap();
+        let want: Vec<Fr> = dense.iter().map(|w| Fr::from(*w)).collect();
+        assert_eq!(mle.evaluations(), want);
+    }
+
+    #[test]
+    fn sparse_u8_serialize_roundtrip() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+
+        let storage = MLEStorage::<Fr>::new_sparse_u8(
+            5u8,
+            vec![(1, 100), (3, 200)],
+            3,
+        )
+        .unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        storage.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+        let round: MLEStorage<Fr> =
+            MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+        assert!(round == storage, "sparse_u8 roundtrip mismatch");
+    }
+
+    #[test]
+    fn sparse_u32_and_u64_serialize_roundtrip() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+
+        let s32 = MLEStorage::<Fr>::new_sparse_u32(9u32, vec![(2, 4_000_000_000u32)], 3).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        s32.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+        let r32: MLEStorage<Fr> =
+            MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+        assert!(r32 == s32);
+
+        let s64 = MLEStorage::<Fr>::new_sparse_u64(1u64, vec![(0, u64::MAX)], 2).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        s64.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+        let r64: MLEStorage<Fr> =
+            MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+        assert!(r64 == s64);
+    }
+
+    #[test]
+    fn detect_redundancy_emits_native_typed_sparse_for_u8_input() {
+        // Same alternating pattern as the F-valued Sparse test, but U8
+        // input — we expect SparseU8 out, not Sparse (F).
+        let nv = 16;
+        let inner_len = 1usize << nv;
+        let mut bytes: Vec<u8> = vec![7u8; inner_len];
+        for i in 0usize..300 {
+            if !i.is_multiple_of(2) {
+                bytes[i] = 42;
+            }
+        }
+        let dense = MLEStorage::<Fr>::U8 {
+            bytes,
+            inner_num_vars: nv,
+        };
+        let compressed = dense.detect_redundancy();
+        match compressed {
+            MLEStorage::SparseU8 { default, exceptions, .. } => {
+                assert_eq!(default, 7u8);
+                assert!(
+                    !exceptions.is_empty() && exceptions.len() < 200,
+                    "sparse_u8 exceptions in expected range, got {}",
+                    exceptions.len()
+                );
+            }
+            other => panic!(
+                "expected SparseU8 for U8 input, got variant with inner_num_vars={}",
+                other.inner_num_vars()
+            ),
+        }
+    }
+
+    #[test]
+    fn detect_redundancy_emits_sparse_u32_for_u32_input() {
+        let nv = 16;
+        let inner_len = 1usize << nv;
+        let mut words: Vec<u32> = vec![7u32; inner_len];
+        for i in 0usize..300 {
+            if !i.is_multiple_of(2) {
+                words[i] = 42;
+            }
+        }
+        let dense = MLEStorage::<Fr>::U32 {
+            words,
+            inner_num_vars: nv,
+        };
+        let compressed = dense.detect_redundancy();
+        assert!(
+            matches!(compressed, MLEStorage::SparseU32 { .. }),
+            "U32 input should emit SparseU32"
+        );
+    }
+
+    #[test]
+    fn native_typed_sparse_beats_f_valued_sparse_on_heap_bytes() {
+        // For a u8 column with 100 exceptions, SparseU8 stores
+        // 1 + 100 * (4 + 1) = 501 bytes, vs F-valued Sparse at
+        // 32 + 100 * (4 + 32) = 3632 bytes — 7× tighter.
+        let nv = 20;
+        let sparse_u8 = MLE::<Fr>::from_sparse_u8(
+            0u8,
+            (0..100).map(|i| (i * 1000, (i as u8) + 1)).collect(),
+            nv,
+        )
+        .unwrap();
+        let sparse_f = MLE::<Fr>::from_sparse(
+            fr(0),
+            (0..100).map(|i| (i * 1000, fr(i as u64 + 1))).collect(),
+            nv,
+        )
+        .unwrap();
+        let u8_bytes = sparse_u8.storage().heap_bytes();
+        let f_bytes = sparse_f.storage().heap_bytes();
+        assert!(u8_bytes < 600, "SparseU8 should be ~500 B, got {u8_bytes}");
+        assert!(
+            u8_bytes * 5 < f_bytes,
+            "SparseU8 should be ≥5× smaller than Sparse(F): u8={u8_bytes}, f={f_bytes}"
+        );
     }
 }
