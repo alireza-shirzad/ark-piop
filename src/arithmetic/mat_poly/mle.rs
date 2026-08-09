@@ -139,6 +139,40 @@ pub enum MLEStorage<F: Field> {
         exceptions: Vec<(u32, u64)>,
         inner_num_vars: usize,
     },
+    /// Packed unsigned-decimal storage for TPC-H `Decimal128` columns
+    /// (`l_extendedprice`, `l_discount`, `l_tax`, `o_totalprice`, etc.).
+    /// Each row's 128-bit magnitude is split across parallel `high`/`low`
+    /// `u64` vectors — 16 B per row versus 32 B for the `Field` form on
+    /// BN254 / BLS12-381 — and the commit path can reuse the existing
+    /// `msm_u64` small-scalar Pippenger twice (one call on `low`, one on
+    /// `high` scaled by `2^64`) with no new MSM port.
+    ///
+    /// `scale` is the fixed-point exponent from the source Arrow
+    /// `Decimal128(precision, scale)` metadata; it is carried alongside
+    /// the payload so decoders can reconstruct the original decimal, but
+    /// is NOT baked into the polynomial value or the commitment — the
+    /// commitment is over the raw 128-bit magnitude only.
+    ///
+    /// Invariants:
+    /// - `high.len() == low.len()`
+    /// - `high.len() == 1 << inner_num_vars`
+    ///
+    /// `lift(i)` reassembles the 128-bit magnitude as
+    /// `((high[i] as u128) << 64) | (low[i] as u128)` and lifts to `F`
+    /// via `F::from_le_bytes_mod_order(&value.to_le_bytes())` — the same
+    /// `Field`-generic path the eager encoder used before this variant
+    /// existed, so results are bit-identical.
+    ///
+    /// Only unsigned 128-bit values fit this variant. Signed decimals
+    /// (a rare TPC-H case: negative deltas) must be sign-peeked at
+    /// ingest and fall back to the eager `Field` path if any row is
+    /// negative — see `tt-arithmetic/src/encoding/primitives.rs`.
+    PackedDecimal {
+        high: Vec<u64>,
+        low: Vec<u64>,
+        scale: u8,
+        inner_num_vars: usize,
+    },
     /// Lazy inverse-shifted: represents `1/(source(x) - shift)` at every
     /// hypercube point. Storage cost is one `Arc<MLE<F>>` pointer + one `F`
     /// + one `usize`, regardless of `inner_num_vars` — the whole point
@@ -335,6 +369,29 @@ impl<F: Field> MLEStorage<F> {
             inner_num_vars,
         })
     }
+
+    /// Construct a `PackedDecimal` variant, enforcing the length invariants.
+    /// Returns `None` if `high.len() != low.len()` or if the length doesn't
+    /// match `1 << inner_num_vars`.
+    pub fn new_packed_decimal(
+        high: Vec<u64>,
+        low: Vec<u64>,
+        scale: u8,
+        inner_num_vars: usize,
+    ) -> Option<Self> {
+        if high.len() != low.len() {
+            return None;
+        }
+        if high.len() != (1usize << inner_num_vars) {
+            return None;
+        }
+        Some(Self::PackedDecimal {
+            high,
+            low,
+            scale,
+            inner_num_vars,
+        })
+    }
 }
 
 impl<F: Field> Default for MLEStorage<F> {
@@ -466,6 +523,18 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                 values.serialize_with_mode(&mut writer, compress)?;
                 (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
             }
+            Self::PackedDecimal {
+                high,
+                low,
+                scale,
+                inner_num_vars,
+            } => {
+                11u8.serialize_with_mode(&mut writer, compress)?;
+                high.serialize_with_mode(&mut writer, compress)?;
+                low.serialize_with_mode(&mut writer, compress)?;
+                scale.serialize_with_mode(&mut writer, compress)?;
+                (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
+            }
             // Lazy variants are internal-only: they live in the prover's
             // materialized_polys map to make sumcheck stream the phat MLE,
             // but they are NEVER part of any serialized artifact (the
@@ -569,6 +638,17 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                     + values.serialized_size(compress)
                     + (*inner_num_vars as u64).serialized_size(compress)
             }
+            Self::PackedDecimal {
+                high,
+                low,
+                scale,
+                inner_num_vars,
+            } => {
+                high.serialized_size(compress)
+                    + low.serialized_size(compress)
+                    + scale.serialized_size(compress)
+                    + (*inner_num_vars as u64).serialized_size(compress)
+            }
             // Lazy variants are non-serializable (see `serialize_with_mode`).
             // Return 0 so `serialized_size` callers who *estimate* buffer
             // capacity don't over-allocate; the actual serialize call will
@@ -608,6 +688,15 @@ impl<F: Field> Valid for MLEStorage<F> {
             // Native-typed sparse: default and exception values are integer
             // primitives with no Valid state to check.
             Self::SparseU8 { .. } | Self::SparseU32 { .. } | Self::SparseU64 { .. } => Ok(()),
+            // Packed decimal: two u64 vectors of equal length; the length
+            // invariant is a constructor-only concern, but we still verify
+            // it here so deserialized values that violate it fail loudly.
+            Self::PackedDecimal { high, low, .. } => {
+                if high.len() != low.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                Ok(())
+            }
             // Lazy variants: nothing to validate beyond what the source
             // MLEs already validate on their own via their own `check`.
             // Construction always goes through the keyed_sumcheck
@@ -753,6 +842,21 @@ impl<F: Field> CanonicalDeserialize for MLEStorage<F> {
                     inner_num_vars: n,
                 })
             }
+            11 => {
+                let high = Vec::<u64>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let low = Vec::<u64>::deserialize_with_mode(&mut reader, compress, validate)?;
+                let scale = u8::deserialize_with_mode(&mut reader, compress, validate)?;
+                let n = u64::deserialize_with_mode(&mut reader, compress, validate)? as usize;
+                if high.len() != low.len() {
+                    return Err(ark_serialize::SerializationError::InvalidData);
+                }
+                Ok(Self::PackedDecimal {
+                    high,
+                    low,
+                    scale,
+                    inner_num_vars: n,
+                })
+            }
             _ => Err(ark_serialize::SerializationError::InvalidData),
         }
     }
@@ -776,6 +880,7 @@ impl<F: Field> MLEStorage<F> {
             | Self::SparseU8 { inner_num_vars, .. }
             | Self::SparseU32 { inner_num_vars, .. }
             | Self::SparseU64 { inner_num_vars, .. }
+            | Self::PackedDecimal { inner_num_vars, .. }
             | Self::LazyInverseShifted { inner_num_vars, .. }
             | Self::LazyInverseShiftedSum { inner_num_vars, .. } => *inner_num_vars,
         }
@@ -873,6 +978,19 @@ impl<F: Field> MLEStorage<F> {
                 };
                 F::from(word)
             }
+            // Packed decimal: reassemble the 128-bit magnitude, then lift
+            // via `F::from(u128)` — which the `Field` trait already
+            // provides (see the `From<u128>` bound on the trait itself),
+            // matching the existing U8 / U32 / U64 lift arms above that
+            // rely on `F::from(uN)`. For unsigned 128-bit values this
+            // produces the same field element the eager
+            // `from_le_bytes_mod_order` path would have — the encoder
+            // rejects negatives at ingest so we're guaranteed the u128
+            // faithfully represents the source Decimal128 magnitude.
+            Self::PackedDecimal { high, low, .. } => {
+                let value: u128 = ((high[i] as u128) << 64) | (low[i] as u128);
+                F::from(value)
+            }
             // Lazy inverse: compute `(source(i) - shift)^{-1}` on demand.
             // Fallback to zero on the measure-zero exceptional set — this
             // preserves the arithmetic identity `phat · (source - shift) = 1`
@@ -945,6 +1063,12 @@ impl<F: Field> MLEStorage<F> {
             Self::SparseU8 { exceptions, .. } => 1 + (exceptions.len() as u64) * (4 + 1),
             Self::SparseU32 { exceptions, .. } => 4 + (exceptions.len() as u64) * (4 + 4),
             Self::SparseU64 { exceptions, .. } => 8 + (exceptions.len() as u64) * (4 + 8),
+            // Packed decimal: two parallel `Vec<u64>` at 8 B each per row,
+            // plus a 1-B scale byte. This is the point of the variant —
+            // 16 B/row on-heap where the `Field` form would carry 32.
+            Self::PackedDecimal { high, low, .. } => {
+                (high.len() as u64) * 8 + (low.len() as u64) * 8 + 1
+            }
         }
     }
 
@@ -990,6 +1114,12 @@ impl<F: Field> MLEStorage<F> {
                 | Self::SparseU8 { .. }
                 | Self::SparseU32 { .. }
                 | Self::SparseU64 { .. }
+                // Packed decimal short-circuits like the Sparse* variants:
+                // an RLE scan over 128-bit values would pay `F::from(u128)`
+                // per run (~100 ns/call — see comment below at "Native
+                // comparison"), and the storage is already tight at 16 B/row.
+                // Same rationale as the SparseU64 skip.
+                | Self::PackedDecimal { .. }
                 | Self::LazyInverseShifted { .. }
                 | Self::LazyInverseShiftedSum { .. }
         ) {
@@ -1114,13 +1244,15 @@ impl<F: Field> MLEStorage<F> {
             Self::U64 { words, .. } => {
                 scan_runs_native(words.as_slice(), |x: u64| F::from(x), max_runs)
             }
-            // Constant/Rle/Sparse* and Lazy* already handled by the early-return above.
+            // Constant/Rle/Sparse*/PackedDecimal and Lazy* already handled
+            // by the early-return above.
             Self::Constant { .. }
             | Self::Rle { .. }
             | Self::Sparse { .. }
             | Self::SparseU8 { .. }
             | Self::SparseU32 { .. }
             | Self::SparseU64 { .. }
+            | Self::PackedDecimal { .. }
             | Self::LazyInverseShifted { .. }
             | Self::LazyInverseShiftedSum { .. } => return self,
         };
@@ -1621,6 +1753,45 @@ impl<F: Field> MLE<F> {
         Self {
             storage: MLEStorage::U64 {
                 words,
+                inner_num_vars,
+            },
+            nv: (num_vars > inner_num_vars).then_some(num_vars),
+        }
+    }
+
+    /// Build an MLE from an unsigned 128-bit column, stored as parallel
+    /// `high` / `low` `u64` vectors (`value[i] = (high[i] << 64) | low[i]`).
+    /// This is the constructor for [`MLEStorage::PackedDecimal`]; see that
+    /// variant's docstring for the storage contract and commit-path
+    /// treatment.
+    ///
+    /// Requires `high.len() == low.len() <= 2^num_vars` and both to have
+    /// power-of-two length. Panics otherwise (matches the assertion style
+    /// of the neighbouring `from_u{8,32,64}s` constructors).
+    pub fn from_packed_decimal(
+        high: Vec<u64>,
+        low: Vec<u64>,
+        scale: u8,
+        num_vars: usize,
+    ) -> Self {
+        assert!(
+            high.len() == low.len(),
+            "packed-decimal backing high/low length mismatch: {} vs {}",
+            high.len(),
+            low.len()
+        );
+        assert!(
+            high.len() <= (1usize << num_vars),
+            "packed-decimal backing len {} > 2^num_vars {}",
+            high.len(),
+            1usize << num_vars
+        );
+        let inner_num_vars = high.len().checked_ilog2().unwrap_or_default() as usize;
+        Self {
+            storage: MLEStorage::PackedDecimal {
+                high,
+                low,
+                scale,
                 inner_num_vars,
             },
             nv: (num_vars > inner_num_vars).then_some(num_vars),
@@ -3342,6 +3513,47 @@ mod tests {
         let round: MLEStorage<Fr> =
             MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
         assert!(round == storage, "sparse_u8 roundtrip mismatch");
+    }
+
+    #[test]
+    fn packed_decimal_lift_matches_field() {
+        // Every u128 value's `PackedDecimal` lift must equal the value the
+        // eager `Field` path would have produced from the same u128 via
+        // `F::from(u128)`. Both paths run the same `From<u128>` blanket
+        // impl on `Field`, so the fields end up bit-identical for
+        // unsigned magnitudes.
+        let nv = 3;
+        let inner_len = 1usize << nv;
+        let values: Vec<u128> = (0..inner_len as u128)
+            .map(|i| (i.wrapping_mul(0x1234_5678_9ABC_DEF0_u128)).wrapping_add(u64::MAX as u128))
+            .collect();
+        let high: Vec<u64> = values.iter().map(|v| (*v >> 64) as u64).collect();
+        let low: Vec<u64> = values.iter().map(|v| *v as u64).collect();
+        let mle = MLE::<Fr>::from_packed_decimal(high, low, 2, nv);
+        let want: Vec<Fr> = values.iter().map(|v| Fr::from(*v)).collect();
+        assert_eq!(mle.evaluations(), want);
+    }
+
+    #[test]
+    fn packed_decimal_serialize_roundtrip() {
+        use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+
+        let nv = 2;
+        let high = vec![0u64, 1, u64::MAX, 0xDEAD_BEEF_u64];
+        let low = vec![u64::MAX, 0, 42, 0xCAFE_BABE_u64];
+        let storage = MLEStorage::<Fr>::new_packed_decimal(high, low, 2, nv).unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        storage.serialize_with_mode(&mut buf, Compress::Yes).unwrap();
+        let round: MLEStorage<Fr> =
+            MLEStorage::deserialize_with_mode(&buf[..], Compress::Yes, Validate::Yes).unwrap();
+        assert!(round == storage, "packed_decimal roundtrip mismatch");
+    }
+
+    #[test]
+    fn packed_decimal_new_rejects_length_mismatch() {
+        // Constructor invariant: `high.len() == low.len() == 1 << nv`.
+        assert!(MLEStorage::<Fr>::new_packed_decimal(vec![0u64], vec![0u64, 1], 0, 1).is_none());
+        assert!(MLEStorage::<Fr>::new_packed_decimal(vec![0u64], vec![0u64], 0, 2).is_none());
     }
 
     #[test]

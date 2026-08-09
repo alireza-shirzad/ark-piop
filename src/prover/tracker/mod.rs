@@ -343,6 +343,9 @@ where
                     crate::arithmetic::mat_poly::mle::MLEStorage::SparseU8 { .. } => "sparseU8",
                     crate::arithmetic::mat_poly::mle::MLEStorage::SparseU32 { .. } => "sparseU32",
                     crate::arithmetic::mat_poly::mle::MLEStorage::SparseU64 { .. } => "sparseU64",
+                    crate::arithmetic::mat_poly::mle::MLEStorage::PackedDecimal { .. } => {
+                        "dec128"
+                    }
                     crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShifted { .. } => {
                         "lazy_inv"
                     }

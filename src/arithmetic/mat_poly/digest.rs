@@ -24,6 +24,7 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
     let mut sparse_u8_bytes: Vec<u8> = Vec::new();
     let mut sparse_u32_bytes: Vec<u8> = Vec::new();
     let mut sparse_u64_bytes: Vec<u8> = Vec::new();
+    let mut packed_decimal_bytes: Vec<u8> = Vec::new();
     let (tag, byte_slice): (u8, &[u8]) = match mle.storage() {
         MLEStorage::Field(inner) => {
             let evals = &inner.evaluations;
@@ -157,6 +158,36 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
             };
             rle_bytes.extend_from_slice(shift_bs);
             (11, rle_bytes.as_slice())
+        }
+        MLEStorage::PackedDecimal {
+            high,
+            low,
+            scale,
+            ..
+        } => {
+            // Hash the two parallel `u64` vectors as raw little-endian
+            // bytes (matches how U32 / U64 vectors above get fingerprinted
+            // via `size_of_val`), plus the scale byte. Two `PackedDecimal`
+            // MLEs whose (high, low, scale) tuples all match hash to the
+            // same digest — matching the commitment-cache soundness
+            // contract at the top of this file.
+            packed_decimal_bytes.reserve(high.len() * 8 + low.len() * 8 + 1);
+            let hi_bs = unsafe {
+                std::slice::from_raw_parts(
+                    high.as_ptr() as *const u8,
+                    std::mem::size_of_val(&**high),
+                )
+            };
+            let lo_bs = unsafe {
+                std::slice::from_raw_parts(
+                    low.as_ptr() as *const u8,
+                    std::mem::size_of_val(&**low),
+                )
+            };
+            packed_decimal_bytes.extend_from_slice(hi_bs);
+            packed_decimal_bytes.extend_from_slice(lo_bs);
+            packed_decimal_bytes.push(*scale);
+            (13, packed_decimal_bytes.as_slice())
         }
         MLEStorage::LazyInverseShiftedSum { s1, s2, shift, .. } => {
             let s1_digest = mle_digest(s1.as_ref());

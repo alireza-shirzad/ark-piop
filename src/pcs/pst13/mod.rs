@@ -282,6 +282,21 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                     .iter()
                     .map(|(i, v)| (*i, E::ScalarField::from(*v))),
             ),
+            // Packed decimal: `value[i] = (high[i] << 64) | low[i]`, so
+            // `Σ bases[i] * value[i] = msm_u64(bases, low) + 2^64 * msm_u64(bases, high)`.
+            // Two small-scalar MSMs plus one scalar mul — exactly the win
+            // the variant exists for: no full-width Pippenger on
+            // 254-bit scalars, no dense `Vec<F>` materialization.
+            //
+            // `scale` is fixed-point metadata for decoding, not part of
+            // the polynomial value, so it does not participate in the
+            // commit — see the variant docstring in `mle.rs`.
+            MLEStorage::PackedDecimal { high, low, .. } => {
+                let lo_msm = small_scalar_msm::msm_u64::<E::G1>(bases, low);
+                let hi_msm = small_scalar_msm::msm_u64::<E::G1>(bases, high);
+                let two_pow_64 = E::ScalarField::from(1u128 << 64);
+                (lo_msm + hi_msm.mul(two_pow_64)).into_affine()
+            }
             // Lazy variants (introduced for keyed_sumcheck's phat MLEs) are
             // only ever *registered* to the tracker after their dense form
             // has already been committed and the dense form dropped. Hitting
