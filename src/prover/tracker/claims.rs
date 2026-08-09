@@ -227,9 +227,13 @@ where
             ))));
         }
 
-        let mut evals = vec![B::F::zero(); total];
-        evals[s..end].fill(B::F::one());
-        let mle = MLE::from_evaluations_vec(nv, evals);
+        // Store the [0…0, 1…1, 0…0] window as a 2- or 3-run RLE (or a
+        // Constant for degenerate windows). This replaces the prior
+        // `vec![F::zero(); 2^nv]` + `[s..end].fill(F::one())` construction
+        // which allocated a full-size Field `Vec<F>` (e.g. 512 MiB at
+        // nv=24). RLE storage is O(runs), so this activator's footprint
+        // is O(1) regardless of `nv`.
+        let mle = MLE::from_window_activator(s, n, nv);
         let poly_id = self.track_mat_mv_poly(mle);
 
         let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {

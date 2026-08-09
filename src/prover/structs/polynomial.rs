@@ -463,16 +463,41 @@ where
                 shift % domain_size
             };
 
-            let mut evals: Vec<B::F> = (0..domain_size).map(|i| B::F::from(i as u64)).collect();
-            if domain_size > 0 {
-                if is_right {
-                    evals.rotate_right(normalized_shift);
-                } else {
-                    evals.rotate_left(normalized_shift);
+            // Build the shift poly's evaluations as `Vec<u32>` and hand it
+            // to `MLE::from_u32s`. This routes through the compact
+            // `MLEStorage::U32` variant instead of the size-`2^log_size`
+            // Field-storage `Vec<F>` the old code allocated (512 MiB per
+            // shift poly at log_size=24). The u32-backed form is 8×
+            // smaller (64 MiB at log_size=24) and every downstream path
+            // (sumcheck lift, MSM commit, digest, serialize) already
+            // supports U32 storage natively.
+            //
+            // For log_size ≥ 32 the u32 counts would overflow, so fall
+            // back to the field path. In practice truth-table's log_size
+            // ceiling is ~30 (SRS-bounded), so this is a defensive guard,
+            // not a hot path.
+            let poly = if log_size < 32 {
+                let mut evals: Vec<u32> = (0..(domain_size as u32)).collect();
+                if domain_size > 0 {
+                    if is_right {
+                        evals.rotate_right(normalized_shift);
+                    } else {
+                        evals.rotate_left(normalized_shift);
+                    }
                 }
-            }
-
-            let poly = prover.track_mat_mv_poly(MLE::from_evaluations_vec(log_size, evals));
+                prover.track_mat_mv_poly(MLE::from_u32s(evals, log_size))
+            } else {
+                let mut evals: Vec<B::F> =
+                    (0..domain_size).map(|i| B::F::from(i as u64)).collect();
+                if domain_size > 0 {
+                    if is_right {
+                        evals.rotate_right(normalized_shift);
+                    } else {
+                        evals.rotate_left(normalized_shift);
+                    }
+                }
+                prover.track_mat_mv_poly(MLE::from_evaluations_vec(log_size, evals))
+            };
             prover.add_indexed_tracked_poly(label, poly.clone());
             poly
         }

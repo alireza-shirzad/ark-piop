@@ -23,8 +23,11 @@ where
         if poly.is_empty() {
             return HPVirtualPolynomial::new(1);
         }
-        let first_id = poly[0].1[0];
-        let nv: usize = self.mat_mv_poly(first_id).unwrap().num_vars();
+        // Use the tracker's registered nv rather than peeking at the first
+        // factor: with the empty-product convention for bare constants
+        // (see `add_scalar`), a term may have an empty factor list and
+        // `poly[0].1[0]` would panic.
+        let nv = self.poly_nv(id);
 
         // Optimize away linear combinations of committed polynomials by
         // materializing them into fresh MLEs (no new commitments). Identical

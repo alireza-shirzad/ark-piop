@@ -257,13 +257,39 @@ where
         self.track_virt_poly(new)
     }
 
-    /// Adds a scalar to a polynomial, returns a new virtual polynomial
-    // TODO: Can we do it more efficiently?
+    /// Adds a scalar to a polynomial, returns a new virtual polynomial.
+    ///
+    /// The scalar is represented as a bare-constant term `(c, vec![])` — the
+    /// empty factor list means "product of nothing = 1", so the term
+    /// contributes `c · 1 = c` at every hypercube point. This costs O(1)
+    /// memory instead of allocating a size-`2^n` `Vec<F>` of copies of `c`.
+    ///
+    /// Downstream compile (`optimize_linear_terms` at
+    /// `prover/tracker/compile/virt_poly.rs:74-79, 166-175`) folds all
+    /// constant-only terms into a single compact `nv=0` MLE that sumcheck
+    /// detects and multiplies straight into the round coefficient — no
+    /// `2^n`-sized workspace is ever built for the constant.
+    ///
+    /// If `c` is zero, this returns a virtual poly structurally equal to
+    /// the input (no constant term appended).
     pub fn add_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
-        let nv = self.poly_nv(poly_id);
-        let scalar_mle = MLE::from_evaluations_vec(nv, vec![c; 2_usize.pow(nv as u32)]);
-        let scalar_id = self.track_mat_mv_poly(scalar_mle);
-        self.add_polys(poly_id, scalar_id)
+        let mut new = VirtualPoly::new();
+        // Copy the input's terms verbatim — either the single-factor
+        // wrapper term for a materialized poly, or the whole term list
+        // for a virtual one. Mirrors the shape of `mul_scalar`.
+        match (self.mat_mv_poly(poly_id), self.virt_poly(poly_id)) {
+            (Some(_), None) => new.push((B::F::one(), vec![poly_id])),
+            (None, Some(p)) => new.extend_from_slice(p),
+            (None, None) => panic!("Unknown poly id {poly_id:?}"),
+            (Some(_), Some(_)) => unreachable!("id cannot be both material and virtual"),
+        }
+        if !c.is_zero() {
+            // Bare constant term. The empty product is 1, so this contributes
+            // exactly `c` at every point. See `optimize_linear_terms` for the
+            // consumer that folds these into a compact nv=0 MLE.
+            new.push((c, Vec::new()));
+        }
+        self.track_virt_poly(new)
     }
 
     /// Multiplies a polynomial by a scalar, returns a new virtual polynomial
