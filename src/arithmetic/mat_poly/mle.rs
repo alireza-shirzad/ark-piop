@@ -863,6 +863,31 @@ impl<F: Field> CanonicalDeserialize for MLEStorage<F> {
 }
 
 impl<F: Field> MLEStorage<F> {
+    /// Short label for this storage variant — the one that shows up in
+    /// tracker snapshots (`kind` field), sumcheck-decision logs, and the
+    /// bench dashboard's storage-kind aggregations. Treat these strings
+    /// as a wire format: renaming a variant here is a dashboard-breaking
+    /// change and needs a coordinated migration.
+    #[inline]
+    pub const fn kind_tag(&self) -> &'static str {
+        match self {
+            Self::Field(_) => "field",
+            Self::Bit { .. } => "bit",
+            Self::U8 { .. } => "u8",
+            Self::U32 { .. } => "u32",
+            Self::U64 { .. } => "u64",
+            Self::Constant { .. } => "const",
+            Self::Rle { .. } => "rle",
+            Self::Sparse { .. } => "sparse",
+            Self::SparseU8 { .. } => "sparseU8",
+            Self::SparseU32 { .. } => "sparseU32",
+            Self::SparseU64 { .. } => "sparseU64",
+            Self::PackedDecimal { .. } => "dec128",
+            Self::LazyInverseShifted { .. } => "lazy_inv",
+            Self::LazyInverseShiftedSum { .. } => "lazy_inv_sum",
+        }
+    }
+
     /// The `num_vars` of the *inner* (unpadded) hypercube. For `Field`, this is
     /// the inner `DenseMultilinearExtension::num_vars`; for compressed variants
     /// this is the tagged `inner_num_vars`.

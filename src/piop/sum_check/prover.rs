@@ -9,8 +9,9 @@ use ark_std::{cfg_into_iter, cfg_iter, cfg_iter_mut};
 use rayon::prelude::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
-use tracing::instrument;
+use tracing::{info, instrument};
 
 use crate::piop::structs::{MleSlot, SumcheckProverMessage, SumcheckProverState};
 
@@ -64,6 +65,100 @@ pub(crate) fn stream_policy() -> StreamPolicy {
     })
 }
 
+/// Wall-clock ms since the UNIX epoch. Duplicated from
+/// `prover::tracker::mod::wall_clock_ms` — kept local so this module
+/// doesn't need to reach up into the tracker just for a timestamp.
+fn wall_clock_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Emit one `sumcheck_stream_decision` event on the `bench_stats`
+/// tracing target with a JSON blob describing how `prover_init` picked
+/// its `stream_k`. Also echoes a `[TT_SUMCHECK]` line to stderr when
+/// `TT_MEMSNAP=1`, mirroring the tracker snapshot's fallback so a caller
+/// running only the plain subscriber still gets a paper trail. Called
+/// once per sumcheck invocation.
+fn emit_sumcheck_stream_decision<F: PrimeField>(
+    polynomial: &HPVirtualPolynomial<F>,
+    breakdown: &BTreeMap<&'static str, usize>,
+    policy_source: &'static str,
+    policy_raw_k: Option<usize>,
+    auto_would_pick_k: usize,
+    stream_k_effective: usize,
+) {
+    let n = polynomial.aux_info.num_variables;
+    let factors_total: usize = breakdown.values().sum();
+    let compressed_factor_count: usize = breakdown
+        .iter()
+        .filter(|(k, _)| **k != "field")
+        .map(|(_, v)| *v)
+        .sum();
+    let decision = if stream_k_effective == 0 {
+        "eager"
+    } else if stream_k_effective >= n {
+        "streaming"
+    } else {
+        "partial"
+    };
+    let by_kind_json: serde_json::Map<String, serde_json::Value> = breakdown
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), serde_json::json!(*v)))
+        .collect();
+    let payload = serde_json::json!({
+        "wall_ms": wall_clock_ms(),
+        "num_variables": n,
+        "max_degree": polynomial.aux_info.max_degree,
+        "factors_total": factors_total,
+        "factors_by_kind": by_kind_json,
+        "compressed_factor_count": compressed_factor_count,
+        "policy_source": policy_source,
+        "policy_raw_k": policy_raw_k,
+        "auto_would_pick_k": auto_would_pick_k,
+        "stream_k_effective": stream_k_effective,
+        "decision": decision,
+    });
+    info!(
+        target: "bench_stats",
+        sumcheck_stream_decision_json = %payload.to_string(),
+        "sumcheck_stream_decision"
+    );
+    if std::env::var("TT_MEMSNAP")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        eprintln!("[TT_SUMCHECK] {}", payload);
+    }
+}
+
+/// Walk the virtual poly's `flattened_ml_extensions`, dedup by Arc
+/// pointer, and bucket the unique MLEs by `MLEStorage::kind_tag()`.
+/// The same Arc reused across terms is counted once — that matches the
+/// lift-cost accounting used by `decide_auto_stream_k`.
+///
+/// Returned map is `BTreeMap` so iteration order is stable across runs,
+/// which keeps the emitted JSON stable enough for diff-friendly
+/// dashboards.
+pub(crate) fn factor_breakdown_by_kind<F: PrimeField>(
+    polynomial: &HPVirtualPolynomial<F>,
+) -> BTreeMap<&'static str, usize> {
+    use std::collections::HashSet;
+
+    let mut seen: HashSet<*const MLE<F>> = HashSet::new();
+    let mut by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for arc in &polynomial.flattened_ml_extensions {
+        let ptr = Arc::as_ptr(arc);
+        if !seen.insert(ptr) {
+            continue;
+        }
+        *by_kind.entry(arc.storage().kind_tag()).or_insert(0) += 1;
+    }
+    by_kind
+}
+
 /// Decide whether to enable full streaming (`k = num_variables`) or stay
 /// eager (`k = 0`) based on the virtual poly's factor mix.
 ///
@@ -81,47 +176,46 @@ pub(crate) fn stream_policy() -> StreamPolicy {
 /// compressed variants (Bit / U8 / U32 / U64 / Rle / Sparse / Constant
 /// / LazyInverseShifted*) count toward the savings side. Duplicate Arcs
 /// are counted once (same MLE reused across terms shares the lift).
+// Only reached from `#[cfg(test)]` code today — `prover_init` calls
+// `decide_auto_stream_k_from_breakdown` directly so it can share one
+// breakdown walk with the emitted decision event. Kept as the
+// convenience API tests use to answer "what would auto pick here?"
+// without having to build the breakdown map themselves.
+#[allow(dead_code)]
 pub(crate) fn decide_auto_stream_k<F: PrimeField>(
     polynomial: &HPVirtualPolynomial<F>,
 ) -> usize {
-    use crate::arithmetic::mat_poly::mle::MLEStorage;
-    use std::collections::HashSet;
+    let breakdown = factor_breakdown_by_kind(polynomial);
+    decide_auto_stream_k_from_breakdown(polynomial.aux_info.num_variables, &breakdown)
+}
 
-    let n = polynomial.aux_info.num_variables;
+/// The threshold-application half of the auto-decision, split out so
+/// `prover_init` can reuse a single `factor_breakdown_by_kind` walk for
+/// both the decision and the emitted event without walking twice.
+pub(crate) fn decide_auto_stream_k_from_breakdown(
+    num_variables: usize,
+    breakdown: &BTreeMap<&'static str, usize>,
+) -> usize {
     // A poly this small won't benefit even if fully compressed — the
     // eq_table + streaming compute dominates.
-    if n < 20 {
+    if num_variables < 20 {
         return 0;
     }
-    let field_size = std::mem::size_of::<F>();
-    let materialize_cost_per_factor = (1usize << n).saturating_mul(field_size);
-
-    let mut seen: HashSet<*const MLE<F>> = HashSet::new();
-    let mut compressed_factor_count = 0usize;
-    for arc in &polynomial.flattened_ml_extensions {
-        // Dedup by Arc pointer — the same MLE reused across terms only
-        // needs to be lifted once, so it should only count once toward
-        // "streaming savings".
-        let ptr = Arc::as_ptr(arc);
-        if !seen.insert(ptr) {
-            continue;
-        }
-        // Field storage always materializes; streaming can't help.
-        if !matches!(arc.storage(), MLEStorage::Field(_)) {
-            compressed_factor_count += 1;
-        }
-    }
-
+    // Anything that isn't `field` is a compressed factor whose lift can
+    // be avoided by streaming.
+    let compressed_factor_count: usize = breakdown
+        .iter()
+        .filter(|(k, _)| **k != "field")
+        .map(|(_, v)| *v)
+        .sum();
     // Enable streaming when at least `THRESHOLD_FACTORS` compressed
     // factors would each save an eq_table's worth of memory. This is
     // deliberately conservative — a single small compressed poly
     // isn't worth the wall-time overhead of streaming, but a handful
     // of them is.
     const THRESHOLD_FACTORS: usize = 4;
-    let total_savings = compressed_factor_count.saturating_mul(materialize_cost_per_factor);
-    let eq_table_cost = materialize_cost_per_factor;
-    if total_savings >= THRESHOLD_FACTORS.saturating_mul(eq_table_cost) {
-        n
+    if compressed_factor_count >= THRESHOLD_FACTORS {
+        num_variables
     } else {
         0
     }
@@ -141,12 +235,31 @@ impl<F: PrimeField> SumcheckProverState<F> {
     /// should call [`Self::prover_init_with_stream_k`] instead.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
-        let k = match stream_policy() {
-            StreamPolicy::Eager => 0,
-            StreamPolicy::Explicit(n) => n,
-            StreamPolicy::Auto => decide_auto_stream_k(polynomial),
+        // One walk of `flattened_ml_extensions`, shared between the auto
+        // decision (if we're in Auto mode) and the emitted diagnostic
+        // event — small polys have <10 factors, but this saves a second
+        // pass on the huge ones.
+        let breakdown = factor_breakdown_by_kind(polynomial);
+        let policy = stream_policy();
+        let n = polynomial.aux_info.num_variables;
+        let auto_would_pick_k = decide_auto_stream_k_from_breakdown(n, &breakdown);
+        let (policy_source, policy_raw_k, k_raw) = match policy {
+            StreamPolicy::Eager => ("eager", None, 0usize),
+            StreamPolicy::Explicit(n_raw) => ("explicit", Some(n_raw), n_raw),
+            StreamPolicy::Auto => ("auto", None, auto_would_pick_k),
         };
-        Self::prover_init_with_stream_k(polynomial, k)
+        // `prover_init_with_stream_k` caps at `num_variables`, so mirror
+        // that here for the decision log.
+        let k_effective = k_raw.min(n);
+        emit_sumcheck_stream_decision(
+            polynomial,
+            &breakdown,
+            policy_source,
+            policy_raw_k,
+            auto_would_pick_k,
+            k_effective,
+        );
+        Self::prover_init_with_stream_k(polynomial, k_raw)
     }
 
     /// Same as [`Self::prover_init`] but takes an explicit `stream_k`

@@ -331,28 +331,7 @@ where
             .map(|(id, mle)| {
                 let bytes = mle.storage().heap_bytes();
                 let nv = mle.num_vars();
-                let kind = match mle.storage() {
-                    crate::arithmetic::mat_poly::mle::MLEStorage::Field(_) => "field",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::Bit { .. } => "bit",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::U8 { .. } => "u8",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::U32 { .. } => "u32",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::U64 { .. } => "u64",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::Constant { .. } => "const",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::Rle { .. } => "rle",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::Sparse { .. } => "sparse",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU8 { .. } => "sparseU8",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU32 { .. } => "sparseU32",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::SparseU64 { .. } => "sparseU64",
-                    crate::arithmetic::mat_poly::mle::MLEStorage::PackedDecimal { .. } => {
-                        "dec128"
-                    }
-                    crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShifted { .. } => {
-                        "lazy_inv"
-                    }
-                    crate::arithmetic::mat_poly::mle::MLEStorage::LazyInverseShiftedSum {
-                        ..
-                    } => "lazy_inv_sum",
-                };
+                let kind = mle.storage().kind_tag();
                 (*id, bytes, nv, kind)
             })
             .collect();
