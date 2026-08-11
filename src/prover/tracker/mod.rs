@@ -7,6 +7,13 @@ mod core_impl;
 mod evaluation;
 mod tracking;
 
+// Re-exported for out-of-tree `bench_stats` subscribers, which need the
+// span-name → record-key table to turn the subproof spans into timings.
+pub use compile::{
+    SC_BUCKET_SPAN, SC_REGION_SPANS, SNARK_PROVER_SPAN_TARGET, SNARK_PROVER_TIMED_SPANS,
+    is_sc_region_span, snark_prover_timing_key,
+};
+
 use super::structs::{
     ProcessedSNARKPk, ProverState,
     proof::{PCSSubproof, SNARKProof},
@@ -65,24 +72,9 @@ use std::{
     rc::Rc,
     rc::Weak,
     sync::Arc,
-    time::Instant,
 };
+use ark_piop_macros::piop_stage;
 use tracing::{debug, info, instrument, trace};
-
-#[derive(Clone, Copy, Debug, Default)]
-#[allow(dead_code)]
-struct ReduceSumcheckDegreeStats {
-    max_degree: usize,
-    num_committed: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-#[allow(dead_code)]
-struct SumcheckInvocationStats {
-    degree: usize,
-    num_terms: usize,
-    prove_time_s: f64,
-}
 
 #[derive(Clone, Debug, Default)]
 struct ClaimStageStats {
@@ -92,42 +84,6 @@ struct ClaimStageStats {
     zero_checks_degree_distribution: Vec<usize>,
     sum_checks_count: usize,
     sum_checks_degree_distribution: Vec<usize>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-struct ScCompileTimingBreakdown {
-    nozerocheck_batching_time_s: f64,
-    first_batch_zerocheck_time_s: f64,
-    first_zerocheck_to_sumcheck_time_s: f64,
-    first_batch_sumcheck_time_s: f64,
-    reduce_sumcheck_time_s: f64,
-    second_batch_zerocheck_time_s: f64,
-    second_zerocheck_to_sumcheck_time_s: f64,
-    sumcheck_time_s: f64,
-}
-
-impl ScCompileTimingBreakdown {
-    fn add_assign(&mut self, other: &Self) {
-        self.nozerocheck_batching_time_s += other.nozerocheck_batching_time_s;
-        self.first_batch_zerocheck_time_s += other.first_batch_zerocheck_time_s;
-        self.first_zerocheck_to_sumcheck_time_s += other.first_zerocheck_to_sumcheck_time_s;
-        self.first_batch_sumcheck_time_s += other.first_batch_sumcheck_time_s;
-        self.reduce_sumcheck_time_s += other.reduce_sumcheck_time_s;
-        self.second_batch_zerocheck_time_s += other.second_batch_zerocheck_time_s;
-        self.second_zerocheck_to_sumcheck_time_s += other.second_zerocheck_to_sumcheck_time_s;
-        self.sumcheck_time_s += other.sumcheck_time_s;
-    }
-
-    fn total_time_s(&self) -> f64 {
-        self.nozerocheck_batching_time_s
-            + self.first_batch_zerocheck_time_s
-            + self.first_zerocheck_to_sumcheck_time_s
-            + self.first_batch_sumcheck_time_s
-            + self.reduce_sumcheck_time_s
-            + self.second_batch_zerocheck_time_s
-            + self.second_zerocheck_to_sumcheck_time_s
-            + self.sumcheck_time_s
-    }
 }
 
 impl ClaimStageStats {
@@ -148,18 +104,16 @@ impl ClaimStageStats {
     }
 }
 
-/// Per-bucket stats collected inside [`ProverTracker::run_bucket_pipeline`]
-/// and returned so the caller can emit both per-bucket events and their
-/// aggregate. Emission was pulled out of the bucket pipeline so multi-bucket
-/// compiles no longer silently overwrite each other in the bench-stats
-/// subscriber's flat field map.
+/// Per-bucket claim shape collected inside
+/// [`ProverTracker::run_bucket_pipeline`] and returned so the caller can emit
+/// both per-bucket events and their aggregate. Emission was pulled out of the
+/// bucket pipeline so multi-bucket compiles no longer silently overwrite each
+/// other in the bench-stats subscriber's flat field map.
 ///
-/// `wall_start_ms` / `wall_end_ms` are wall-clock timestamps (millis since
-/// UNIX epoch) captured at bucket entry/exit so the dashboard's memory
-/// tab can overlay bucket boundaries on the RSS-over-time curve emitted
-/// by the bench-stats subscriber. Wall-clock is the only reference frame
-/// shared with the sampler thread (which lives one crate over in
-/// `tt-exec`) without threading an extra clock through the API.
+/// Carries no timings and no wall-clock stamps: those come from the
+/// [`SC_BUCKET_SPAN`] / [`SC_REGION_SPANS`] spans and are filled in by the
+/// subscriber, which splices them into this struct's `sc_buckets_json`
+/// payload by `bucket_index`.
 #[derive(Clone, Debug, Default)]
 struct BucketRunStats {
     bucket_index: usize,
@@ -175,9 +129,6 @@ struct BucketRunStats {
     after_initial: ClaimStageStats,
     after_after_zero_batching: ClaimStageStats,
     after_after_sum_batching: ClaimStageStats,
-    timing_breakdown: ScCompileTimingBreakdown,
-    wall_start_ms: u64,
-    wall_end_ms: u64,
 }
 
 fn wall_clock_ms() -> u64 {
@@ -391,28 +342,15 @@ where
         }
     }
 
-    fn emit_sc_compile_timing_breakdown(&self, breakdown: ScCompileTimingBreakdown) {
-        info!(
-            target: "bench_stats",
-            snark_prover_piop_nozerocheck_batching_time_s = breakdown.nozerocheck_batching_time_s,
-            snark_prover_piop_first_batch_zerocheck_time_s = breakdown.first_batch_zerocheck_time_s,
-            snark_prover_piop_first_zerocheck_to_sumcheck_time_s = breakdown.first_zerocheck_to_sumcheck_time_s,
-            snark_prover_piop_first_batch_sumcheck_time_s = breakdown.first_batch_sumcheck_time_s,
-            snark_prover_piop_reduce_sumcheck_time_s = breakdown.reduce_sumcheck_time_s,
-            snark_prover_piop_second_batch_zerocheck_time_s = breakdown.second_batch_zerocheck_time_s,
-            snark_prover_piop_second_zerocheck_to_sumcheck_time_s = breakdown.second_zerocheck_to_sumcheck_time_s,
-            snark_prover_piop_sumcheck_time_s = breakdown.sumcheck_time_s,
-            "snark_prover_piop_breakdown"
-        );
-    }
-
-    /// Emit the traditional `sc_claim_counts` and `snark_prover_piop_breakdown`
-    /// events, aggregated across every bucket. Aggregation rules:
-    ///   * `ClaimStageStats` — sum counts and concat degree distributions
-    ///     across buckets. Preserves the shape the existing dashboard's
-    ///     Claims tab renders while making multi-bucket totals meaningful.
-    ///   * `ScCompileTimingBreakdown` — sum each field across buckets so
-    ///     the existing piop-breakdown pie shows total work.
+    /// Emit the traditional `sc_claim_counts` event, aggregated across every
+    /// bucket: sum counts and concat degree distributions. Preserves the
+    /// shape the existing dashboard's Claims tab renders while making
+    /// multi-bucket totals meaningful.
+    ///
+    /// The companion `snark_prover_piop_breakdown` event is gone — the
+    /// subscriber sums the [`SC_REGION_SPANS`] durations across buckets
+    /// itself and files them under the same
+    /// `snark_prover_piop_<region>_time_s` keys.
     fn emit_aggregate_bucket_stats(&self, buckets: &[BucketRunStats]) {
         if buckets.is_empty() {
             return;
@@ -424,7 +362,6 @@ where
         let mut after_initial = ClaimStageStats::default();
         let mut after_after_zero_batching = ClaimStageStats::default();
         let mut after_after_sum_batching = ClaimStageStats::default();
-        let mut agg_timing = ScCompileTimingBreakdown::default();
         for b in buckets {
             before_initial.merge(&b.before_initial);
             before_after_nozero_batching.merge(&b.before_after_nozero_batching);
@@ -433,7 +370,6 @@ where
             after_initial.merge(&b.after_initial);
             after_after_zero_batching.merge(&b.after_after_zero_batching);
             after_after_sum_batching.merge(&b.after_after_sum_batching);
-            agg_timing.add_assign(&b.timing_breakdown);
         }
         self.emit_claim_pipeline_stats(
             &before_initial,
@@ -444,18 +380,21 @@ where
             &after_after_zero_batching,
             &after_after_sum_batching,
         );
-        self.emit_sc_compile_timing_breakdown(agg_timing);
     }
 
-    /// Emit one `bench_stats` event carrying every bucket's stats as a
+    /// Emit one `bench_stats` event carrying every bucket's claim shape as a
     /// single JSON blob. tracing's field names must be static, so we can't
     /// stream one field per (bucket, metric); the JSON string is what the
     /// subscriber unpacks into a `buckets` array in the JSON record.
+    ///
+    /// Each entry's `timing` object and `wall_start_ms` / `wall_end_ms` are
+    /// added by the subscriber, which matches them up by `index` against the
+    /// [`SC_BUCKET_SPAN`] spans it timed. This event fires after every bucket
+    /// span has closed, so those durations are always already in hand.
     fn emit_per_bucket_stats(&self, buckets: &[BucketRunStats]) {
         let payload = serde_json::json!({
             "count": buckets.len(),
             "buckets": buckets.iter().map(|b| {
-                let total = b.timing_breakdown.total_time_s();
                 serde_json::json!({
                     "index": b.bucket_index,
                     "target_nv": b.target_nv,
@@ -464,19 +403,6 @@ where
                     "n_sumcheck_claims": b.n_sumcheck_claims,
                     "n_nozerocheck_claims": b.n_nozerocheck_claims,
                     "n_claims_total": b.n_zerocheck_claims + b.n_sumcheck_claims + b.n_nozerocheck_claims,
-                    "wall_start_ms": b.wall_start_ms,
-                    "wall_end_ms": b.wall_end_ms,
-                    "timing": {
-                        "nozerocheck_batching_time_s": b.timing_breakdown.nozerocheck_batching_time_s,
-                        "first_batch_zerocheck_time_s": b.timing_breakdown.first_batch_zerocheck_time_s,
-                        "first_zerocheck_to_sumcheck_time_s": b.timing_breakdown.first_zerocheck_to_sumcheck_time_s,
-                        "first_batch_sumcheck_time_s": b.timing_breakdown.first_batch_sumcheck_time_s,
-                        "reduce_sumcheck_time_s": b.timing_breakdown.reduce_sumcheck_time_s,
-                        "second_batch_zerocheck_time_s": b.timing_breakdown.second_batch_zerocheck_time_s,
-                        "second_zerocheck_to_sumcheck_time_s": b.timing_breakdown.second_zerocheck_to_sumcheck_time_s,
-                        "sumcheck_time_s": b.timing_breakdown.sumcheck_time_s,
-                        "total_time_s": total,
-                    },
                     "claims": {
                         "before_degree_reduction": {
                             "initial": Self::claim_stage_json(&b.before_initial),

@@ -153,6 +153,7 @@ dependencies = [
  "ark-bn254",
  "ark-ec",
  "ark-ff",
+ "ark-piop-macros",
  "ark-poly",
  "ark-serialize",
  "ark-std",
@@ -164,19 +165,25 @@ dependencies = [
  "indexmap",
  "itertools 0.14.0",
  "merlin",
- "proc-macro2",
  "proptest",
- "quote",
  "rayon",
  "serde",
  "serde_json",
- "syn 2.0.117",
  "thiserror",
  "tracing",
  "tracing-chrome",
  "tracing-flame",
  "tracing-subscriber",
  "tracing-tree",
+]
+
+[[package]]
+name = "ark-piop-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

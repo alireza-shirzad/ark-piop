@@ -3,6 +3,9 @@
 //! orchestrating `compile_sc_subproof`.
 
 use super::super::*;
+// Mid-function span wrapper for the bucket-pipeline stages; whole functions
+// use `#[piop_stage]` instead.
+use super::region;
 
 impl<B> ProverTracker<B>
 where
@@ -44,13 +47,7 @@ where
 
     #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip(self))]
-    fn perform_single_sumcheck(
-        &mut self,
-    ) -> SnarkResult<(
-        SumcheckProof<B::F>,
-        VPAuxInfo<B::F>,
-        SumcheckInvocationStats,
-    )> {
+    fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
         assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
 
         // Get the sumcheck claim polynomial id
@@ -71,15 +68,9 @@ where
             sc_avp.aux_info.num_variables
         );
         let sc_aux_info = sc_avp.aux_info.clone();
-        let sc_prove_started = Instant::now();
         let sc_proof = SumCheck::prove(&sc_avp, &mut self.state.transcript)?;
-        let sumcheck_stats = SumcheckInvocationStats {
-            degree: sc_avp.aux_info.max_degree,
-            num_terms: sc_avp.products.len(),
-            prove_time_s: sc_prove_started.elapsed().as_secs_f64(),
-        };
         let _ = self.add_mv_eval_claim(sumcheck_aggr_id, &sc_proof.point);
-        Ok((sc_proof, sc_aux_info, sumcheck_stats))
+        Ok((sc_proof, sc_aux_info))
     }
 
     /// Deterministically reduces the degree of the single aggregated sumcheck claim.
@@ -97,7 +88,7 @@ where
     ///
     /// The procedure is fully deterministic (stable ordering/tie-breaks) and
     /// mirrors verifier-side reduction.
-    fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<ReduceSumcheckDegreeStats> {
+    fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<()> {
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
             "reduce_sumcheck_dgree expects no zerocheck claims"
@@ -524,10 +515,7 @@ where
             "sumcheck degree reduction stats"
         );
 
-        Ok(ReduceSumcheckDegreeStats {
-            max_degree: self.config.sumcheck_term_degree_limit,
-            num_committed: committed_chunks,
-        })
+        Ok(())
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -652,7 +640,23 @@ where
     /// Does **not** emit any `bench_stats` events itself — emission is
     /// deferred to `compile_sc_subproof` so per-bucket runs don't overwrite
     /// each other in the subscriber's flat field map.
+    ///
+    /// Stage timings are not measured here either. Each stage runs inside a
+    /// [`SC_REGION_SPANS`] span nested in this function's [`SC_BUCKET_SPAN`]
+    /// span, and the subscriber derives every duration — per bucket and
+    /// summed across buckets — from those. `BucketRunStats` therefore
+    /// carries only claim shape, which the prover is the sole owner of.
     #[allow(clippy::type_complexity)]
+    #[instrument(
+        target = "bench_stats",
+        level = "info",
+        name = "sc_bucket",
+        skip(self, included_nvs)
+    )]
+    #[piop_stage(
+        snapshot_start = "bucket_{bucket_index}_start",
+        snapshot_end = "bucket_{bucket_index}_end"
+    )]
     fn run_bucket_pipeline(
         &mut self,
         target_nv: usize,
@@ -670,64 +674,50 @@ where
             n_zerocheck_claims: self.state.mv_pcs_substate.zero_check_claims.len(),
             n_sumcheck_claims: self.state.mv_pcs_substate.sum_check_claims.len(),
             n_nozerocheck_claims: self.state.mv_pcs_substate.no_zero_check_claims.len(),
-            wall_start_ms: super::super::wall_clock_ms(),
             ..Default::default()
         };
         stats.before_initial = self.current_claim_stage_stats();
-        let nozero_batching_started = Instant::now();
-        self.batch_nozero_check_claims(target_nv)?;
-        stats.timing_breakdown.nozerocheck_batching_time_s =
-            nozero_batching_started.elapsed().as_secs_f64();
+        region!(
+            "nozerocheck_batching",
+            self.batch_nozero_check_claims(target_nv)?
+        );
         stats.before_after_nozero_batching = self.current_claim_stage_stats();
-        let first_batch_zerocheck_started = Instant::now();
-        self.batch_z_check_claims()?;
-        stats.timing_breakdown.first_batch_zerocheck_time_s =
-            first_batch_zerocheck_started.elapsed().as_secs_f64();
+        region!("first_batch_zerocheck", self.batch_z_check_claims()?);
         stats.before_after_zero_batching = self.current_claim_stage_stats();
-        let first_zerocheck_to_sumcheck_started = Instant::now();
-        self.z_check_claim_to_s_check_claim(target_nv)?;
-        stats.timing_breakdown.first_zerocheck_to_sumcheck_time_s =
-            first_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
-        let first_batch_sumcheck_started = Instant::now();
-        let mut individual_sumcheck_claims = self.batch_s_check_claims()?;
-        stats.timing_breakdown.first_batch_sumcheck_time_s =
-            first_batch_sumcheck_started.elapsed().as_secs_f64();
+        region!(
+            "first_zerocheck_to_sumcheck",
+            self.z_check_claim_to_s_check_claim(target_nv)?
+        );
+        let mut individual_sumcheck_claims =
+            region!("first_batch_sumcheck", self.batch_s_check_claims()?);
         stats.before_after_sum_batching = self.current_claim_stage_stats();
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove in this bucket");
-            stats.wall_end_ms = super::super::wall_clock_ms();
             return Ok((None, individual_sumcheck_claims, stats));
         }
 
-        let reduce_sumcheck_started = Instant::now();
-        let _reduce_stats = self.reduce_sumcheck_dgree(target_nv)?;
-        stats.timing_breakdown.reduce_sumcheck_time_s =
-            reduce_sumcheck_started.elapsed().as_secs_f64();
+        region!("reduce_sumcheck", self.reduce_sumcheck_dgree(target_nv)?);
         stats.after_initial = self.current_claim_stage_stats();
 
-        let second_batch_zerocheck_started = Instant::now();
-        self.batch_z_check_claims()?;
-        stats.timing_breakdown.second_batch_zerocheck_time_s =
-            second_batch_zerocheck_started.elapsed().as_secs_f64();
+        region!("second_batch_zerocheck", self.batch_z_check_claims()?);
         stats.after_after_zero_batching = self.current_claim_stage_stats();
-        let second_zerocheck_to_sumcheck_started = Instant::now();
-        self.z_check_claim_to_s_check_claim(target_nv)?;
-        stats.timing_breakdown.second_zerocheck_to_sumcheck_time_s =
-            second_zerocheck_to_sumcheck_started.elapsed().as_secs_f64();
+        region!(
+            "second_zerocheck_to_sumcheck",
+            self.z_check_claim_to_s_check_claim(target_nv)?
+        );
+        // The second `batch_s_check_claims` has never been reported
+        // separately; it stays untimed so the breakdown keeps its shape.
         let additional_sumcheck_claims = self.batch_s_check_claims()?;
         stats.after_after_sum_batching = self.current_claim_stage_stats();
         for (id, claim) in additional_sumcheck_claims {
             individual_sumcheck_claims.entry(id).or_insert(claim);
         }
-        let sumcheck_started = Instant::now();
-        let (sc_proof, sc_aux_info, _sumcheck_stats) = self.perform_single_sumcheck()?;
-        stats.timing_breakdown.sumcheck_time_s = sumcheck_started.elapsed().as_secs_f64();
+        let (sc_proof, sc_aux_info) = region!("sumcheck", self.perform_single_sumcheck()?);
 
         // Drop the leftover aggregated sumcheck claim from state so the
         // next bucket iteration starts clean. (`perform_single_sumcheck`
         // reads but doesn't consume it; single-bucket mode never notices.)
         self.state.mv_pcs_substate.sum_check_claims.clear();
-        stats.wall_end_ms = super::super::wall_clock_ms();
 
         Ok((
             Some(SumcheckBucketProof::new(sc_proof, sc_aux_info)),
@@ -748,7 +738,20 @@ where
     /// Claims must be size-homogeneous within their virt-poly graph — the
     /// tracker enforces this implicitly since any attempted mixed-size
     /// evaluation trips MLE's `point.len() == num_vars()` assertion.
-    #[instrument(level = "debug", skip(self))]
+    ///
+    /// Spanned on the `bench_stats` target at `info` so the stats
+    /// subscriber can time it from span open→close and record
+    /// `snark_prover_piop_time_s`. It must be `info` (not `debug` like
+    /// every other span here) because `build_env_filter` defaults to
+    /// `off` + `bench_stats=info`, so a debug span would never be
+    /// created during a normal bench run. The `bench_stats` target also
+    /// keeps it out of the console tree/timing layers, which filter that
+    /// target out — this span is data, not a log line.
+    #[piop_stage(
+        span = "compile_sc_subproof",
+        snapshot_start = "compile_start",
+        snapshot_end = "after_compile_sc_subproof"
+    )]
     pub(super) fn compile_sc_subproof(&mut self) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
         // Snapshot every pending claim so we can re-populate state per
         // bucket. Claims land in the bucket that contains their virt-poly
@@ -869,13 +872,11 @@ where
             // smaller bucket stay at their own size.
             self.equalize_mat_poly_nv_to(bucket.target_nv);
 
-            self.emit_tracker_snapshot(&format!("bucket_{}_start", bucket_index));
             let (b, claims, stats) = self.run_bucket_pipeline(
                 bucket.target_nv,
                 bucket_index,
                 bucket.included_nvs.clone(),
             )?;
-            self.emit_tracker_snapshot(&format!("bucket_{}_end", bucket_index));
             if let Some(b) = b {
                 bucket_proofs.push(b);
             }

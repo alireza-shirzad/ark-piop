@@ -1,0 +1,16 @@
+[package]
+name = "ark-piop-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Instrumentation attribute macros for ark-piop."
+license = "MIT/Apache-2.0"
+repository = "https://github.com/alireza-shirzad/ark-piop"
+rust-version = "1.93"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"

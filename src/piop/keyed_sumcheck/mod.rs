@@ -344,10 +344,16 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
             drop(phat_mle);
             let p_source = tracker.mat_mv_poly(p_id);
             let lazy_phat = MLE::from_lazy_inverse_shifted(p_source, gamma);
+            // Resolve the id *before* taking the mutable borrow. In
+            // `recv.method(arg)` Rust evaluates the receiver first, so
+            // inlining `phat.id()` here would run it while the `RefMut` is
+            // live — and `id()` on a constant-backed poly borrows the
+            // tracker to lazily register its MLE, panicking the RefCell.
+            let phat_id = phat.id();
             tracker
                 .tracker()
                 .borrow_mut()
-                .register_mat_mv_poly(phat.id(), lazy_phat);
+                .register_mat_mv_poly(phat_id, lazy_phat);
         } else {
             drop(phat_mle);
         }
@@ -423,10 +429,13 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
             let p1_source = tracker.mat_mv_poly(p1_id);
             let p2_source = tracker.mat_mv_poly(p2_id);
             let lazy_phat = MLE::from_lazy_inverse_shifted_sum(p1_source, p2_source, gamma);
+            // See `prove_generate_subclaims`: `phat.id()` must not run while
+            // the mutable borrow is held.
+            let phat_id = phat.id();
             tracker
                 .tracker()
                 .borrow_mut()
-                .register_mat_mv_poly(phat.id(), lazy_phat);
+                .register_mat_mv_poly(phat_id, lazy_phat);
         } else {
             drop(phat_mle);
         }

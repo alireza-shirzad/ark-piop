@@ -12,7 +12,15 @@ where
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
     /// comitments (c) a batch opening proof corresponding to the query map
-    #[instrument(level = "debug", skip(self))]
+    ///
+    /// `bench_stats`/`info` rather than the usual `debug`: the stats
+    /// subscriber times this span open→close to record
+    /// `snark_prover_mv_pcs_time_s`, and only `bench_stats=info` is
+    /// enabled under the default env filter. See `compile_sc_subproof`.
+    #[piop_stage(
+        span = "compile_mv_pcs_subproof",
+        snapshot_end = "after_compile_mv_pcs_subproof"
+    )]
     pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<B::F, B::MvPCS>> {
         // -- Step 1: Build the CommitmentID dedup map FIRST --
         // We need this before building openings so we can deduplicate by
@@ -188,7 +196,15 @@ where
     /// the polynomials that the verifier needs oracle access to (b) a query
     /// map, which is the list of all the possible verifier queries to these
     /// comitments (c) a batch opening proof corresponding to the query map
-    #[instrument(level = "debug", skip(self))]
+    ///
+    /// `bench_stats`/`info` rather than the usual `debug`: the stats
+    /// subscriber times this span open→close to record
+    /// `snark_prover_uv_pcs_time_s`, and only `bench_stats=info` is
+    /// enabled under the default env filter. See `compile_sc_subproof`.
+    #[piop_stage(
+        span = "compile_uv_pcs_subproof",
+        snapshot_end = "after_compile_uv_pcs_subproof"
+    )]
     pub fn compile_uv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<B::F, B::UvPCS>> {
         let mut tracker_query_map: BTreeMap<TrackerID, BTreeMap<PointID, B::F>> = BTreeMap::new();
         let mut point_map: BTreeMap<PointID, B::F> = BTreeMap::new();
