@@ -521,6 +521,42 @@ where
         Ok(())
     }
 
+    /// Discharge every pending nozerocheck claim, one `num_vars` group at a
+    /// time, and leave the resulting link constraints on the zerocheck list.
+    ///
+    /// Run before bucketing so the partitioner never sees a nozerocheck
+    /// claim: by the time it looks, this and `convert_zerochecks_by_nv` have
+    /// turned them all into sumcheck claims at their own width.
+    ///
+    /// Grouping by nv also keeps a chunk product honest without help from
+    /// `equalize_mat_poly_nv_to`, which used to be what guaranteed every
+    /// claim in a chunk shared an evaluation length.
+    ///
+    /// Groups are walked in ascending nv so both sides commit — and so the
+    /// verifier tracks ids off `peek_next_id` — in the same order.
+    #[instrument(level = "debug", skip(self))]
+    fn batch_nozero_check_claims_by_nv(&mut self) -> SnarkResult<()> {
+        let claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        if claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_nv: BTreeMap<usize, Vec<TrackerNoZerocheckClaim>> = BTreeMap::new();
+        for claim in claims {
+            by_nv
+                .entry(self.poly_nv(claim.id()))
+                .or_default()
+                .push(claim);
+        }
+
+        for (nv, group) in by_nv {
+            self.state.mv_pcs_substate.no_zero_check_claims = group;
+            self.batch_nozero_check_claims(nv)?;
+        }
+
+        Ok(())
+    }
+
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims(&mut self, target_nv: usize) -> SnarkResult<()> {
         let nozero_chunk_size = self.config.nozero_chunk_size;
@@ -529,9 +565,9 @@ where
             return Ok(());
         }
 
-        // Commit chunk polys at the current bucket's target nv. When the
-        // picker chose one bucket this equals the historical global max;
-        // when it split this stays inside the current bucket's hypercube.
+        // Commit chunk polys at `target_nv`. Called per nv group, so this is
+        // the group's own width and the expansion below is a no-op; the
+        // branch stays for any caller whose claims sit under `target_nv`.
         let max_nv = target_nv;
         let num_claims = nozero_claims.len();
         let mut chunk_comm_ids = Vec::new(); // committed chunk products (materialized)
@@ -677,18 +713,19 @@ where
         let SumcheckBucket {
             target_nv,
             included_nvs,
-            zero_check_claims,
             sum_check_claims,
-            no_zero_check_claims,
         } = bucket;
 
+        // A bucket carries sumcheck claims only — the other two kinds were
+        // discharged before the partition was drawn. The zero counts stay in
+        // the record so its shape survives; they are zero by construction.
         let mut stats = BucketRunStats {
             bucket_index,
             target_nv,
             included_nvs,
-            n_zerocheck_claims: zero_check_claims.len(),
+            n_zerocheck_claims: 0,
             n_sumcheck_claims: sum_check_claims.len(),
-            n_nozerocheck_claims: no_zero_check_claims.len(),
+            n_nozerocheck_claims: 0,
             ..Default::default()
         };
 
@@ -696,23 +733,15 @@ where
         // `equalize_mat_poly_nv_to` only touches polys whose native nv is
         // below `target_nv`, so anything native to a smaller bucket keeps
         // its own size.
-        self.state.mv_pcs_substate.zero_check_claims = zero_check_claims;
         self.state.mv_pcs_substate.sum_check_claims = sum_check_claims;
-        self.state.mv_pcs_substate.no_zero_check_claims = no_zero_check_claims;
         self.equalize_mat_poly_nv_to(target_nv);
 
         stats.before_initial = self.current_claim_stage_stats();
-        region!(
-            "nozerocheck_batching",
-            self.batch_nozero_check_claims(target_nv)?
-        );
+        // The two snapshots either side of where nozerocheck batching and
+        // zerocheck conversion used to sit are kept so the stats record keeps
+        // its shape; they read identical by construction.
         stats.before_after_nozero_batching = self.current_claim_stage_stats();
-        region!("first_batch_zerocheck", self.batch_z_check_claims()?);
         stats.before_after_zero_batching = self.current_claim_stage_stats();
-        region!(
-            "first_zerocheck_to_sumcheck",
-            self.z_check_claim_to_s_check_claim(target_nv)?
-        );
         let mut individual_sumcheck_claims =
             region!("first_batch_sumcheck", self.batch_s_check_claims()?);
         stats.before_after_sum_batching = self.current_claim_stage_stats();
@@ -754,15 +783,19 @@ where
     /// Drain the pending claims and partition them into buckets.
     #[instrument(level = "debug", skip(self))]
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
-        let zero_check_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        // Both other claim kinds were discharged before the partition is
+        // drawn, so anything still pending here is a claim that would never
+        // be proved. `assert!` rather than `debug_assert!` — release is where
+        // it matters, and dropping a claim is unsound, not just slow.
+        assert!(
+            self.state.mv_pcs_substate.zero_check_claims.is_empty()
+                && self.state.mv_pcs_substate.no_zero_check_claims.is_empty(),
+            "claims reached bucketing unconverted: {} zerocheck, {} nozerocheck",
+            self.state.mv_pcs_substate.zero_check_claims.len(),
+            self.state.mv_pcs_substate.no_zero_check_claims.len(),
+        );
         let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        let no_zero_check_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
-        crate::tracker_core::bucketing::build_buckets::<B, _>(
-            self,
-            zero_check_claims,
-            sum_check_claims,
-            no_zero_check_claims,
-        )
+        crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims)
     }
 
     /// Merge one bucket's pre-batching sumcheck claims into the proof-wide
@@ -884,12 +917,23 @@ where
         snapshot_end = "after_compile_sc_subproof"
     )]
     pub(super) fn compile_sc_subproof(&mut self) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
-        // Resolve the gadget zerocheck claims before partitioning, so the
-        // planner sees one kind of claim carrying its post-conversion degree.
-        // The two zerocheck sources born *inside* a bucket — nozerocheck
-        // batching's `prod * inv - 1` and degree reduction's chunk link
-        // constraints — are still converted there.
-        crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
+        // Discharge the nozerocheck claims first: they turn into commitments
+        // plus zerocheck link constraints, which the next line then converts
+        // along with the gadget zerochecks. Both run before partitioning, so
+        // the planner sees exactly one kind of claim, each carrying the
+        // degree it will actually be proved at.
+        //
+        // Degree reduction's chunk link constraints are the one zerocheck
+        // source left inside a bucket — it runs after the partition is fixed,
+        // by definition, so it converts there.
+        region!(
+            "nozerocheck_batching",
+            self.batch_nozero_check_claims_by_nv()?
+        );
+        region!(
+            "first_zerocheck_to_sumcheck",
+            crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?
+        );
         let buckets = self.create_buckets();
         if buckets.is_empty() {
             return Ok(None);

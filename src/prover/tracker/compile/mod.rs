@@ -78,23 +78,30 @@ pub const SNARK_PROVER_SPAN_TARGET: &str = "bench_stats";
 /// one taken here.
 pub const SC_BUCKET_SPAN: &str = "sc_bucket";
 
-/// Regions inside `run_bucket_pipeline` whose span duration *is* that
+/// Regions in the sumcheck compile pipeline whose span duration *is* that
 /// stage's timing. The name doubles as the key: a subscriber files each
 /// under `snark_prover_piop_<name>_time_s` in the aggregate (summed across
 /// buckets) and under `timing.<name>_time_s` in the per-bucket
 /// `sc_buckets_json` entry.
 ///
 /// Named at the call site rather than reusing each callee's own span
-/// because three of them — `batch_z_check_claims`,
-/// `z_check_claim_to_s_check_claim`, `batch_s_check_claims` — run twice per
-/// bucket, before and after degree reduction, and the record reports the
-/// two passes separately. A callee-owned span could not tell them apart.
+/// because two of them — `z_check_claim_to_s_check_claim` and
+/// `batch_s_check_claims` — run on both sides of degree reduction, and the
+/// record reports the two passes separately. A callee-owned span could not
+/// tell them apart.
+///
+/// The first two run *before* the partition is drawn, so they sit in
+/// `compile_sc_subproof` rather than in a bucket. They therefore reach the
+/// aggregate but have no per-bucket entry to land in — which is the honest
+/// shape, since neither is per-bucket work any more.
 ///
 /// Order here is execution order, which is also the order the dashboard
 /// renders the breakdown in.
 pub const SC_REGION_SPANS: &[&str] = &[
     "nozerocheck_batching",
-    "first_batch_zerocheck",
+    // Batching folded in: `convert_zerochecks_by_nv` batches each nv group
+    // and converts it under this one span, so the separate
+    // `first_batch_zerocheck` region it used to pair with is gone.
     "first_zerocheck_to_sumcheck",
     "first_batch_sumcheck",
     "reduce_sumcheck",

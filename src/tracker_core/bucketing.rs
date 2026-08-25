@@ -10,7 +10,7 @@
 //! ```text
 //! cost(bucket) = 2^target_nv * (2*D^2 + Σ batch_weight + per_bucket_overhead)
 //!
-//! D            = min(max_i(degree_i) + 1, degree_limit - 1)
+//! D            = min(max_i(degree_i), degree_limit - 1)
 //! batch_weight = Σ over claims in bucket of (degree_i + 1)
 //! ```
 //!
@@ -49,20 +49,20 @@
 //! against LIKE-nation and LIKE-lineitem. Fitting the coefficients needs a
 //! sweep varying claim count and degree independently at a fixed nv.
 //!
-//! Also absent: the post-reduction chunk count; the difference between
-//! zerocheck, sumcheck and nozerocheck claims (LIKE-lineitem's nv-24 bucket
-//! splits 35.6 s nozerocheck-batching against 153.9 s sumcheck); MLE work
-//! shared between claims over overlapping trees; commitment vs field
-//! arithmetic, lumped into one constant; memory pressure; and parallelism,
-//! since buckets run sequentially and the objective is a sum rather than a
-//! makespan.
+//! Also absent: the post-reduction chunk count; MLE work shared between
+//! claims over overlapping trees; commitment vs field arithmetic, lumped
+//! into one constant; memory pressure; and parallelism, since buckets run
+//! sequentially and the objective is a sum rather than a makespan.
+//!
+//! The model no longer has to distinguish claim *kinds* — every claim
+//! reaches it as a sumcheck claim, at its own nv, carrying its true degree.
+//! What used to make that distinction matter is now priced directly: a
+//! converted zerocheck's `eq(x, r)` shows up in `max_degree` instead of a
+//! blanket `+1`, and nozerocheck batching's commits are paid before the
+//! partition exists rather than inside a bucket at its `target_nv`.
 
-use crate::{
-    SnarkBackend,
-    tracker_core::TrackerCore,
-    types::claim::{TrackerNoZerocheckClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
-};
-use std::collections::{BTreeMap, BTreeSet};
+use crate::{SnarkBackend, tracker_core::TrackerCore, types::claim::TrackerSumcheckClaim};
+use std::collections::BTreeMap;
 use tracing::{debug, info};
 
 /// One planned sumcheck bucket: the nvs merged into it, the `target_nv` they
@@ -274,23 +274,35 @@ fn push_bucket(
 /// One bucket ready to run: the claims that landed in it plus the
 /// `target_nv` they are all lifted to. Owning the claims — rather than
 /// leaving them in an nv-keyed map — keeps planning and running independent.
+///
+/// Sumcheck claims only. Zerocheck and nozerocheck claims are discharged
+/// before the partition is drawn — see [`build_buckets`] — so a bucket has
+/// no way to represent one, which is the invariant stated as a type rather
+/// than as an assertion someone has to remember to keep true.
 #[derive(Clone, Debug)]
 pub struct SumcheckBucket<B: SnarkBackend> {
     pub target_nv: usize,
     pub included_nvs: Vec<usize>,
-    pub zero_check_claims: Vec<TrackerZerocheckClaim>,
     pub sum_check_claims: Vec<TrackerSumcheckClaim<B::F>>,
-    pub no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,
 }
 
 /// Group the claims by nv, run the cost model, and hand back one
 /// [`SumcheckBucket`] per planned bucket. Empty when there are no claims.
+///
+/// Takes sumcheck claims alone. Callers run
+/// [`batch_nozero_check_claims_by_nv`] and
+/// [`convert_zerochecks_by_nv`](crate::tracker_core::pipeline::convert_zerochecks_by_nv)
+/// first, each of which resolves its claim kind at that claim's own nv. So
+/// by the time the partition is chosen there is one kind of claim left, and
+/// every claim carries the degree it will actually be proved at — including
+/// the `eq(x, r)` factor a converted zerocheck picked up. The planner used
+/// to approximate that factor with a blanket `+1`.
+///
+/// [`batch_nozero_check_claims_by_nv`]: crate::prover::tracker::ProverTracker
 //TODO: There should be a configuration for which the prover sends the information about bucketing to the verifier so that the verifier doesn't compute the buckets itself
 pub fn build_buckets<B, T>(
     tracker: &T,
-    zero_check_claims: Vec<TrackerZerocheckClaim>,
     sum_check_claims: Vec<TrackerSumcheckClaim<B::F>>,
-    no_zero_check_claims: Vec<TrackerNoZerocheckClaim>,
 ) -> Vec<SumcheckBucket<B>>
 where
     B: SnarkBackend,
@@ -300,44 +312,19 @@ where
     let degree_of = |id| tracker.virt_poly_degree(id);
     let model = CostModel::new(tracker.config().sumcheck_term_degree_limit);
 
-    let mut zc_by_nv: BTreeMap<usize, Vec<TrackerZerocheckClaim>> = BTreeMap::new();
     let mut sc_by_nv: BTreeMap<usize, Vec<TrackerSumcheckClaim<B::F>>> = BTreeMap::new();
-    let mut nzc_by_nv: BTreeMap<usize, Vec<TrackerNoZerocheckClaim>> = BTreeMap::new();
-
-    for c in zero_check_claims {
-        zc_by_nv.entry(nv_of(c.id())).or_default().push(c);
-    }
     for c in sum_check_claims {
         sc_by_nv.entry(nv_of(c.id())).or_default().push(c);
     }
-    for c in no_zero_check_claims {
-        nzc_by_nv.entry(nv_of(c.id())).or_default().push(c);
-    }
-
-    // Ascending set of nvs that have at least one claim, together with the
-    // total claim count at each nv (feeds the cost model).
-    let mut nvs: BTreeSet<usize> = BTreeSet::new();
-    nvs.extend(zc_by_nv.keys().copied());
-    nvs.extend(sc_by_nv.keys().copied());
-    nvs.extend(nzc_by_nv.keys().copied());
 
     // Collect both statistics the cost model needs per nv. They are gathered
     // in one pass over the same claims but aggregated differently — summed
     // for batching work, maxed for the aggregated sumcheck's degree — so
     // they cannot be collapsed into a single number. See [`bucket_cost`].
-    let nv_stats: Vec<NvClaimStats> = nvs
+    let nv_stats: Vec<NvClaimStats> = sc_by_nv
         .iter()
-        .map(|nv| {
-            let mut degrees = Vec::new();
-            if let Some(v) = zc_by_nv.get(nv) {
-                degrees.extend(v.iter().map(|c| degree_of(c.id())));
-            }
-            if let Some(v) = sc_by_nv.get(nv) {
-                degrees.extend(v.iter().map(|c| degree_of(c.id())));
-            }
-            if let Some(v) = nzc_by_nv.get(nv) {
-                degrees.extend(v.iter().map(|c| degree_of(c.id())));
-            }
+        .map(|(nv, claims)| {
+            let degrees: Vec<usize> = claims.iter().map(|c| degree_of(c.id())).collect();
             NvClaimStats {
                 nv: *nv,
                 batch_weight: degrees.iter().map(|d| d + 1).sum(),
@@ -364,37 +351,29 @@ where
     let buckets: Vec<SumcheckBucket<B>> = plan
         .into_iter()
         .map(|bucket| {
-            let mut zero_check_claims = Vec::new();
             let mut sum_check_claims = Vec::new();
-            let mut no_zero_check_claims = Vec::new();
             for nv in &bucket.included_nvs {
-                if let Some(v) = zc_by_nv.remove(nv) {
-                    zero_check_claims.extend(v);
-                }
                 if let Some(v) = sc_by_nv.remove(nv) {
                     sum_check_claims.extend(v);
-                }
-                if let Some(v) = nzc_by_nv.remove(nv) {
-                    no_zero_check_claims.extend(v);
                 }
             }
             SumcheckBucket {
                 target_nv: bucket.target_nv,
                 included_nvs: bucket.included_nvs,
-                zero_check_claims,
                 sum_check_claims,
-                no_zero_check_claims,
             }
         })
         .collect();
 
-    debug_assert!(
-        zc_by_nv.is_empty() && sc_by_nv.is_empty() && nzc_by_nv.is_empty(),
-        "bucket plan did not cover every nv — {} zerocheck, {} sumcheck, {} nozerocheck \
-         claim group(s) left unbucketed and would be silently dropped",
-        zc_by_nv.len(),
+    // `assert!`, not `debug_assert!`: benches and every real proof run in
+    // release, which is exactly where an uncovered nv would go unnoticed.
+    // The claim would not be proved at all — unsound, not merely slow — and
+    // one `is_empty()` per compile is not a cost worth trading for that.
+    assert!(
+        sc_by_nv.is_empty(),
+        "bucket plan did not cover every nv — {} sumcheck claim group(s) \
+         left unbucketed and would be silently dropped",
         sc_by_nv.len(),
-        nzc_by_nv.len(),
     );
     buckets
 }

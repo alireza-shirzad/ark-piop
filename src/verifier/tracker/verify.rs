@@ -10,6 +10,34 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         crate::tracker_core::pipeline::batch_z_check_claims(self)
     }
 
+    /// Verifier mirror of the prover's `batch_nozero_check_claims_by_nv`.
+    ///
+    /// Only the *order* matters here — chunk and inverse commitments are
+    /// tracked off `peek_next_id`, so the verifier has to walk the groups
+    /// exactly as the prover committed them. Ascending nv on both sides.
+    #[instrument(level = "debug", skip(self))]
+    fn batch_nozero_check_claims_by_nv(&mut self) -> SnarkResult<()> {
+        let claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        if claims.is_empty() {
+            return Ok(());
+        }
+
+        let mut by_nv: BTreeMap<usize, Vec<TrackerNoZerocheckClaim>> = BTreeMap::new();
+        for claim in claims {
+            by_nv
+                .entry(crate::tracker_core::TrackerCore::poly_nv(self, claim.id()))
+                .or_default()
+                .push(claim);
+        }
+
+        for (nv, group) in by_nv {
+            self.state.mv_pcs_substate.no_zero_check_claims = group;
+            self.batch_nozero_check_claims(nv)?;
+        }
+
+        Ok(())
+    }
+
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
         let nozero_chunk_size = self.config.nozero_chunk_size;
@@ -246,18 +274,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let SumcheckBucket {
             target_nv,
             included_nvs: _,
-            zero_check_claims,
             sum_check_claims,
-            no_zero_check_claims,
         } = bucket;
 
-        self.state.mv_pcs_substate.zero_check_claims = zero_check_claims;
         self.state.mv_pcs_substate.sum_check_claims = sum_check_claims;
-        self.state.mv_pcs_substate.no_zero_check_claims = no_zero_check_claims;
-
-        self.batch_nozero_check_claims(target_nv)?;
-        self.batch_z_check_claims(target_nv)?;
-        self.z_check_claim_to_s_check_claim(target_nv)?;
         self.equalize_sumcheck_claims(target_nv, global_max_nv)?;
         self.batch_s_check_claims(target_nv)?;
         self.reduce_sumcheck_dgree(target_nv)?;
@@ -280,15 +300,19 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// differ in that impl rather than here. See
     /// [`bucketing`](crate::tracker_core::bucketing) for the cost model.
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
-        let zero_check_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        // Both other claim kinds were discharged before the partition is
+        // drawn, so anything still pending here is a claim that would never
+        // be proved. `assert!` rather than `debug_assert!` — release is where
+        // it matters, and dropping a claim is unsound, not just slow.
+        assert!(
+            self.state.mv_pcs_substate.zero_check_claims.is_empty()
+                && self.state.mv_pcs_substate.no_zero_check_claims.is_empty(),
+            "claims reached bucketing unconverted: {} zerocheck, {} nozerocheck",
+            self.state.mv_pcs_substate.zero_check_claims.len(),
+            self.state.mv_pcs_substate.no_zero_check_claims.len(),
+        );
         let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        let no_zero_check_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
-        crate::tracker_core::bucketing::build_buckets::<B, _>(
-            self,
-            zero_check_claims,
-            sum_check_claims,
-            no_zero_check_claims,
-        )
+        crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims)
     }
 
     /// Check every bucket in order. Mirrors the prover's `run_all_buckets`;
@@ -331,9 +355,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// them all.
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self) -> SnarkResult<()> {
-        // Mirrors the prover's pre-bucketing conversion. Both sides walk the
-        // nv groups in the same ascending order, so the challenges this draws
-        // land in the transcript identically on each side.
+        // Mirrors the prover's pre-bucketing pipeline, in its order. Both
+        // sides walk the nv groups ascending, so commitments are tracked and
+        // challenges drawn identically on each side.
+        self.batch_nozero_check_claims_by_nv()?;
         crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
         let buckets = self.create_buckets();
         if !buckets.is_empty() {
