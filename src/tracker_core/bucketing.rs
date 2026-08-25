@@ -285,11 +285,7 @@ pub struct SumcheckBucket<B: SnarkBackend> {
 
 /// Group the claims by nv, run the cost model, and hand back one
 /// [`SumcheckBucket`] per planned bucket. Empty when there are no claims.
-///
-/// Shared by both sides on purpose: prover and verifier must land on
-/// identical partitions or the transcripts diverge, so every
-/// partition-determining input is read through [`TrackerCore`] rather than
-/// passed in, and there is one implementation to change.
+//TODO: There should be a configuration for which the prover sends the information about bucketing to the verifier so that the verifier doesn't compute the buckets itself
 pub fn build_buckets<B, T>(
     tracker: &T,
     zero_check_claims: Vec<TrackerZerocheckClaim>,

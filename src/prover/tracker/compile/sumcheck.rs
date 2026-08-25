@@ -751,9 +751,7 @@ where
         ))
     }
 
-    /// Drain the pending claims and partition them into buckets. Empty when
-    /// there are none, which is how [`Self::compile_sc_subproof`] detects a
-    /// proof with no sumcheck work.
+    /// Drain the pending claims and partition them into buckets.
     #[instrument(level = "debug", skip(self))]
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
         let zero_check_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
