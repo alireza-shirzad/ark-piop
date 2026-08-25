@@ -7,6 +7,7 @@ mod evaluation;
 mod tracking;
 mod verify;
 
+use crate::tracker_core::bucketing::SumcheckBucket;
 use crate::{
     SnarkBackend,
     arithmetic::{f_vec_short_str, mat_poly::mle::MLE},

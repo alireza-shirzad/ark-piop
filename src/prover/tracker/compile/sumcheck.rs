@@ -7,6 +7,7 @@ use super::super::*;
 // use `#[piop_stage]` instead.
 use super::region;
 
+use crate::pcs::PolynomialCommitment;
 impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
@@ -238,7 +239,9 @@ where
                             cfg_iter_mut!(term).zip(fv).for_each(|(a, b)| *a *= b);
                         } else {
                             // Cyclic broadcast: term[i] *= fv[i % fv_len].
-                            cfg_iter_mut!(term).enumerate().for_each(|(i, a)| *a *= fv[i % fv_len]);
+                            cfg_iter_mut!(term)
+                                .enumerate()
+                                .for_each(|(i, a)| *a *= fv[i % fv_len]);
                         }
                     }
                     cfg_iter_mut!(acc).zip(term).for_each(|(a, b)| *a += b);
@@ -637,6 +640,10 @@ where
     /// claim map to embed in the proof (so downstream consumers of
     /// `SumcheckSubproof::sumcheck_claims` still see every original claim),
     /// and a [`BucketRunStats`] snapshot for the caller to aggregate/emit.
+    ///
+    /// Takes the bucket by value and installs its claims into `state` on
+    /// entry, so the caller never has to stage claim state around the call.
+    ///
     /// Does **not** emit any `bench_stats` events itself — emission is
     /// deferred to `compile_sc_subproof` so per-bucket runs don't overwrite
     /// each other in the subscriber's flat field map.
@@ -651,31 +658,49 @@ where
         target = "bench_stats",
         level = "info",
         name = "sc_bucket",
-        skip(self, included_nvs)
+        skip(self, bucket),
+        fields(target_nv = bucket.target_nv)
     )]
     #[piop_stage(
         snapshot_start = "bucket_{bucket_index}_start",
         snapshot_end = "bucket_{bucket_index}_end"
     )]
-    fn run_bucket_pipeline(
+    fn run_bucket(
         &mut self,
-        target_nv: usize,
         bucket_index: usize,
-        included_nvs: Vec<usize>,
+        bucket: SumcheckBucket<B>,
     ) -> SnarkResult<(
         Option<SumcheckBucketProof<B::F>>,
         BTreeMap<TrackerID, B::F>,
         BucketRunStats,
     )> {
+        let SumcheckBucket {
+            target_nv,
+            included_nvs,
+            zero_check_claims,
+            sum_check_claims,
+            no_zero_check_claims,
+        } = bucket;
+
         let mut stats = BucketRunStats {
             bucket_index,
             target_nv,
             included_nvs,
-            n_zerocheck_claims: self.state.mv_pcs_substate.zero_check_claims.len(),
-            n_sumcheck_claims: self.state.mv_pcs_substate.sum_check_claims.len(),
-            n_nozerocheck_claims: self.state.mv_pcs_substate.no_zero_check_claims.len(),
+            n_zerocheck_claims: zero_check_claims.len(),
+            n_sumcheck_claims: sum_check_claims.len(),
+            n_nozerocheck_claims: no_zero_check_claims.len(),
             ..Default::default()
         };
+
+        // Install this bucket's claims, then lift the mat polys it needs.
+        // `equalize_mat_poly_nv_to` only touches polys whose native nv is
+        // below `target_nv`, so anything native to a smaller bucket keeps
+        // its own size.
+        self.state.mv_pcs_substate.zero_check_claims = zero_check_claims;
+        self.state.mv_pcs_substate.sum_check_claims = sum_check_claims;
+        self.state.mv_pcs_substate.no_zero_check_claims = no_zero_check_claims;
+        self.equalize_mat_poly_nv_to(target_nv);
+
         stats.before_initial = self.current_claim_stage_stats();
         region!(
             "nozerocheck_batching",
@@ -726,180 +751,146 @@ where
         ))
     }
 
-    /// Reduces every zero-check and sum-check claim into a list of evaluation
-    /// claims. Partitions the pending claims into buckets by picking the
-    /// minimum-cost contiguous grouping of their distinct `num_vars` via
-    /// [`crate::tracker_core::bucketing::pick_bucket_plan`], then runs
-    /// [`run_bucket_pipeline`] once per bucket at that bucket's `target_nv`
-    /// (the group's max nv). One-nv queries pick a single bucket and match
-    /// the historical (pre-bucketing) transcript byte-for-byte; multi-nv
-    /// queries let the cost model decide whether merging or splitting wins.
+    /// Drain the pending claims and partition them into buckets. Empty when
+    /// there are none, which is how [`Self::compile_sc_subproof`] detects a
+    /// proof with no sumcheck work.
+    #[instrument(level = "debug", skip(self))]
+    fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
+        let zero_check_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
+        let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
+        let no_zero_check_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
+        crate::tracker_core::bucketing::build_buckets::<B, _>(
+            self,
+            zero_check_claims,
+            sum_check_claims,
+            no_zero_check_claims,
+        )
+    }
+
+    /// Merge one bucket's pre-batching sumcheck claims into the proof-wide
+    /// map, rescaling each sum from the bucket's own `target_nv` up to the
+    /// common `global_max_nv` frame.
     ///
-    /// Claims must be size-homogeneous within their virt-poly graph — the
-    /// tracker enforces this implicitly since any attempted mixed-size
-    /// evaluation trips MLE's `point.len() == num_vars()` assertion.
+    /// This has nothing to do with proving: each bucket's sumcheck is
+    /// self-contained at its own `target_nv`. It is about the
+    /// `SumcheckSubproof::sumcheck_claims` side channel, which carries sums
+    /// the verifier cannot compute itself — and which has two consumers
+    /// wanting different scales:
     ///
-    /// Spanned on the `bench_stats` target at `info` so the stats
-    /// subscriber can time it from span open→close and record
-    /// `snark_prover_piop_time_s`. It must be `info` (not `debug` like
-    /// every other span here) because `build_env_filter` defaults to
-    /// `off` + `bench_stats=info`, so a debug span would never be
-    /// created during a normal bench run. The `bench_stats` target also
-    /// keeps it out of the console tree/timing layers, which filter that
-    /// target out — this span is data, not a log line.
+    /// * tt-core gadgets read an entry back via `prover_claimed_sum` and
+    ///   un-scale by *their own* local max to recover the raw sum, so every
+    ///   entry has to sit in one stable frame.
+    /// * the bucket's own sumcheck check needs `raw * 2^(target_nv -
+    ///   poly_nv)` — what [`Self::equalize_mat_poly_nv_to`] produced by
+    ///   lifting polys before the sumcheck ran.
+    ///
+    /// Those disagree whenever a bucket is narrower than the widest
+    /// committed poly. Recording against `global_max_nv` gives both a
+    /// common anchor: the verifier's `equalize_sumcheck_claims` divides by
+    /// `2^(global_max_nv - target_nv)` to get back to the bucket
+    /// frame. Lifting replicates a poly's values cyclically, so each step is
+    /// an exact power-of-two factor on the hypercube sum.
+    ///
+    /// `global_max_nv` must be snapshotted *before* the bucket loop on
+    /// both sides. The verifier once re-read it per bucket, where it grew as
+    /// batching added chunk commits; its divisor then outgrew this
+    /// multiplier and multi-bucket plans failed round-0 with
+    /// `p(0)+p(1) != asserted_sum`.
+    ///
+    /// `or_insert` keeps the first bucket to produce a given id. Claims are
+    /// pre-batching, so an id shared across buckets carries the same
+    /// underlying polynomial and any bucket's rescaled sum is equivalent.
+    fn merge_bucket_claims(
+        all_claims: &mut BTreeMap<TrackerID, B::F>,
+        bucket_claims: BTreeMap<TrackerID, B::F>,
+        target_nv: usize,
+        global_max_nv: usize,
+    ) {
+        let scale = if global_max_nv > target_nv {
+            B::F::from(1u64 << (global_max_nv - target_nv))
+        } else {
+            B::F::one()
+        };
+        for (id, value) in bucket_claims {
+            all_claims.entry(id).or_insert(value * scale);
+        }
+    }
+
+    /// Widest materialized commitment in the proof — the hypercube width
+    /// that acts as the run's common frame wherever something has to hold
+    /// across buckets, regardless of how the cost model partitioned them.
+    ///
+    /// Here that means rescaling recorded claim sums (see
+    /// [`Self::merge_bucket_claims`]). The verifier computes the same value
+    /// via `equalize_mat_com_nv` and uses it for both that and padding PCS
+    /// evaluation points, so keep the name in step with the verifier's — the
+    /// two must be equal, and that is far easier to check when they are
+    /// spelled the same way.
+    ///
+    /// Must be read **once, before any bucket runs**. [`Self::run_all_buckets`]
+    /// is the only caller and reads it above its loop.
+    /// `batch_nozero_check_claims` and
+    /// `reduce_sumcheck_dgree` add chunk commitments as buckets execute, so
+    /// this value grows during the loop. The verifier freezes its matching
+    /// value at the same point; when it instead re-read this live, its
+    /// divisor outgrew the prover's multiplier and every multi-bucket plan
+    /// failed round-0 with `p(0)+p(1) != asserted_sum`.
+    fn global_max_nv(&self) -> usize {
+        self.state
+            .mv_pcs_substate
+            .materialized_comms
+            .values()
+            .map(|c| c.log_size() as usize)
+            .max()
+            .unwrap_or(1)
+    }
+
+    /// Prove every bucket in order, collecting its proof, its rescaled
+    /// claims, and its stats, then emit the stats events for the run.
+    ///
+    /// Emission lives here rather than in the caller because it needs every
+    /// bucket's stats at once — that is what pulled it out of `run_bucket`
+    /// in the first place, so multi-bucket compiles stopped overwriting each
+    /// other in the subscriber's flat field map.
+    ///
+    /// Reads [`Self::global_max_nv`] once, here, before the first bucket
+    /// runs. That placement is the whole invariant — batching adds chunk
+    /// commitments as buckets execute, so a read from inside the loop would
+    /// see a value that grows and no longer matches the verifier's frozen
+    /// one. Keep it above the loop.
+    fn run_all_buckets(&mut self, buckets: Vec<SumcheckBucket<B>>) -> SnarkResult<BucketRun<B::F>> {
+        let global_max_nv = self.global_max_nv();
+        let mut run = BucketRun::with_capacity(buckets.len());
+        for (bucket_index, bucket) in buckets.into_iter().enumerate() {
+            let target_nv = bucket.target_nv;
+            let (proof, claims, stats) = self.run_bucket(bucket_index, bucket)?;
+            run.proofs.extend(proof);
+            Self::merge_bucket_claims(&mut run.claims, claims, target_nv, global_max_nv);
+            run.stats.push(stats);
+        }
+        self.emit_bucket_stats(&run.stats);
+        Ok(run)
+    }
+
+    /// Emit both bucket-stats events. They always describe the same slice,
+    /// so they are one call — emitting only one of them would leave the
+    /// dashboard with a per-bucket table and no aggregate, or the reverse.
+    fn emit_bucket_stats(&self, stats: &[BucketRunStats]) {
+        self.emit_aggregate_bucket_stats(stats);
+        self.emit_per_bucket_stats(stats);
+    }
+
     #[piop_stage(
         span = "compile_sc_subproof",
         snapshot_start = "compile_start",
         snapshot_end = "after_compile_sc_subproof"
     )]
     pub(super) fn compile_sc_subproof(&mut self) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
-        // Snapshot every pending claim so we can re-populate state per
-        // bucket. Claims land in the bucket that contains their virt-poly
-        // root's `num_vars`.
-        let zc_claims = take(&mut self.state.mv_pcs_substate.zero_check_claims);
-        let sc_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        let nzc_claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
-
-        let mut zc_by_nv: BTreeMap<
-            usize,
-            Vec<crate::types::claim::TrackerZerocheckClaim>,
-        > = BTreeMap::new();
-        let mut sc_by_nv: BTreeMap<
-            usize,
-            Vec<crate::types::claim::TrackerSumcheckClaim<B::F>>,
-        > = BTreeMap::new();
-        let mut nzc_by_nv: BTreeMap<
-            usize,
-            Vec<crate::types::claim::TrackerNoZerocheckClaim>,
-        > = BTreeMap::new();
-        for c in zc_claims {
-            let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
-            zc_by_nv.entry(nv).or_default().push(c);
-        }
-        for c in sc_claims {
-            let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
-            sc_by_nv.entry(nv).or_default().push(c);
-        }
-        for c in nzc_claims {
-            let nv = self.state.num_vars.get(&c.id()).copied().unwrap_or(0);
-            nzc_by_nv.entry(nv).or_default().push(c);
-        }
-
-        // Ascending set of nvs that have at least one claim, together with
-        // the total claim count at each nv (feeds the cost model).
-        let mut nvs: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-        nvs.extend(zc_by_nv.keys().copied());
-        nvs.extend(sc_by_nv.keys().copied());
-        nvs.extend(nzc_by_nv.keys().copied());
-
-        let nv_claim_counts: Vec<(usize, usize)> = nvs
-            .iter()
-            .map(|nv| {
-                let n = zc_by_nv.get(nv).map_or(0, |v| v.len())
-                    + sc_by_nv.get(nv).map_or(0, |v| v.len())
-                    + nzc_by_nv.get(nv).map_or(0, |v| v.len());
-                (*nv, n)
-            })
-            .collect();
-
-        if nv_claim_counts.is_empty() {
+        let buckets = self.create_buckets();
+        if buckets.is_empty() {
             return Ok(None);
         }
-
-        let plan = crate::tracker_core::bucketing::pick_bucket_plan(&nv_claim_counts);
-        debug!(
-            plan = ?plan.iter().map(|b| (b.target_nv, b.included_nvs.clone())).collect::<Vec<_>>(),
-            "sumcheck bucketing plan"
-        );
-
-        // Pre-scaling target: recorded `individual_sumcheck_claims` values
-        // must match what a single-bucket compile would emit, so downstream
-        // gadgets (e.g. keyed_sumcheck's `sum_claim_v / 2^(local_max -
-        // log_size)` un-scaling) get the value they expect. The verifier
-        // undoes this pre-scale inside `equalize_sumcheck_claims` so each
-        // bucket's aggregated sumcheck still sees raw values scaled to its
-        // own `target_nv`. When the plan has one bucket at the global max
-        // this pre-scale is a no-op.
-        //
-        // MUST match the verifier's `equalize_mat_com_nv` computation
-        // exactly, since the verifier divides recorded values by
-        // `2^(verifier_global_max - target_nv)`. Historically we computed
-        // this as `max(bucket target_nv)`; the verifier computes it as
-        // `max(materialized_comms log_size)`. These can diverge — e.g. a
-        // workload with a large-nv char-domain side poly (materialized at
-        // commit time) but no sumcheck bucket targeting that nv (because
-        // no claims live there). In that case prover records with a
-        // smaller scale than the verifier expects to divide by, so every
-        // proof-map claim value ends up off by `2^(comm_max - bucket_max)`
-        // and every sumcheck round-0 check trips
-        // `p(0)+p(1) != asserted_sum`. Compute it the verifier's way.
-        use crate::pcs::PolynomialCommitment;
-        let global_max_for_recording = self
-            .state
-            .mv_pcs_substate
-            .materialized_comms
-            .values()
-            .map(|c| c.log_size() as usize)
-            .max()
-            .unwrap_or(1);
-
-        let mut bucket_proofs: Vec<SumcheckBucketProof<B::F>> = Vec::with_capacity(plan.len());
-        let mut all_individual_claims: BTreeMap<TrackerID, B::F> = BTreeMap::new();
-        let mut bucket_run_stats: Vec<BucketRunStats> = Vec::with_capacity(plan.len());
-
-        for (bucket_index, bucket) in plan.into_iter().enumerate() {
-            // Drain every nv merged into this bucket into state.
-            let mut zc: Vec<crate::types::claim::TrackerZerocheckClaim> = Vec::new();
-            let mut sc: Vec<crate::types::claim::TrackerSumcheckClaim<B::F>> = Vec::new();
-            let mut nzc: Vec<crate::types::claim::TrackerNoZerocheckClaim> = Vec::new();
-            for nv in &bucket.included_nvs {
-                if let Some(v) = zc_by_nv.remove(nv) {
-                    zc.extend(v);
-                }
-                if let Some(v) = sc_by_nv.remove(nv) {
-                    sc.extend(v);
-                }
-                if let Some(v) = nzc_by_nv.remove(nv) {
-                    nzc.extend(v);
-                }
-            }
-            self.state.mv_pcs_substate.zero_check_claims = zc;
-            self.state.mv_pcs_substate.sum_check_claims = sc;
-            self.state.mv_pcs_substate.no_zero_check_claims = nzc;
-
-            // Lift mat polys as needed for this bucket. The helper only
-            // lifts polys with native nv < target_nv, so polys native to a
-            // smaller bucket stay at their own size.
-            self.equalize_mat_poly_nv_to(bucket.target_nv);
-
-            let (b, claims, stats) = self.run_bucket_pipeline(
-                bucket.target_nv,
-                bucket_index,
-                bucket.included_nvs.clone(),
-            )?;
-            if let Some(b) = b {
-                bucket_proofs.push(b);
-            }
-            let scale = if global_max_for_recording > bucket.target_nv {
-                B::F::from(1u64 << (global_max_for_recording - bucket.target_nv))
-            } else {
-                B::F::one()
-            };
-            for (id, v) in claims {
-                all_individual_claims.entry(id).or_insert(v * scale);
-            }
-            bucket_run_stats.push(stats);
-        }
-
-        self.emit_aggregate_bucket_stats(&bucket_run_stats);
-        self.emit_per_bucket_stats(&bucket_run_stats);
-
-        if bucket_proofs.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(SumcheckSubproof::new(
-            bucket_proofs,
-            all_individual_claims,
-        )))
+        let run = self.run_all_buckets(buckets)?;
+        Ok(run.into_subproof())
     }
 }

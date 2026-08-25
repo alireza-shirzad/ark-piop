@@ -71,6 +71,10 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
         VerifierTracker::add_scalar(self, id, c)
     }
 
+    fn poly_nv(&self, id: TrackerID) -> usize {
+        self.state.poly_log_sizes.get(&id).copied().unwrap_or(0)
+    }
+
     fn virt_poly_degree(&self, id: TrackerID) -> usize {
         VerifierTracker::virt_poly_degree(self, id)
     }

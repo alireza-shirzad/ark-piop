@@ -51,7 +51,7 @@ use crate::{
 };
 use crate::{prover::structs::TrackerEvalClaim, prover::structs::polynomial::TrackedPoly};
 use ark_ec::AdditiveGroup;
-use ark_ff::batch_inversion;
+use ark_ff::{PrimeField, batch_inversion};
 use ark_poly::Polynomial;
 use ark_serialize::CanonicalSerialize;
 use ark_std::One;
@@ -64,6 +64,8 @@ use either::Either;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use crate::tracker_core::bucketing::SumcheckBucket;
+use ark_piop_macros::piop_stage;
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashSet},
@@ -73,7 +75,6 @@ use std::{
     rc::Weak,
     sync::Arc,
 };
-use ark_piop_macros::piop_stage;
 use tracing::{debug, info, instrument, trace};
 
 #[derive(Clone, Debug, Default)]
@@ -104,11 +105,39 @@ impl ClaimStageStats {
     }
 }
 
-/// Per-bucket claim shape collected inside
-/// [`ProverTracker::run_bucket_pipeline`] and returned so the caller can emit
-/// both per-bucket events and their aggregate. Emission was pulled out of the
-/// bucket pipeline so multi-bucket compiles no longer silently overwrite each
-/// other in the bench-stats subscriber's flat field map.
+/// Everything the bucket loop produces, so `compile_sc_subproof` reads as a
+/// sequence of phases instead of threading three parallel accumulators
+/// through a loop body.
+struct BucketRun<F: PrimeField> {
+    proofs: Vec<SumcheckBucketProof<F>>,
+    /// Pre-batching claim sums, all rescaled to the run's common
+    /// `global_max_nv` frame. See `ProverTracker::merge_bucket_claims`.
+    claims: BTreeMap<TrackerID, F>,
+    stats: Vec<BucketRunStats>,
+}
+
+impl<F: PrimeField> BucketRun<F> {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            proofs: Vec::with_capacity(n),
+            claims: BTreeMap::new(),
+            stats: Vec::with_capacity(n),
+        }
+    }
+
+    /// A run that produced no bucket proofs contributes no subproof — a
+    /// bucket short-circuits when its claims collapse before any sumcheck
+    /// is needed, and every bucket may do so.
+    fn into_subproof(self) -> Option<SumcheckSubproof<F>> {
+        (!self.proofs.is_empty()).then(|| SumcheckSubproof::new(self.proofs, self.claims))
+    }
+}
+
+/// Per-bucket claim shape collected inside [`ProverTracker::run_bucket`] and
+/// returned so the caller can emit both per-bucket events and their
+/// aggregate. Emission was pulled out of the bucket run so multi-bucket
+/// compiles no longer silently overwrite each other in the bench-stats
+/// subscriber's flat field map.
 ///
 /// Carries no timings and no wall-clock stamps: those come from the
 /// [`SC_BUCKET_SPAN`] / [`SC_REGION_SPANS`] spans and are filled in by the

@@ -60,6 +60,15 @@ pub trait TrackerCore {
     fn add_scalar(&mut self, id: TrackerID, c: Self::F) -> TrackerID;
 
     /// Return the multiplicative degree of the polynomial tree rooted at `id`.
+    /// Number of variables of the polynomial `id`, or 0 if unknown.
+    ///
+    /// Together with [`TrackerCore::virt_poly_degree`] and the degree limit
+    /// in [`TrackerCore::config`], this is everything
+    /// [`bucketing::build_buckets`](crate::tracker_core::bucketing::build_buckets)
+    /// needs to partition claims — and everything the two sides must agree
+    /// on for their partitions to match.
+    fn poly_nv(&self, id: TrackerID) -> usize;
+
     fn virt_poly_degree(&self, id: TrackerID) -> usize;
 
     /// Return a reference to the virtual polynomial for `id`, if it exists.
