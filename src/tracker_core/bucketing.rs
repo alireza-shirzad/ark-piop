@@ -149,17 +149,17 @@ impl CostModel {
     ///
     /// ```text
     /// cost = 2^target_nv * (2*D^2 + batch_weight + per_bucket_overhead)
-    /// D    = min(max_degree + 1, degree_limit - 1)
+    /// D    = min(max_degree, degree_limit - 1)
     /// ```
     ///
     /// See the module docs for why the sumcheck term is a capped square over
     /// the max degree while the batching term is an uncapped sum.
     fn cost_of(&self, bucket: &BucketPlan) -> u128 {
-        // `+1` for the `eq(x, r)` factor a zerocheck picks up on conversion;
-        // `.max(1)` so a bucket never looks free.
+        // No `+1` for `eq(x, r)`: claims reach the planner already converted,
+        // so `max_degree` counts that factor. `.max(1)` so a bucket never
+        // looks free.
         let agg_degree = bucket
             .max_degree
-            .saturating_add(1)
             .min(self.degree_limit.saturating_sub(1))
             .max(1);
         let sumcheck_weight = 2 * agg_degree * agg_degree;
@@ -437,9 +437,9 @@ mod tests {
     /// regressed 25%. Pin both sides.
     #[test]
     fn adjacent_nvs_merge_exactly_below_the_degree_aware_threshold() {
-        // max_degree 2 => D = 3 => 2*D^2 = 18, threshold 18 + 12 = 30.
-        let threshold = 2 * 3 * 3 + model().per_bucket_overhead;
-        assert_eq!(threshold, 30);
+        // max_degree 2 => D = 2 => 2*D^2 = 8, threshold 8 + 12 = 20.
+        let threshold = 2 * 2 * 2 + model().per_bucket_overhead;
+        assert_eq!(threshold, 20);
 
         let below = pick_bucket_plan(&[stats(15, threshold - 1, 2), stats(16, 6, 2)], &model());
         assert_eq!(below.len(), 1, "below threshold must merge, got {below:?}");
@@ -490,7 +490,7 @@ mod tests {
     /// linear term instead.
     #[test]
     fn quadratic_term_is_capped_at_the_reduction_limit() {
-        let at_cap = model().cost_of(&BucketPlan::from_group(&[stats(20, 10, LIMIT - 2)]));
+        let at_cap = model().cost_of(&BucketPlan::from_group(&[stats(20, 10, LIMIT - 1)]));
         let way_over = model().cost_of(&BucketPlan::from_group(&[stats(20, 10, 40)]));
         assert_eq!(
             at_cap, way_over,

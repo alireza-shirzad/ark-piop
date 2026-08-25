@@ -95,6 +95,62 @@ pub fn batch_s_check_claims<T: TrackerCore>(
     Ok(individual)
 }
 
+/// Convert every pending zerocheck claim into a sumcheck claim, batching and
+/// converting each `num_vars` group at its own width.
+///
+/// Run before bucketing, this leaves the partitioner a homogeneous list of
+/// sumcheck claims instead of three claim kinds, so it no longer has to guess
+/// what conversion will do to a claim's degree — the `eq` factor is already
+/// in the degree it reads.
+///
+/// One `eq` per nv group rather than one per bucket, which is the cost of
+/// converting before the buckets are known. Bounded by the number of distinct
+/// nvs (single digits in practice) rather than by the claim count, because
+/// each group is still batched into one claim before its single conversion.
+///
+/// Groups are walked in ascending nv so both sides sample challenges in the
+/// same order; the transcript is what makes their partitions agree.
+pub fn convert_zerochecks_by_nv<T: TrackerCore>(tracker: &mut T) -> SnarkResult<()> {
+    let claims = tracker.take_zerocheck_claims();
+    if claims.is_empty() {
+        debug!("No zerocheck claims to convert ahead of bucketing");
+        return Ok(());
+    }
+
+    let mut by_nv: BTreeMap<usize, Vec<crate::types::claim::TrackerZerocheckClaim>> =
+        BTreeMap::new();
+    for claim in claims {
+        by_nv
+            .entry(tracker.poly_nv(claim.id()))
+            .or_default()
+            .push(claim);
+    }
+
+    for (nv, group) in by_nv {
+        let group_len = group.len();
+        for claim in group {
+            tracker.push_zerocheck_claim(claim);
+        }
+        batch_z_check_claims(tracker)?;
+
+        if nv == 0 {
+            // `eq` over zero variables is the empty product, 1, so the
+            // conversion degenerates to "this constant is zero" — which is
+            // already a sumcheck claim over an empty hypercube. Taking the
+            // general path instead would sample an empty `r` and
+            // `build_eq_x_r` rejects that.
+            let id = tracker.last_zerocheck_id();
+            tracker.clear_zerocheck_claims();
+            tracker.push_sumcheck_claim(id, T::F::zero());
+        } else {
+            z_check_claim_to_s_check_claim(tracker, nv)?;
+        }
+        debug!("converted {group_len} zerocheck claims at nv {nv} to one sumcheck claim");
+    }
+
+    Ok(())
+}
+
 /// Convert the single batched zerocheck claim to a sumcheck claim.
 ///
 /// Technique: reduce `p(x) == 0` to `sum_x p(x) * eq(x, r) == 0` for a

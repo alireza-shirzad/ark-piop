@@ -331,6 +331,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// them all.
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self) -> SnarkResult<()> {
+        // Mirrors the prover's pre-bucketing conversion. Both sides walk the
+        // nv groups in the same ascending order, so the challenges this draws
+        // land in the transcript identically on each side.
+        crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
         let buckets = self.create_buckets();
         if !buckets.is_empty() {
             // Frozen before any bucket runs — see `global_max_nv`.

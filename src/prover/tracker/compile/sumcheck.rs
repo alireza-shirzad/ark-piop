@@ -884,6 +884,12 @@ where
         snapshot_end = "after_compile_sc_subproof"
     )]
     pub(super) fn compile_sc_subproof(&mut self) -> SnarkResult<Option<SumcheckSubproof<B::F>>> {
+        // Resolve the gadget zerocheck claims before partitioning, so the
+        // planner sees one kind of claim carrying its post-conversion degree.
+        // The two zerocheck sources born *inside* a bucket — nozerocheck
+        // batching's `prod * inv - 1` and degree reduction's chunk link
+        // constraints — are still converted there.
+        crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
         let buckets = self.create_buckets();
         if buckets.is_empty() {
             return Ok(None);
