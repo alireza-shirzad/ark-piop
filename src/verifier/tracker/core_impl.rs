@@ -164,21 +164,12 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
     // ── Seam: verifier-specific ─────────────────────────────────────
 
     fn track_eq_x_r(&mut self, r: &[Self::F], max_nv: usize) -> SnarkResult<TrackerID> {
-        // This oracle can be queried at a point longer than `r`, from two
-        // directions: a downstream pass extends eval-claim points up to the
-        // proof-global max, and a zerocheck converted before bucketing builds
-        // its `eq` at the claim's own nv and is then lifted to its bucket's
-        // `target_nv`.
-        //
-        // Match how the prover lifts it. `equalize_mat_poly_nv_to` bumps a
-        // materialized poly's virtual nv, and `MLE::set_virtual_nv` expands by
-        // *cyclic repeat*, so a lifted `eq` is constant in the added
-        // variables — `eq_lifted(p) = eq(p[..r.len()], r)`. Truncating the
-        // point reproduces exactly that. Zero-extending `r` instead would
-        // multiply in a spurious `Π (1 - p_i)` over the added coordinates,
-        // which is 1 only when they happen to be zero; that held while `eq`
-        // was always born at `target_nv` and never lifted, and stops holding
-        // at a random sumcheck point.
+        // The oracle may be queried at a point longer than `r` (extended
+        // eval-claim points; `eq` built at a claim's nv then lifted to its
+        // bucket). The prover lifts by cyclic repeat, so a lifted `eq` is
+        // constant in the added variables: truncate the point to `r.len()`.
+        // Zero-extending `r` instead would multiply in a spurious
+        // `Π (1 - p_i)` that is wrong at a random sumcheck point.
         let r = r.to_vec();
         let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> {
             let mut pt = pt;

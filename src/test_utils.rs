@@ -4,13 +4,8 @@ use crate::{
 use std::sync::Once;
 use tracing::instrument;
 
-/// Compute the JSON log file path for test tracing.
-///
-/// Rules:
-/// - If `TRACING_JSON_PATH` is set and non-empty, use it verbatim.
-/// - Otherwise, prefer `<target>/logs/log_YYYYMMDD_HHMMSS.jsonl` if a `target` dir
-///   is available or creatable.
-/// - Fallback to `<crate>/logs/log_YYYYMMDD_HHMMSS.jsonl` (ignored via `.gitignore`).
+/// Logs directory for test tracing: a creatable `target/logs`, falling back
+/// to `<crate>/logs` (gitignored).
 #[allow(dead_code)]
 fn compute_logs_dir() -> std::path::PathBuf {
     use std::path::{Path, PathBuf};
@@ -62,7 +57,6 @@ fn compute_json_log_path(level_suffix: &str) -> String {
     }
     let logs_dir = compute_logs_dir();
 
-    // Build timestamped filename
     let datetime = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
     logs_dir
         .join(format!("log_{}_{}.jsonl", datetime, level_suffix))
@@ -100,11 +94,9 @@ fn compute_flame_path(level_suffix: &str) -> String {
         .into_owned()
 }
 
-/// Build the standard `EnvFilter` used by all ark-piop subscribers.
-///
-/// - Respects `RUST_LOG` (defaults to `"off"` when unset).
-/// - Suppresses `datafusion` / `sqlparser` noise unless explicitly requested.
-/// - Always enables `bench_stats=info` so statistics layers can receive events.
+/// Standard `EnvFilter` for ark-piop subscribers: respects `RUST_LOG`
+/// (default `"off"`), suppresses `datafusion`/`sqlparser` noise unless
+/// requested, and always enables `bench_stats=info` for statistics layers.
 pub fn build_env_filter() -> tracing_subscriber::EnvFilter {
     use tracing_subscriber::EnvFilter;
     let rust_log = std::env::var("RUST_LOG").unwrap_or_default();
@@ -120,16 +112,9 @@ pub fn build_env_filter() -> tracing_subscriber::EnvFilter {
     filter
 }
 
-/// Initialize a `tracing` subscriber (no-op if already set).
-///
-/// Sets up three layers on a `tracing_subscriber::registry`:
-/// 1. **Tree layer** — hierarchical span output to stdout via `tracing-tree`
-/// 2. **Span timing layer** — emits `time.busy` / `time.idle` on span close
-/// 3. **Event layer** — prints `debug!` / `info!` events
-///
-/// All three exclude the `bench_stats` target so statistics events are only
-/// captured by an optional extra layer (e.g. a JSONL stats layer provided
-/// by the caller via [`init_subscriber_with_layer`]).
+/// Initialize a `tracing` subscriber (no-op if already set) with tree,
+/// span-timing, and event layers. All three exclude the `bench_stats` target,
+/// so stats events reach only an extra layer (see [`init_subscriber_with`]).
 pub fn init_subscriber() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -172,13 +157,9 @@ pub fn init_subscriber() {
     });
 }
 
-/// Initialize a `tracing` subscriber with an additional custom layer.
-///
-/// Same as [`init_subscriber`] but accepts an extra layer (e.g. a JSONL
-/// statistics layer) that will receive all events including `bench_stats`.
-///
-/// The `setup_fn` is called with the registry so the caller can add their
-/// layer without fighting generic type bounds.
+/// Like [`init_subscriber`] but the caller supplies `setup_fn` (run once) to
+/// install extra layers (e.g. a JSONL stats layer receiving `bench_stats`)
+/// without fighting generic type bounds.
 pub fn init_subscriber_with<F>(setup_fn: F)
 where
     F: FnOnce() + Send + 'static,
@@ -187,9 +168,8 @@ where
     INIT.call_once(setup_fn);
 }
 
-/// A helper function that outputs given the number of variables (i.e. log of
-/// maximum table size), outputs a ready-to-use instance of the prover and
-/// verifier
+/// Ready-to-use prover/verifier pair for the given number of variables
+/// (log of maximum table size).
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug")]
 pub fn prelude_with_vars<B: SnarkBackend>(
@@ -202,10 +182,7 @@ pub fn prelude_with_vars<B: SnarkBackend>(
     Ok((prover, verifier))
 }
 
-/// A prelude for testing, with a fewer number of variables, suitable for
-/// testing on small tables.
-/// This function sets up the proof system and gives you a ready-to-use instance
-/// of the prover and verifier
+/// Test prelude: small-table prover/verifier pair with tracing initialized.
 #[allow(clippy::type_complexity)]
 #[instrument(level = "debug", skip_all)]
 pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
@@ -213,10 +190,7 @@ pub fn test_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>),
     prelude_with_vars::<B>(19)
 }
 
-/// A prelude for benchmarking, with a larger number of variables, suitable for
-/// benchmarking on large tables.
-/// This function sets up the proof system and gives you a ready-to-use instance
-/// of the prover and verifier
+/// Bench prelude: larger-table prover/verifier pair with tracing initialized.
 #[allow(clippy::type_complexity)]
 pub fn bench_prelude<B: SnarkBackend>() -> Result<(ArgProver<B>, ArgVerifier<B>), SnarkError> {
     init_subscriber();

@@ -8,15 +8,10 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Compiles the PCS subproof, a proof containg (a) a list of comitments to
-    /// the polynomials that the verifier needs oracle access to (b) a query
-    /// map, which is the list of all the possible verifier queries to these
-    /// comitments (c) a batch opening proof corresponding to the query map
-    ///
-    /// `bench_stats`/`info` rather than the usual `debug`: the stats
-    /// subscriber times this span open→close to record
-    /// `snark_prover_mv_pcs_time_s`, and only `bench_stats=info` is
-    /// enabled under the default env filter. See `compile_sc_subproof`.
+    /// Compiles the PCS subproof: commitments the verifier needs oracle
+    /// access to, the query map, and the batch opening proof.
+    /// `bench_stats`/`info` because the stats subscriber times this span to
+    /// record `snark_prover_mv_pcs_time_s`.
     #[piop_stage(
         span = "compile_mv_pcs_subproof",
         snapshot_end = "after_compile_mv_pcs_subproof"
@@ -192,15 +187,10 @@ where
         })
     }
 
-    /// Compiles the PCS subproof, a proof containg (a) a list of comitments to
-    /// the polynomials that the verifier needs oracle access to (b) a query
-    /// map, which is the list of all the possible verifier queries to these
-    /// comitments (c) a batch opening proof corresponding to the query map
-    ///
-    /// `bench_stats`/`info` rather than the usual `debug`: the stats
-    /// subscriber times this span open→close to record
-    /// `snark_prover_uv_pcs_time_s`, and only `bench_stats=info` is
-    /// enabled under the default env filter. See `compile_sc_subproof`.
+    /// Compiles the PCS subproof: commitments the verifier needs oracle
+    /// access to, the query map, and the batch opening proof.
+    /// `bench_stats`/`info` because the stats subscriber times this span to
+    /// record `snark_prover_uv_pcs_time_s`.
     #[piop_stage(
         span = "compile_uv_pcs_subproof",
         snapshot_end = "after_compile_uv_pcs_subproof"

@@ -7,17 +7,12 @@ use crate::{
     types::artifact::{Artifact, SizeBreakdown},
 };
 
-/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump
-/// whenever the wire format of the proof changes so that old clients fail
-/// fast on new proofs (and vice versa) with [`SnarkError::Artifact`] instead
-/// of silently decoding garbage or producing a misleading
-/// `ark_serialize::SerializationError`.
+/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump on
+/// wire-format changes so mismatched clients fail fast with
+/// [`SnarkError::Artifact`] instead of silently decoding garbage.
 ///
-/// v2: `PCSSubproof.constant_num_vars` carries per-TrackerID `num_vars` for
-/// constants so the verifier can mirror the prover's `state.num_vars` /
-/// `poly_log_sizes`. Prior to v2 the verifier hardcoded `log_size = 0` for
-/// constants, which caused gen_id divergence when downstream arithmetic
-/// (add_polys/mul_polys/commit_chunk max_nv) depended on that value.
+/// v2: `PCSSubproof.constant_num_vars` carries per-constant `num_vars` so the
+/// verifier mirrors `poly_log_sizes`; v1 hardcoded 0, causing gen_id drift.
 pub const PROOF_ENCODING_VERSION: u8 = 2;
 use crate::{
     pcs::PCS,
@@ -63,17 +58,13 @@ where
     pub unique_constants: BTreeMap<ConstantID, F>,
     /// Maps each TrackerID to its ConstantID in `unique_constants`.
     pub constant_map: BTreeMap<TrackerID, ConstantID>,
-    /// Per-TrackerID `num_vars` for constants. The verifier mirrors these
-    /// into its `poly_log_sizes` so downstream arithmetic (add/mul, chunk-
-    /// commit `max_nv`) computes identical sizes on both sides. Prior to
-    /// wire v2 the verifier assumed `log_size = 0` for all constants which
-    /// caused gen_id drift whenever a constant polynomial had `num_vars > 0`
-    /// (e.g. a constant chunk introduced by `commit_chunk`).
+    /// Per-TrackerID `num_vars` for constants; the verifier mirrors these into
+    /// `poly_log_sizes` so both sides compute identical sizes (pre-v2 the
+    /// verifier assumed 0, causing gen_id drift for `num_vars > 0` constants).
     pub constant_num_vars: BTreeMap<TrackerID, u32>,
     pub point_map: PointMap<F, PC>,
-    /// Query map keyed by CommitmentID: each unique (commitment, point) pair
-    /// has one evaluation entry. Avoids duplicate openings when multiple
-    /// TrackerIDs share the same polynomial.
+    /// One evaluation per unique (commitment, point) pair, avoiding duplicate
+    /// openings when multiple TrackerIDs share the same polynomial.
     pub query_map: BTreeMap<CommitmentID, BTreeMap<PointID, F>>,
 }
 
@@ -180,8 +171,7 @@ where
         let miscellaneous_field_vectors = self
             .miscellaneous_field_vectors
             .serialized_size(Compress::Yes);
-        // +1 for the one-byte PROOF_ENCODING_VERSION envelope that `to_bytes`
-        // prepends; keeps the reported total in sync with the on-disk size.
+        // +1 for the version byte `to_bytes` prepends, matching on-disk size.
         let total = self.serialized_size(Compress::Yes) + 1;
 
         Some(SizeBreakdown::node(

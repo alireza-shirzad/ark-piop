@@ -12,7 +12,6 @@ pub mod keyed_sumcheck;
 pub mod lookup_check;
 pub mod structs;
 pub mod sum_check;
-/// Any PIOP must implement this trait.
 /// Helper to get a type name without generic parameters.
 #[inline]
 pub(crate) fn type_name_without_generics<T>() -> &'static str {
@@ -28,9 +27,8 @@ pub trait PIOP<B: SnarkBackend>: Sized {
     type ProverOutput;
     type VerifierOutput;
     type VerifierInput;
-    /// Proves the PIOP.
-    ///
-    /// This is a default wrapper that adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
+    /// Proves the PIOP: a default wrapper around [`Self::prove_inner`] adding tracing
+    /// and (optionally) honest-prover checks.
     fn prove(
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
@@ -39,13 +37,12 @@ pub trait PIOP<B: SnarkBackend>: Sized {
         let span = if tracing::level_enabled!(Level::TRACE) {
             span!(Level::TRACE, "piop.prove", piop = struct_name, ?input)
         } else {
-            // span name must be a string literal; record dynamic type name as a field instead
+            // Span names must be string literals; the dynamic type name is a field.
             span!(Level::DEBUG, "piop.prove", piop = struct_name)
         };
         let _guard = span.enter();
         #[cfg(feature = "honest-prover")]
         {
-            // Nested span for honest prover check so it's visible alongside prove/verify.
             let _hp_guard =
                 span!(Level::TRACE, "piop.honest_prover_check", piop = struct_name).entered();
             let new_prover = prover.deep_copy();
@@ -63,16 +60,14 @@ pub trait PIOP<B: SnarkBackend>: Sized {
         }
         let res = Self::prove_inner(prover, input);
 
-        // Optional: record errors on the span without spamming trace
         if let Err(ref e) = res {
             tracing::error!(parent: &span, error = %e, "prove failed");
         }
         res
     }
 
-    /// Verifies the PIOP.
-    ///
-    /// This is a default wrapper that adds automatic tracing instrumentation for any PIOP.
+    /// Verifies the PIOP: a default wrapper around [`Self::verify_inner`] adding
+    /// tracing instrumentation.
     fn verify(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
@@ -86,32 +81,26 @@ pub trait PIOP<B: SnarkBackend>: Sized {
         let _guard = span.enter();
         let res = Self::verify_inner(verifier, input);
 
-        // Optional: record errors on the span without spamming trace
         if let Err(ref e) = res {
             tracing::error!(parent: &span, error = %e, "verify failed");
         }
         res
     }
 
-    /// The actual implementation of the prover logic.
-    ///
-    /// This will be wrapped by `prove`, which adds tracing instrumentation and (optionally) honest prover checks for any PIOP.
+    /// The actual prover logic, wrapped by [`Self::prove`].
     fn prove_inner(
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
 
-    /// The actual implementation of the verifier logic.
-    ///
-    /// This will be wrapped by `verify`, which adds automatic tracing instrumentation for any PIOP.
+    /// The actual verifier logic, wrapped by [`Self::verify`].
     fn verify_inner(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput>;
 
-    /// An optional honest prover check that runs the prover logic in a fresh prover instance and checks that it succeeds.
-    ///
-    /// This is useful for testing and debugging, but is costly and should not be enabled in production. The prover passed to the honest prover check is a deep copy of the original prover, so it won't interfere with the actual protocol state.
+    /// Optional honest-prover check, run on a deep copy of the prover so it cannot
+    /// interfere with protocol state. Costly — for testing/debugging only.
     #[cfg(feature = "honest-prover")]
     #[allow(unused_variables)]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<()> {
@@ -119,9 +108,8 @@ pub trait PIOP<B: SnarkBackend>: Sized {
     }
 }
 
-/// This trait only used for deep cloning PIOP prover inputs.
-///
-/// Simply cloning the prover input interferes with the actual state of the prover in the protocol. Hence for honest prover checks we need to create a new prover instance and deep clone the input with this new prover instance.
+/// Deep-clones PIOP prover inputs against a fresh prover instance — a plain clone
+/// would interfere with the real prover's protocol state during honest-prover checks.
 pub trait DeepClone<B: SnarkBackend> {
     fn deep_clone(&self, new_prover: ArgProver<B>) -> Self;
 }

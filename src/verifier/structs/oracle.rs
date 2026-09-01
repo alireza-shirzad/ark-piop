@@ -94,10 +94,8 @@ impl<F: 'static + Field> Oracle<F> {
 }
 
 impl<F: PrimeField> Oracle<F> {
-    /// Convenience constructor that wraps an owned multilinear polynomial
-    /// into a multivariate oracle. Equivalent to
-    /// `Oracle::new_multivariate(poly.num_vars(), move |pt| Ok(poly.evaluate(&pt)))`
-    /// but without the boilerplate.
+    /// Wrap an owned multilinear polynomial into a multivariate oracle
+    /// without closure boilerplate.
     pub fn from_mle(poly: crate::arithmetic::mat_poly::mle::MLE<F>) -> Self {
         use ark_poly::Polynomial;
         let nv = poly.num_vars();
@@ -114,7 +112,6 @@ impl<F: 'static + Field> Clone for InnerOracle<F> {
         }
     }
 }
-////////////////////////////////////////////
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
@@ -152,7 +149,6 @@ where
     }
 }
 
-// Serialization for tracked oracle
 impl<B> Debug for TrackedOracle<B>
 where
     B: SnarkBackend,
@@ -251,10 +247,8 @@ where
         self.id_or_const
     }
 
-    /// Returns `Some(c)` if this tracked oracle is a folded constant and has
-    /// not yet been materialized into a constant oracle, `None` otherwise.
-    /// Prefer this over pattern-matching on [`Self::id_or_const`] when the
-    /// caller only cares about the constant-vs-non-constant distinction.
+    /// `Some(c)` if this is a folded constant not yet materialized into a
+    /// constant oracle, `None` otherwise.
     pub fn as_constant(&self) -> Option<B::F> {
         match self.id_or_const {
             Either::Right(c) => Some(c),

@@ -1,52 +1,29 @@
-//! Vendored small-scalar multi-scalar multiplication entry points.
+//! Small-scalar MSM entry points (`msm_u1`..`msm_u64`) vendored from arkworks master,
+//! letting the pst13 commit path consume compressed MLE backings directly instead of
+//! materializing 32-byte field elements. Kept next to their only caller since the
+//! arkworks-0.5 `VariableBaseMSM` trait doesn't expose them.
 //!
-//! Ports `msm_u1`, `msm_u8`, `msm_u16`, `msm_u32`, `msm_u64` from arkworks
-//! master (post-0.5.0 release), so the pst13 commit path can consume
-//! compressed-storage MLE backings (`Bit`, `U8`, `U32`, `U64`) directly
-//! without materializing the full-fat 32-byte field elements first.
+//! Adaptation: ark-ec 0.5.0 has no `V::Bucket`, so `V` itself is the bucket type,
+//! matching 0.5.0's own `msm_bigint`; semantics are preserved.
 //!
-//! # Why here, not in `arithmetic/msm.rs`
-//!
-//! Commit is the only site that needs these today, and the arkworks-0.5
-//! `VariableBaseMSM` trait doesn't expose them — putting the port next to its
-//! only caller keeps blast-radius tight and avoids a fake trait extension.
-//!
-//! # Adaptations from arkworks master
-//!
-//! Master's `msm_serial` accumulates into `V::Bucket` / `V::ZERO_BUCKET`, a
-//! specialized bucket type introduced when arkworks bumped its major version.
-//! On ark-ec 0.5.0 there is no such type, so we use `V` directly as the
-//! bucket type and `V::zero()` as the identity — matching how ark-ec 0.5.0's
-//! own `msm_bigint` accumulates. Semantics are preserved: `V += &V::MulBase`
-//! and `V += &V` are both available on the 0.5 trait (`ScalarMul` supertrait
-//! guarantees the affine → projective mixed addition).
-//!
-//! # Correctness anchor
-//!
-//! Each entry point matches `VariableBaseMSM::msm_unchecked` on the same
-//! inputs (lifted through `F::from`). This is tested end-to-end below and
-//! is the only correctness claim we make: the small-scalar MSMs must
-//! produce the same commitment as the field-element MSM on the same
-//! scalars.
+//! Correctness anchor: each entry point must match `msm_unchecked` on the same
+//! scalars lifted through `F::from` — tested end-to-end below.
 
 use ark_ec::scalar_mul::variable_base::VariableBaseMSM;
 use ark_std::{cfg_chunks, vec::Vec};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-/// Approximate `ln(a)` used to size Pippenger windows. Copied verbatim from
-/// ark-ec 0.5.0's private helper (`scalar_mul/mod.rs`, `ln_without_floats`).
+/// Approximate `ln(a)` for Pippenger window sizing; verbatim from ark-ec 0.5.0's
+/// private `ln_without_floats`.
 #[inline]
 fn ln_without_floats(a: usize) -> usize {
     // log2(a) * ln(2)  ≈  log2(a) * 0.69
     (ark_std::log2(a) as usize) * 69 / 100
 }
 
-/// Splits `bases`/`scalars` into thread-sized chunks and returns the per-thread
-/// chunk length. Returns `None` when there is no work to do.
-///
-/// Also truncates both slices to their shortest common length, matching
-/// arkworks' convention (`msm_unchecked` behaves the same way).
+/// Returns the per-thread chunk length (`None` if no work) and truncates both slices
+/// to their shortest common length, matching `msm_unchecked`'s convention.
 fn preamble<A, B>(bases: &mut &[A], scalars: &mut &[B]) -> Option<usize> {
     let size = bases.len().min(scalars.len());
     if size == 0 {
@@ -65,13 +42,8 @@ fn preamble<A, B>(bases: &mut &[A], scalars: &mut &[B]) -> Option<usize> {
     Some(chunk_size)
 }
 
-/// Multi-scalar multiplication with boolean scalars: each base is added
-/// exactly once when its scalar is `true`, otherwise skipped.
-///
-/// Optimal for `Bit`-backed MLEs — no bucketing, `O(N)` curve additions
-/// where `N` is the count of set bits. Compare with `msm_unchecked` on the
-/// same scalars promoted to `V::ScalarField`, which walks all 254 bits with
-/// a general Pippenger window and pays ~12× more group ops per element.
+/// MSM with boolean scalars: add each base whose scalar is `true`. No bucketing —
+/// `O(set bits)` curve additions, far cheaper than a full Pippenger over field scalars.
 pub(crate) fn msm_u1<V: VariableBaseMSM>(
     mut bases: &[V::MulBase],
     mut scalars: &[bool],
@@ -153,20 +125,10 @@ pub(crate) fn msm_u64<V: VariableBaseMSM>(
         .sum()
 }
 
-/// Serial Pippenger over small (≤ 64 bit) scalars.
-///
-/// Ports arkworks master's `msm_serial`, adapted so the bucket type is `V`
-/// itself (ark-ec 0.5.0 has no `V::Bucket`). The algorithm is identical to
-/// the one in ark-ec 0.5.0's `msm_bigint`, restricted to a 64-bit scalar
-/// domain: `num_bits` is `size_of::<u64>() * 8` instead of the field's
-/// `MODULUS_BIT_SIZE`, so scalars that fit in `u{8,16,32,64}` need only the
-/// low windows and the higher ones are skipped for free (the `scalar >>= …`
-/// zeros them out).
-///
-/// Window width `c` grows with input length via `ln_without_floats`, so the
-/// bucket count `2^c - 1` stays proportional to the point count and matches
-/// the tuning of arkworks' own Pippenger — no ad-hoc small-scalar tuning
-/// here beyond the shortened bit range.
+/// Serial Pippenger over small (≤ 64 bit) scalars: arkworks master's `msm_serial`
+/// with `V` as the bucket type (ark-ec 0.5.0 has no `V::Bucket`) and `num_bits`
+/// restricted to 64, so high windows are skipped for free. Window width follows
+/// arkworks' own `ln_without_floats` tuning.
 fn msm_serial_small<V, S>(bases: &[V::MulBase], scalars: &[S]) -> V
 where
     V: VariableBaseMSM,
@@ -187,8 +149,7 @@ where
         .step_by(c)
         .map(|w_start| {
             let mut res = zero;
-            // Master's `msm_serial` uses `V::Bucket`; on 0.5.0 we use `V`
-            // as the bucket type, exactly like ark-ec's own `msm_bigint`.
+            // `V` as the bucket type — see the fn doc.
             let mut buckets = vec![zero; (two_to_c as usize) - 1];
             scalars
                 .iter()
@@ -246,8 +207,7 @@ mod tests {
     use ark_ff::{UniformRand, Zero};
     use ark_std::{rand::SeedableRng, test_rng};
 
-    /// Build `count` random G1 bases via `G1::generator() * rand_fr` — cheap
-    /// and correct for a correctness test (we don't need cryptographic bases).
+    /// Random G1 bases — cheap, fine for correctness tests.
     fn rand_bases(count: usize) -> Vec<<G1 as ark_ec::scalar_mul::ScalarMul>::MulBase> {
         use ark_ec::CurveGroup;
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xB007);

@@ -201,29 +201,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .and_then(|proof| proof.sc_subproof.as_ref())
             .map(|subproof| subproof.sumcheck_claims().clone());
 
-        // The prover records every proof-map value pre-scaled to
-        // `raw * 2^(global_max - poly_nv)` so tt-core gadgets that un-scale
-        // by their local max still recover `raw`. But this bucket's
-        // aggregated sumcheck runs at `target_nv`, not `global_max`, and
-        // it needs to see `raw * 2^(target_nv - poly_nv)` (which is what
-        // the prover's `equalize_mat_poly_nv_to(target_nv)` produced before
-        // the sumcheck). Divide by `2^(global_max - target_nv)` — that is
-        // a no-op in a single-bucket plan (`target_nv == global_max`) and
-        // matches the prover pre-scale in every multi-bucket plan.
+        // Proof-map values arrive pre-scaled to `raw * 2^(global_max -
+        // poly_nv)`, but this bucket's sumcheck runs at `target_nv` and
+        // needs `raw * 2^(target_nv - poly_nv)`; divide by
+        // `2^(global_max - target_nv)` (a no-op for single-bucket plans).
         //
-        // `global_max_nv` is threaded in from the dispatcher
-        // (snapshotted BEFORE the bucket loop starts, mirroring the
-        // prover's `global_max_nv` snapshot at the top of
-        // `compile_sc_subproof`). A previous version re-read it LIVE
-        // here — `let global_max_nv = self.global_max_nv();`
-        // — which grew across buckets as `batch_nozero_check_claims` /
-        // `reduce_sumcheck_dgree` added chunk commits. In multi-bucket
-        // plans (which the cost model produces at nv≥16 for equality
-        // filters on `orders` / `lineitem`) this made bucket 1's divisor
-        // strictly larger than the prover's frozen multiplier, so recorded
-        // claims came out underscaled and every affected sumcheck round-0
-        // check tripped `p(0)+p(1) != asserted_sum`. Freezing at the
-        // dispatcher level restores exact prover/verifier symmetry.
+        // `global_max_nv` is threaded in frozen from BEFORE the bucket loop,
+        // mirroring the prover. Re-reading it live here once grew it across
+        // buckets (chunk commits), underscaled the claims, and failed every
+        // multi-bucket plan's round-0 `p(0)+p(1) != asserted_sum` check.
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             if let Some(proof_claims) = proof_claims.as_ref()
@@ -251,20 +237,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Runs the verifier-side sumcheck pipeline for a single bucket at
-    /// `target_nv`. Consumes whatever claims are currently in state, verifies
-    /// one bucket's `SumcheckProof` at `bucket_index`, and leaves the
-    /// aggregated sumcheck claim slot empty so the next bucket can populate
-    /// it. Does **not** call `perform_eval_check` — that runs once, after
-    /// every bucket, from the dispatcher.
-    /// Check one bucket, mirroring the prover's `run_bucket` stage for
-    /// stage. Installs the bucket's claims, then walks the same pipeline in
-    /// the same order.
-    ///
-    /// Takes `global_max_nv` where the prover's `run_bucket` does not: the
-    /// prover rescales its recorded claims *after* the bucket returns, in
-    /// `merge_bucket_claims`, while the verifier has to un-rescale before
-    /// batching so the sums it feeds the sumcheck are in the bucket's frame.
+    /// Check one bucket at `target_nv`, mirroring the prover's `run_bucket`
+    /// stage for stage. Leaves the aggregated claim slot empty for the next
+    /// bucket; `perform_eval_check` runs once after every bucket. Takes
+    /// `global_max_nv` (the prover's version doesn't) because the verifier
+    /// must un-rescale claims into the bucket's frame *before* batching.
     fn run_bucket(
         &mut self,
         bucket_index: usize,
@@ -291,19 +268,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Drain the pending claims and partition them into buckets, rebuilding
-    /// the prover's plan with no wire-format hint.
-    ///
-    /// Byte-identical to the prover's `create_buckets`: every
-    /// partition-determining input is read through
-    /// [`TrackerCore`](crate::tracker_core::TrackerCore), so the two sides
-    /// differ in that impl rather than here. See
-    /// [`bucketing`](crate::tracker_core::bucketing) for the cost model.
+    /// Drain the sumcheck claims and partition them into buckets.
+    #[instrument(level = "debug", skip(self))]
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
-        // Both other claim kinds were discharged before the partition is
-        // drawn, so anything still pending here is a claim that would never
-        // be proved. `assert!` rather than `debug_assert!` — release is where
-        // it matters, and dropping a claim is unsound, not just slow.
+        // 1. First check that all the zerocheck and nozercheck claims are drained
         assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty()
                 && self.state.mv_pcs_substate.no_zero_check_claims.is_empty(),
@@ -311,8 +279,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             self.state.mv_pcs_substate.zero_check_claims.len(),
             self.state.mv_pcs_substate.no_zero_check_claims.len(),
         );
+        // 2. Drain all the sumcheck claims
         let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims)
+        // 3. Get the cost model for bucketing from the verifier configuration
+        let model =
+            crate::tracker_core::bucketing::CostModel::new(self.config.sumcheck_term_degree_limit);
+        // 4. Build the buckets
+        crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims, model)
     }
 
     /// Check every bucket in order. Mirrors the prover's `run_all_buckets`;
@@ -329,14 +302,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Pad every recorded eval-claim point out to `global_max_nv`.
-    ///
-    /// The prover's per-bucket `equalize_mat_poly_nv_to` extends each point
-    /// to that bucket's `target_nv`; after the last bucket every point it
-    /// recorded is padded to `global_max_nv`. Mirror that here so PCS
-    /// `batch_verify_inner` sees uniform-length points when computing
-    /// `eq_eval(a2, point_i)`. A single-bucket plan at the global max makes
-    /// this a no-op.
+    /// Pad every recorded eval-claim point out to `global_max_nv`, mirroring
+    /// the prover's per-bucket point extension, so the PCS batch verify sees
+    /// uniform-length points. No-op for single-bucket plans.
     fn pad_eval_claim_points(&mut self, global_max_nv: usize) {
         self.state.mv_pcs_substate.eval_claims =
             std::mem::take(&mut self.state.mv_pcs_substate.eval_claims)
@@ -350,7 +318,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .collect();
     }
 
-    /// Verifier mirror of the prover's `compile_sc_subproof`: same phases,
+    /// Verifier mirror of the prover's `compile_piop_subproof`: same phases,
     /// same order — create the buckets, freeze the cross-bucket frame, run
     /// them all.
     #[instrument(level = "debug", skip_all)]
@@ -956,24 +924,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(pcs_res)
     }
 
-    // Get the max_nv which is the number of variabels for the sumchekck protocol
-    /// Widest materialized commitment in the proof — the hypercube width
-    /// that acts as the run's common frame wherever something has to hold
-    /// across buckets, regardless of how the cost model partitioned them.
-    ///
-    /// Here that means un-scaling recorded claim sums back to the bucket
-    /// frame (see [`Self::equalize_sumcheck_claims`]) and padding PCS
-    /// evaluation points. Must equal the prover's `global_max_nv`, which is
-    /// why both sides spell it the same way.
-    ///
-    /// Must be read **once, before any bucket runs**, and the result threaded
-    /// through the whole run. Batching adds chunk commitments as buckets
-    /// execute, so this value grows during the loop; when it was re-read live
-    /// here, the divisor outgrew the prover's multiplier and every
-    /// multi-bucket plan failed round-0 with `p(0)+p(1) != asserted_sum`.
-    ///
-    /// Returns 1 when there are no materialized commitments rather than
-    /// panicking — the claim pipeline tolerates an empty commitment set.
+    /// Widest materialized commitment — the run's common frame for
+    /// un-scaling claim sums and padding PCS points. Must equal the prover's
+    /// `global_max_nv`, and must be read **once, before any bucket runs**:
+    /// chunk commits grow it during the loop, and reading it live once
+    /// failed every multi-bucket plan's round-0 check. Returns 1 when no
+    /// commitments exist.
     #[instrument(level = "debug", skip_all)]
     fn global_max_nv(&self) -> usize {
         self.state

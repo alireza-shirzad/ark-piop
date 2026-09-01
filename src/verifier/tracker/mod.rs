@@ -69,16 +69,9 @@ fn eval_lt_bound<F: PrimeField>(point: &[F], bits_lsb: &[bool], nv: usize) -> F 
     acc
 }
 
-/// The Tracker is a data structure for creating and managing virtual
-/// commnomials and their comitments. It is in charge of
-///                      1) Recording the structure of virtual commnomials and
-///                         their products
-///                      2) Recording the structure of virtual commnomials and
-///                         their products
-///                      3) Recording the comitments of virtual commnomials and
-///                         their products
-///                      4) Providing methods for adding virtual commnomials
-///                         together
+/// Central verifier-side state manager: records the structure of virtual
+/// polynomials (as commitment oracles) and their products, and provides the
+/// algebra for combining them.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct VerifierTracker<B: SnarkBackend> {
@@ -143,12 +136,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         TrackerID::from_usize(id)
     }
 
-    /// Peek at the next TrackerID without incrementing the counter. Widened
-    /// to `pub` so tt-core plan expr nodes (specifically `LikeExpr`) that
-    /// need to commit witness polys during `add_virtual_witness` — where
-    /// the pass does not carry an `ArgVerifier` reference — can mirror the
-    /// prover's commit order via `oracle.tracker().borrow_mut().peek_next_id()`
-    /// followed by `track_mv_com_by_id`.
+    /// Peek at the next TrackerID without incrementing the counter. `pub`
+    /// so tt-core expr nodes without an `ArgVerifier` reference can mirror
+    /// the prover's commit order.
     pub fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }

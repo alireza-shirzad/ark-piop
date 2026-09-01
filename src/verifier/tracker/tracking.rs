@@ -55,21 +55,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
         let nv = comm.log_size();
 
-        // Register the commitment under the caller-supplied `id` directly
-        // rather than going through `gen_id`. Rationale: callers like
-        // `TrackedTableOracle::from_tracked_table` visit a *subset* of the
-        // prover's committed polys (specifically those that belong to one
-        // TableScan payload) and may visit them in an order that isn't
-        // globally ascending by ID — the prover interleaves side-column and
-        // other-plan-node commits between the row-domain primaries the
-        // TableScan wants back, and grouping primary+aux per source column
-        // on the verifier side means a later source column's aux may have a
-        // strictly larger prover ID than the next source column's primary.
-        // Prior to this refactor, the verifier ran `gen_id` and asserted the
-        // freshly-generated ID matched the caller's `id` — which fails for
-        // any non-contiguous visitation order and silently corrupts
-        // `materialized_comms` in release builds (asserted only under
-        // `debug_assertions`).
+        // Register under the caller-supplied `id` directly, not `gen_id`:
+        // subset-transfer callers (`from_tracked_table`) visit prover ids in
+        // a non-contiguous order, and the old generate-and-assert scheme
+        // silently corrupted `materialized_comms` in release builds.
         self.register_mv_com_at_id(id, comm.clone(), CommitmentBinding::ProofEmitted)?;
         Ok((nv as usize, id))
     }
@@ -128,13 +117,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.poly_is_material.insert(id, true);
 
         if binding == CommitmentBinding::ProofEmitted {
-            // Proof-owned commitments feed the transcript in prover order.
-            // NOTE: for subset-transfer callers (`from_tracked_table`)
-            // this transcript order does NOT match the prover's, but those
-            // callers drop the verifier immediately after so its transcript
-            // is never subsequently consumed for challenge derivation. If a
-            // future caller wires this into a live verify run, they must
-            // route through the ordered path in `track_mat_mv_com_with_binding`.
+            // Subset-transfer callers append in a different order than the
+            // prover, but drop the verifier before its transcript is ever
+            // consumed; a live verify run must use the ordered path in
+            // `track_mat_mv_com_with_binding`.
             self.state
                 .transcript
                 .append_serializable_element(b"comm", &comm)?;
@@ -164,12 +150,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         cnst: B::F,
         num_vars: usize,
     ) -> SnarkResult<(usize, TrackerID)> {
-        // Register the constant under the caller-supplied id directly (same
-        // subset-transfer rationale as `register_mv_com_at_id` above).
-        // Idempotent-transfer fast path: if this id was already registered
-        // (e.g. two `from_tracked_table` visits for the same TableScan),
-        // return the existing entry rather than re-appending the constant
-        // to the transcript.
+        // Same subset-transfer rationale as `register_mv_com_at_id` above;
+        // idempotent so a repeat visit doesn't re-append to the transcript.
         if self
             .state
             .poly_kinds

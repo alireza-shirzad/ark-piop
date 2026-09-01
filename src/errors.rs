@@ -1,8 +1,5 @@
-//! Top-level error types for the ark-piop SNARK framework.
-//!
-//! [`SnarkError`] aggregates failures from every subsystem (arithmetic,
-//! transcript, PCS, PIOP, prover, verifier, setup, I/O, serialization).
-//! Most functions in the crate return [`SnarkResult<T>`].
+//! Top-level error types: [`SnarkError`] aggregates every subsystem's
+//! failures; most functions return [`SnarkResult<T>`].
 
 use crate::{
     arithmetic::errors::ArithErrors, pcs::errors::PCSError, piop::errors::PolyIOPErrors,
@@ -14,10 +11,7 @@ use thiserror::Error;
 /// Convenience alias used throughout the crate.
 pub type SnarkResult<T> = Result<T, SnarkError>;
 
-/// Top-level error enum for the SNARK framework.
-///
-/// Each variant wraps a subsystem-specific error so that callers can match
-/// on the origin of the failure when needed.
+/// Top-level error enum; each variant wraps one subsystem's error type.
 #[derive(Error, Debug)]
 #[allow(private_interfaces)]
 pub enum SnarkError {
@@ -82,10 +76,8 @@ pub enum InputShapeError {
     InputNumberOfVariablesMismatch { expected: usize, actual: usize },
 }
 
-/// Assert that an error is a soundness error (false claim or verifier check
-/// failure, depending on whether the `honest-prover` feature is enabled).
-///
-/// Used in tests to confirm that deliberately-invalid proofs are caught.
+/// Asserts (in tests) that `err` is a soundness error: a false-claim error
+/// under the `honest-prover` feature, a verifier check failure otherwise.
 pub fn assert_soundness_error(err: SnarkError) {
     #[cfg(feature = "honest-prover")]
     {

@@ -17,15 +17,6 @@ where
                         .iter()
                         .all(|(_, ids)| ids.iter().all(|id| self.mat_mv_poly(*id).is_some()))
                 );
-                // Ensure all the product polynomials have the same number of variables
-                // assert_eq!(
-                //     virt_poly
-                //         .iter()
-                //         .flat_map(|(_, ids)| ids.iter().map(|id| self.poly_nv(*id)))
-                //         .collect::<HashSet<_>>()
-                //         .len(),
-                //     1
-                // );
                 let nv = self.poly_nv(id);
 
                 let evals = virt_poly.iter().fold(
@@ -33,12 +24,8 @@ where
                     |mut acc, (coeff, products)| {
                         let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
                             let mle = self.mat_mv_poly(*id).unwrap();
-                            // Fix 6b: skip the 2^nv Vec allocation when the
-                            // factor is Constant-backed — one scalar multiply
-                            // per slot suffices. Saves an O(2^nv · sizeof(F))
-                            // heap alloc per Constant factor per product term,
-                            // which shows up in every virtual-poly materialise
-                            // on activator/all-same columns.
+                            // Constant-backed factor: one scalar multiply per
+                            // slot, skipping an O(2^nv) Vec allocation.
                             if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
                                 value,
                                 ..

@@ -1,8 +1,7 @@
 //! Verifier side of the PIOP framework.
 //!
-//! [`ArgVerifier`] is the main entry point. It wraps a [`VerifierTracker`](tracker::VerifierTracker)
-//! (via `Rc<RefCell<...>>`) and exposes methods to register commitments,
-//! add claims, and verify proofs.
+//! [`ArgVerifier`] wraps a shared [`VerifierTracker`](tracker::VerifierTracker)
+//! and exposes methods to register commitments, add claims, and verify proofs.
 
 pub mod errors;
 pub mod structs;
@@ -84,10 +83,8 @@ where
         Self::new_from_tracker_rc(Rc::new(RefCell::new(tracker)))
     }
 
-    /// Create an independent verifier handle by deep-cloning the underlying tracker state.
-    ///
-    /// Unlike `Clone`, this does not share the internal `Rc<RefCell<_>>`, so mutations in one
-    /// verifier handle do not leak into another.
+    /// Deep-clone the tracker into an independent verifier handle; unlike
+    /// `Clone`, mutations in one handle do not leak into the other.
     #[instrument(level = "debug", skip_all)]
     pub fn fork(&self) -> Self {
         let tracker = self.tracker_rc.borrow().clone();
@@ -168,9 +165,7 @@ where
         Ok(tracked_oracle)
     }
 
-    /// Track a materialized multivariate polynomial
-    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
-    /// map and returns the TrackerID
+    /// Track a constant multivariate oracle.
     #[instrument(level = "debug", skip(self))]
     pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: B::F) -> TrackedOracle<B> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -301,7 +296,8 @@ where
         self.tracker_rc.borrow_mut().query_uv(poly_id, point)
     }
 
-    //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
+    //TODO: only used by the multiplicity-check; should be supplied by the
+    // user rather than living in this library.
     #[instrument(level = "debug", skip(self))]
     pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
         self.tracker_rc.borrow().prover_claimed_sum(id)
@@ -312,10 +308,9 @@ where
         self.tracker_rc.borrow_mut().commitment_num_vars(id)
     }
 
-    /// Track the next multivariate commitment the prover emitted. Convenience
-    /// fused form of `peek_next_id()` followed by `track_mv_com_by_id(id)`:
-    /// the peek-then-track pattern is race-prone because any other claim that
-    /// sneaks in between the two calls desyncs tracker IDs.
+    /// Track the next multivariate commitment the prover emitted: a fused
+    /// `peek_next_id()` + `track_mv_com_by_id(id)` — the split pattern is
+    /// race-prone, as a claim between the two calls desyncs tracker IDs.
     #[instrument(level = "debug", skip(self))]
     pub fn track_next_mv_com(&mut self) -> SnarkResult<TrackedOracle<B>> {
         let id = self.tracker_rc.borrow_mut().peek_next_id();

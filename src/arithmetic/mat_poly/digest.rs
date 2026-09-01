@@ -2,22 +2,14 @@ use ark_ff::Field;
 
 use crate::arithmetic::mat_poly::mle::{MLE, MLEStorage};
 
-/// Compute a BLAKE3 digest of an MLE by hashing the raw bytes of its storage
-/// backing directly — no field-form materialization needed. The digest is
-/// storage-aware: two MLEs whose lifted evaluations are equal but whose
-/// backings differ (e.g. `Bit`-packed vs `Field(vec![0/1])`) hash to
-/// *different* digests. That is intentional and correct for the commitment
-/// cache — different storage variants also produce different MSMs (small-scalar
-/// vs full-width Pippenger), so cross-variant cache hits would be unsound.
+/// BLAKE3 digest of an MLE's raw storage bytes (no field materialization).
+/// Intentionally storage-aware: equal lifted evaluations with different
+/// backings hash differently — required for commitment-cache soundness, since
+/// different storage variants also produce different MSMs.
 pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
-    // Discriminant byte so the (Field, [0,1,0,1,...]) collision-with-Bit case
-    // can't happen even if the byte payloads were identical.
-    // For the compact `Constant` and `Rle` variants we hash a lifted byte
-    // slice built on the fly (Constant → one F payload; Rle → parallel
-    // value/count arrays). Discriminant tags are unique per variant so
-    // cross-variant collisions remain impossible even when the lifted bytes
-    // happen to match (e.g. Constant(0) vs an all-zero Bit).
+    // Per-variant discriminant tag: rules out cross-variant collisions even
+    // when payload bytes match (e.g. Constant(0) vs an all-zero Bit).
     let mut constant_bytes: Vec<u8> = Vec::new();
     let mut rle_bytes: Vec<u8> = Vec::new();
     let mut sparse_bytes: Vec<u8> = Vec::new();
@@ -140,13 +132,9 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
             }
             (10, sparse_u64_bytes.as_slice())
         }
-        // Lazy variants: `mle_digest` feeds the commitment cache lookup
-        // which fires *before* commit. Lazy backings only ever appear on
-        // the tracker AFTER commit (via `register_mat_mv_poly`), so this
-        // arm should never be reached in the honest-prover flow. If it
-        // is (unexpected caller), fold the source's digest with the
-        // shift and a per-variant tag so the cache key still discriminates
-        // — degrades to a slow but correct path rather than a panic.
+        // Lazy variants only appear on the tracker AFTER commit, so this arm
+        // is unreachable in the honest-prover flow. If reached anyway, fold
+        // the source digest + shift + tag: slow but still a sound cache key.
         MLEStorage::LazyInverseShifted { source, shift, .. } => {
             let src_digest = mle_digest(source.as_ref());
             rle_bytes.extend_from_slice(&src_digest);
@@ -165,12 +153,8 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
             scale,
             ..
         } => {
-            // Hash the two parallel `u64` vectors as raw little-endian
-            // bytes (matches how U32 / U64 vectors above get fingerprinted
-            // via `size_of_val`), plus the scale byte. Two `PackedDecimal`
-            // MLEs whose (high, low, scale) tuples all match hash to the
-            // same digest — matching the commitment-cache soundness
-            // contract at the top of this file.
+            // Hash both u64 vectors as raw LE bytes (same fingerprinting as
+            // U32/U64 above) plus the scale byte.
             packed_decimal_bytes.reserve(high.len() * 8 + low.len() * 8 + 1);
             let hi_bs = unsafe {
                 std::slice::from_raw_parts(
@@ -206,8 +190,7 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
     };
     hasher.update(&[tag]);
     hasher.update_rayon(byte_slice);
-    // Also mix in the shape so MLEs with the same evals but different nv (or
-    // different inner_num_vars for compressed variants) are distinguished.
+    // Mix in the shape so equal evals with different nv/inner_num_vars differ.
     hasher.update(&mle.num_vars().to_le_bytes());
     hasher.update(&mle.inner_num_vars().to_le_bytes());
     hasher.finalize().into()

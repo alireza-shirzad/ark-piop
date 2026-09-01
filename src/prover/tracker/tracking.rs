@@ -101,13 +101,9 @@ where
             let id = self.track_and_commit_mv_constant(cnst, polynomial.num_vars())?;
             return Ok(Either::Right((id, cnst)));
         }
-        // Auto-compress: if the incoming poly is `Field`-backed but every
-        // element fits in a small integer type (bit/u8/u32/u64), rebuild it
-        // with the tightest storage variant. This eliminates the per-caller
-        // classification burden — any upstream gadget that produces a `Vec<F>`
-        // of small-integer values automatically gets 8×-256× smaller tracker
-        // storage. Non-Field storage is a no-op. Only requires `PrimeField`,
-        // which every real prover backend satisfies.
+        // Auto-compress Field-backed polys whose elements fit a small
+        // integer type into the tightest storage variant (8×-256× smaller);
+        // no-op for non-Field storage.
         let polynomial = Arc::new(polynomial.clone().compressed());
         let commitment = if use_cache {
             let digest = crate::arithmetic::mat_poly::digest::mle_digest(polynomial.as_ref());

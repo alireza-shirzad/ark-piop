@@ -1,14 +1,6 @@
-//! MSM wrapper that picks a strategy based on the input size and hardware.
-//!
-//! Workflow:
-//! * When `bases.len() < NAIVE_THRESHOLD`, we run a plain scalar-mul + sum —
-//!   cheap to set up and faster than Pippenger for tiny inputs.
-//! * Otherwise we call `VariableBaseMSM::msm_unchecked` (arkworks Pippenger)
-//!   inside a rayon thread pool whose width is looked up from `THREAD_TABLE`.
-//!
-//! Tune `NAIVE_THRESHOLD` and `THREAD_TABLE` for your hardware by running
-//! `calibrate::calibrate::<G>()` and pasting the recommended values into
-//! this file.
+//! MSM wrapper: naive scalar-mul + sum below `NAIVE_THRESHOLD`, otherwise
+//! arkworks Pippenger in a rayon pool sized from `THREAD_TABLE`. Tune both
+//! constants for your hardware via `calibrate::calibrate::<G>()`.
 
 use ark_ec::scalar_mul::variable_base::VariableBaseMSM;
 
@@ -76,12 +68,9 @@ pub fn naive_msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarF
         .fold(G::zero(), |acc, term| acc + term)
 }
 
-/// Entry point: switches between naive and Pippenger based on size and pins
-/// the Pippenger call to a rayon pool sized from `THREAD_TABLE`.
-///
-/// The preferred thread count from `THREAD_TABLE` is clamped against
-/// `rayon::current_num_threads()` so we never escape a caller-imposed budget
-/// (e.g. `RAYON_NUM_THREADS=1` benches stay single-threaded).
+/// Entry point: naive below `NAIVE_THRESHOLD`, else Pippenger in a pool sized
+/// from `THREAD_TABLE`. The preferred thread count is clamped against
+/// `rayon::current_num_threads()` so a caller-imposed budget is never escaped.
 pub fn msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField]) -> G {
     debug_assert_eq!(
         bases.len(),
@@ -98,8 +87,7 @@ pub fn msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField])
         let budget = rayon::current_num_threads().max(1);
         let threads = preferred.min(budget);
         if threads <= 1 {
-            // Caller only allows one worker — skip the pool dance entirely so we
-            // don't pay install overhead on every call.
+            // Single worker: skip the pool to avoid install overhead per call.
             G::msm_unchecked(bases, scalars)
         } else {
             pool::install(threads, || G::msm_unchecked(bases, scalars))
@@ -181,15 +169,10 @@ pub mod calibrate {
         }
     }
 
-    /// Calibrate on the current hardware.
-    ///
-    /// * `sizes` — sizes to benchmark (should span the range you care about).
-    /// * `max_threads` — upper bound for thread counts to try.
-    /// * `iters` — timing iterations per measurement (more = steadier, slower).
-    ///
-    /// The resulting `Calibration` picks the fastest Pippenger thread count per
-    /// size, then collapses adjacent sizes with the same winner into a single
-    /// table row.
+    /// Calibrate on the current hardware: benchmark each of `sizes` with
+    /// 1..=`max_threads` threads (`iters` timing iterations per measurement),
+    /// pick the fastest Pippenger thread count per size, and collapse adjacent
+    /// sizes with the same winner into one table row.
     pub fn calibrate<G: VariableBaseMSM>(
         sizes: &[usize],
         max_threads: usize,

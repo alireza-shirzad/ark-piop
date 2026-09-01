@@ -105,7 +105,7 @@ impl ClaimStageStats {
     }
 }
 
-/// Everything the bucket loop produces, so `compile_sc_subproof` reads as a
+/// Everything the bucket loop produces, so `compile_piop_subproof` reads as a
 /// sequence of phases instead of threading three parallel accumulators
 /// through a loop body.
 struct BucketRun<F: PrimeField> {
@@ -133,16 +133,10 @@ impl<F: PrimeField> BucketRun<F> {
     }
 }
 
-/// Per-bucket claim shape collected inside [`ProverTracker::run_bucket`] and
-/// returned so the caller can emit both per-bucket events and their
-/// aggregate. Emission was pulled out of the bucket run so multi-bucket
-/// compiles no longer silently overwrite each other in the bench-stats
-/// subscriber's flat field map.
-///
-/// Carries no timings and no wall-clock stamps: those come from the
-/// [`SC_BUCKET_SPAN`] / [`SC_REGION_SPANS`] spans and are filled in by the
-/// subscriber, which splices them into this struct's `sc_buckets_json`
-/// payload by `bucket_index`.
+/// Per-bucket claim shape collected in [`ProverTracker::run_bucket`];
+/// emitted by the caller so multi-bucket compiles don't overwrite each
+/// other in the subscriber's flat field map. No timings — the subscriber
+/// splices span durations in by `bucket_index`.
 #[derive(Clone, Debug, Default)]
 struct BucketRunStats {
     bucket_index: usize,
@@ -167,19 +161,9 @@ fn wall_clock_ms() -> u64 {
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
-/// The Tracker is a data structure for creating and managing virtual
-/// polynomials and their comitments. It is in charge of
-///  1) Recording the structure of virtual polynomials and
-///     their products
-///  2) Recording the structure of virtual polynomials and
-///     their products
-///  3) Recording the comitments of virtual polynomials and
-///     their products
-///  4) Providing methods for adding virtual polynomials
-///     together
-
-// Clone is only implemented if PCS satisfies the PCS<F>
-// bound, which guarantees that PCS::ProverParam
+/// Central prover-side state manager: records the structure of virtual
+/// polynomials and their products, their commitments, and provides the
+/// algebra for combining them.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 // #[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
@@ -289,16 +273,10 @@ where
         );
     }
 
-    /// Emit a snapshot of the tracker's `materialized_polys` state:
-    /// how many are alive, their total on-heap byte size (assuming 32-byte
-    /// field elements), and the top-K by size. Streamed on the
-    /// `bench_stats` target and picked up by the tt-exec subscriber as a
-    /// `kind: "tracker_snapshot"` line so it survives an OOM kill — this
-    /// is the missing data for "which polys were live when RSS spiked."
-    ///
-    /// `phase` is a free-form label ("compile_start", "bucket_0_end",
-    /// "before_mv_pcs", ...) so the dashboard can correlate snapshots
-    /// against the RSS-over-time curve.
+    /// Emit a snapshot of live materialized polys (count, byte size, top-K)
+    /// on the `bench_stats` target — streamed so it survives an OOM kill.
+    /// `phase` is a free-form label the dashboard correlates against the
+    /// RSS-over-time curve.
     fn emit_tracker_snapshot(&self, phase: &str) {
         // Physical heap bytes of each poly's storage backing. The `storage`
         // enum captures small-scalar variants (`Bit` = 1/8 byte per point,
@@ -357,12 +335,8 @@ where
             tracker_snapshot_json = %payload.to_string(),
             "tracker_snapshot"
         );
-        // Fallback dump to stderr when TT_MEMSNAP=1 — bypasses the tracing
-        // subscriber entirely so a caller running only the plain ark-piop
-        // subscriber (integration tests, one-off cli invocations) still sees
-        // the peak-allocation breakdown, and gets it flushed even if the
-        // process is later OOM-killed. One line per snapshot, prefixed with
-        // `[TT_MEMSNAP]` so a grep/tail workflow is trivial.
+        // TT_MEMSNAP=1: fallback dump to stderr, bypassing the tracing
+        // subscriber, flushed even if the process is later OOM-killed.
         if std::env::var("TT_MEMSNAP")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
@@ -371,15 +345,9 @@ where
         }
     }
 
-    /// Emit the traditional `sc_claim_counts` event, aggregated across every
-    /// bucket: sum counts and concat degree distributions. Preserves the
-    /// shape the existing dashboard's Claims tab renders while making
-    /// multi-bucket totals meaningful.
-    ///
-    /// The companion `snark_prover_piop_breakdown` event is gone — the
-    /// subscriber sums the [`SC_REGION_SPANS`] durations across buckets
-    /// itself and files them under the same
-    /// `snark_prover_piop_<region>_time_s` keys.
+    /// Emit the `sc_claim_counts` event aggregated across every bucket
+    /// (summed counts, concatenated degree distributions) in the shape the
+    /// dashboard's Claims tab renders.
     fn emit_aggregate_bucket_stats(&self, buckets: &[BucketRunStats]) {
         if buckets.is_empty() {
             return;
@@ -411,15 +379,10 @@ where
         );
     }
 
-    /// Emit one `bench_stats` event carrying every bucket's claim shape as a
-    /// single JSON blob. tracing's field names must be static, so we can't
-    /// stream one field per (bucket, metric); the JSON string is what the
-    /// subscriber unpacks into a `buckets` array in the JSON record.
-    ///
-    /// Each entry's `timing` object and `wall_start_ms` / `wall_end_ms` are
-    /// added by the subscriber, which matches them up by `index` against the
-    /// [`SC_BUCKET_SPAN`] spans it timed. This event fires after every bucket
-    /// span has closed, so those durations are always already in hand.
+    /// Emit every bucket's claim shape as one JSON blob (tracing field names
+    /// must be static, so per-bucket fields can't stream). The subscriber
+    /// adds each entry's timing by matching `index` against the
+    /// [`SC_BUCKET_SPAN`] spans it timed.
     fn emit_per_bucket_stats(&self, buckets: &[BucketRunStats]) {
         let payload = serde_json::json!({
             "count": buckets.len(),
@@ -779,15 +742,9 @@ mod tests {
 
     // ── Contig-one activator storage ────────────────────────────────
 
-    /// The activator MLE that flows into `get_or_build_contig_one_poly`
-    /// must be RLE-compressed (or Constant for edge cases), never a
-    /// full-size Field `Vec<F>`. This regression test wires the tracker
-    /// with a self-referencing `Rc` the way the real prover does, calls
-    /// `get_or_build_contig_one_poly`, and inspects the storage.
-    ///
-    /// A Field-vec activator at char-domain scale would be 512 MiB per
-    /// gadget instance (nv=24). The RLE form is ~72 bytes — a 7-million×
-    /// reduction.
+    /// The activator MLE from `get_or_build_contig_one_poly` must stay
+    /// RLE-compressed (or Constant), never a full Field `Vec<F>` — at nv 24
+    /// that would be 512 MiB per gadget instance vs ~72 bytes.
     #[test]
     fn contig_one_poly_uses_compact_storage_not_field_vec() {
         use crate::arithmetic::mat_poly::mle::MLEStorage;

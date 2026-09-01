@@ -124,6 +124,10 @@ where
         if let Some(&cached) = memo.get(&id) {
             return cached;
         }
+        if self.state.mv_pcs_substate.constants.contains_key(&id) {
+            memo.insert(id, 0);
+            return 0;
+        }
         if self.mat_mv_poly(id).is_some() {
             memo.insert(id, 1);
             return 1;
@@ -258,20 +262,10 @@ where
     }
 
     /// Adds a scalar to a polynomial, returns a new virtual polynomial.
-    ///
-    /// The scalar is represented as a bare-constant term `(c, vec![])` — the
-    /// empty factor list means "product of nothing = 1", so the term
-    /// contributes `c · 1 = c` at every hypercube point. This costs O(1)
-    /// memory instead of allocating a size-`2^n` `Vec<F>` of copies of `c`.
-    ///
-    /// Downstream compile (`optimize_linear_terms` at
-    /// `prover/tracker/compile/virt_poly.rs:74-79, 166-175`) folds all
-    /// constant-only terms into a single compact `nv=0` MLE that sumcheck
-    /// detects and multiplies straight into the round coefficient — no
-    /// `2^n`-sized workspace is ever built for the constant.
-    ///
-    /// If `c` is zero, this returns a virtual poly structurally equal to
-    /// the input (no constant term appended).
+    /// The scalar is a bare-constant term `(c, vec![])` (empty product = 1),
+    /// which costs O(1) memory instead of a size-`2^n` Vec; downstream
+    /// `optimize_linear_terms` folds such terms into one nv=0 MLE. A zero
+    /// `c` appends no term.
     pub fn add_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
         let mut new = VirtualPoly::new();
         // Copy the input's terms verbatim — either the single-factor

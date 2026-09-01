@@ -3,10 +3,9 @@ use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
 use ark_ff::PrimeField;
 use indexmap::IndexMap;
 
-// TODO: Check if it can be optimized. Also, put in the paper
-/// Given a super column and a set of included columns, output an MLE
-/// representing the multiplicity of super column elements that appear
-/// in all included columns. The output length matches the super column.
+// TODO: check for optimization; put in the paper
+/// Output an MLE of the multiplicities with which super-column elements appear across
+/// the included columns. The output length matches the super column.
 pub fn calc_inclusion_multiplicity<B>(
     included_col: &[TrackedPoly<B>],
     super_col: &TrackedPoly<B>,
@@ -27,14 +26,11 @@ where
     )
 }
 
-/// Same as [`calc_inclusion_multiplicity`], but operates directly on evaluation vectors.
-/// This allows callers to pre-extract evaluations and run the computation in parallel.
+/// Same as [`calc_inclusion_multiplicity`], but on pre-extracted evaluation vectors.
 ///
-/// When the super column has repeated values, the full multiplicity for that value
-/// is assigned to only the first super position holding it; subsequent duplicates
-/// get zero. This keeps the LogUp identity balanced:
-/// `sum_x m(x)/(g(x)-γ) = sum_v N_sub(v)/(v-γ)` regardless of how many copies
-/// of each value appear in `super_col_evals`.
+/// A repeated super-column value gets its full multiplicity at the first position
+/// only (later duplicates get zero), keeping the LogUp identity
+/// `sum_x m(x)/(g(x)-γ) = sum_v N_sub(v)/(v-γ)` balanced.
 pub fn calc_inclusion_multiplicity_from_evals<B>(
     included_col_evals: &[Vec<B::F>],
     super_col_evals: &[B::F],
@@ -57,9 +53,8 @@ where
 
     let mut super_col_mult_evals = Vec::with_capacity(super_col_len);
 
-    // Consume the sub-union count on the first super position that carries each
-    // value; later duplicates get 0 so the total sum across the super column
-    // equals the total count in the sub union.
+    // Consume each value's count at its first super position; later duplicates get 0
+    // so the super-column total equals the sub-union total.
     for &val in super_col_evals.iter() {
         let count = included_col_mults_map.get(&val).copied().unwrap_or(0);
         super_col_mult_evals.push(B::F::from(count));
@@ -71,8 +66,7 @@ where
     MLE::from_evaluations_vec(super_col_nv, super_col_mult_evals)
 }
 
-// Returns a map from the unique evaluations of col to their multiplicities
-// does not include values where the selector is zero
+// Map from unique evaluations to multiplicities, skipping zero-selector positions.
 fn vec_multiplicity_count<F>(poly: &[F], sel: Option<&[F]>) -> IndexMap<F, u64>
 where
     F: PrimeField,

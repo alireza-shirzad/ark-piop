@@ -1,8 +1,5 @@
-/////////////////// Modules //////////////////
-
 pub mod polynomial;
 pub mod proof;
-/////////////////// Imports //////////////////
 use std::collections::BTreeSet;
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -23,8 +20,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
-/// A claim that the sum of the evaluations of a polynomial on the boolean
-/// hypercube is equal to a certain value.
+/// A claim about the evaluation of a tracked polynomial at a point.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
@@ -48,8 +44,7 @@ impl<F: PrimeField, PC: PCS<F>> TrackerEvalClaim<F, PC> {
     }
 }
 
-// Clone is only implemented if PCS satisfies the PCS<F>
-// bound, which guarantees that PCS::ProverParam
+// Clone(bound = "") is sound: the PCS<F> bound already makes components clonable.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
@@ -64,9 +59,8 @@ where
     // TODO: See if we should split this into two fields
     pub num_tracked_polys: usize,
 
-    /// A map from TrackerID to a virtual polynomials, i.e. polynomials of the
-    /// form `sum_i c_i * prod_j p_ij` where `p_ij` points to another
-    /// materialized or virtual polynomials
+    /// Virtual polynomials by TrackerID: `sum_i c_i * prod_j p_ij`, where each
+    /// `p_ij` points to another materialized or virtual polynomial.
     pub virtual_polys: BTreeMap<TrackerID, VirtualPoly<B::F>>,
 
     /// Mutable indexed tracked polynomials for protocol-time updates.
@@ -78,10 +72,8 @@ where
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
     pub num_vars: BTreeMap<TrackerID, usize>,
     pub bench_lookup_claims_pre_reduction: usize,
-    /// Per-superset subset counts captured from `reduce_lookup_claims`. Each
-    /// entry is the number of subset polynomials looked up into one superset
-    /// polynomial; the length is the number of distinct supersets and the sum
-    /// is the total lookup-claim count before lookup-PIOP reduction.
+    /// Bench stat from `reduce_lookup_claims`: subset count per superset
+    /// (len = distinct supersets, sum = lookup claims before reduction).
     pub bench_lookup_subset_counts_per_superset: Vec<usize>,
 }
 
@@ -95,21 +87,17 @@ where
 {
     pub materialized_polys: BTreeMap<TrackerID, Arc<PC::Poly>>,
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
-    // Cache from polynomial digest to commitment, so identical polynomials
-    // committed multiple times reuse the same (expensive) MSM result.
-    // Keyed by BLAKE3 digest of the raw evaluation bytes (parallel for large MLEs).
+    // BLAKE3(evaluation bytes) -> commitment, so identical polynomials reuse
+    // one (expensive) MSM result.
     pub commitment_cache: BTreeMap<[u8; 32], PC::Commitment>,
-    // Constant polynomials that were detected during track_and_commit. These
-    // bypass commitment and PCS opening — only the scalar value is sent in the
-    // proof and transcript-bound.
+    // Constants detected during track_and_commit: bypass commitment/opening —
+    // only the scalar is sent in the proof and transcript-bound.
     pub constants: BTreeMap<TrackerID, F>,
-    // Per-TrackerID `num_vars` for entries in `constants`. Emitted alongside
-    // the scalar so the verifier can mirror `poly_log_sizes` — see the note
-    // on `PROOF_ENCODING_VERSION = 2`.
+    // `num_vars` for `constants` entries, emitted so the verifier can mirror
+    // `poly_log_sizes` — see `PROOF_ENCODING_VERSION = 2`.
     pub constants_num_vars: BTreeMap<TrackerID, usize>,
-    // Commitments reused from external context, such as base table commitments.
-    // These must be tracked for openings, but they are not emitted as proof-owned
-    // commitments in the PCS subproof.
+    // Commitments reused from external context (e.g. base tables): tracked for
+    // openings but not emitted as proof-owned in the PCS subproof.
     pub external_materialized_comm_ids: BTreeSet<TrackerID>,
     pub eval_claims: Vec<TrackerEvalClaim<F, PC>>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,

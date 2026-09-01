@@ -42,14 +42,9 @@ pub fn random_mle_list<F: PrimeField, R: RngCore>(
 
 // TODO: Write tests for sumcheck piop
 
-// ── Streaming vs eager parity ────────────────────────────────────────────
-//
-// The streaming sumcheck prover (`TT_SUMCHECK_STREAM_K > 0`) must produce
-// bit-identical round messages to the eager path — the two are equivalent
-// mathematical computations, and any deviation would silently break
-// soundness. These tests drive the same virtual polynomial through
-// `prover_init_with_stream_k` at k = 0 (eager), k = nv (full streaming),
-// and k = nv/2 (partial streaming), and assert every round message matches.
+// Streaming vs eager parity: the streaming prover must produce bit-identical round
+// messages to the eager path — any deviation would silently break soundness. Tests
+// drive the same poly at k = 0 (eager), k = nv (full), and partial k.
 
 #[cfg(test)]
 mod streaming_parity {
@@ -61,10 +56,8 @@ mod streaming_parity {
     use ark_std::rand::rngs::StdRng;
     use std::sync::Arc;
 
-    /// Run the sumcheck prover to completion for `poly`, driven by a
-    /// fixed challenge sequence, at the given streaming window `k`.
-    /// Returns per-round message evaluation vectors so callers can
-    /// bit-compare across `k` values.
+    /// Run the prover to completion at streaming window `stream_k` with fixed
+    /// challenges; returns per-round message evaluations for bit-comparison.
     fn run_prover(
         poly: &HPVirtualPolynomial<Fr>,
         challenges: &[Fr],
@@ -83,10 +76,8 @@ mod streaming_parity {
         msgs
     }
 
-    /// Product of two u32-storage MLEs — the shape sumcheck sees when
-    /// arithmetization emits native-typed columns. Streaming here is
-    /// meaningful (compressed → Field materialization is deferred), so
-    /// this is the primary regression test.
+    /// Product of two u32-storage MLEs — the shape native-typed arithmetization
+    /// emits; the primary streaming regression test.
     #[test]
     fn u32_storage_product_stream_matches_eager() {
         let nv = 5;
@@ -109,8 +100,7 @@ mod streaming_parity {
         assert_eq!(eager, partial, "partial streaming (k=nv/2) diverged from eager");
     }
 
-    /// Same as above but for u8 storage — exercises the U8 arm of the
-    /// streaming read path.
+    /// Exercises the U8 arm of the streaming read path.
     #[test]
     fn u8_storage_stream_matches_eager() {
         let nv = 4;
@@ -158,21 +148,9 @@ mod streaming_parity {
         assert_eq!(eager, partial);
     }
 
-    /// The auto-detection heuristic
-    /// ([`crate::piop::sum_check::prover::decide_auto_stream_k`])
-    /// should:
-    ///   - never enable streaming below `nv=20` (too small to matter)
-    ///   - never enable streaming when all factors are Field-backed
-    ///     (streaming can't help them)
-    ///   - enable streaming when enough compressed factors are present
-    ///     to save more than an eq_table's worth of materialization
-    ///
-    /// We drive this indirectly through the parity infra by running the
-    /// same virtual poly with `stream_k = 0` (eager) and comparing to
-    /// what a hypothetical auto call would emit — but the sumcheck round
-    /// messages are the observable, so we just check that streaming and
-    /// eager agree, which is already covered above. This test asserts
-    /// the *decision* directly.
+    /// Asserts `decide_auto_stream_k`'s decision directly: no streaming below nv=20
+    /// or when all factors are Field-backed; streaming when enough compressed
+    /// factors are present.
     #[test]
     fn auto_stream_k_decision_matches_expected_shape() {
         use crate::piop::sum_check::prover::decide_auto_stream_k;
@@ -190,8 +168,7 @@ mod streaming_parity {
                 "small nv should not auto-stream"
             );
         }
-        // Large-nv but all Field storage: never stream (streaming can't
-        // help Field-backed factors).
+        // Large-nv but all Field storage: never stream.
         {
             let nv = 22;
             let n = 1usize << nv;
@@ -208,8 +185,7 @@ mod streaming_parity {
                 "Field-only factors should not trigger auto-streaming"
             );
         }
-        // Large-nv with several compressed factors above the threshold:
-        // enable streaming to `nv`.
+        // Large-nv with compressed factors above the threshold: stream to `nv`.
         {
             let nv = 22;
             let n = 1usize << nv;
@@ -227,10 +203,8 @@ mod streaming_parity {
         }
     }
 
-    /// Sum-of-products with mixed storage kinds — a Field-storage MLE
-    /// mixed with a U32-storage MLE. The Field one is always
-    /// Materialized (streaming can't help it); the U32 one goes into
-    /// Streaming when k > 0. This confirms per-slot routing works.
+    /// Mixed Field + U32 storage: the Field factor is always Materialized, the U32
+    /// one Streaming when k > 0 — confirms per-slot routing.
     #[test]
     fn mixed_field_and_u32_storage_stream_matches_eager() {
         let nv = 4;

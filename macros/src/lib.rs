@@ -87,11 +87,11 @@ fn snapshot_phase(literal: &LitStr) -> proc_macro2::TokenStream {
 ///
 /// ```ignore
 /// #[piop_stage(
-///     span           = "compile_sc_subproof",
+///     span           = "compile_piop_subproof",
 ///     snapshot_start = "compile_start",
-///     snapshot_end   = "after_compile_sc_subproof",
+///     snapshot_end   = "after_compile_piop_subproof",
 /// )]
-/// fn compile_sc_subproof(&mut self) -> SnarkResult<Option<Subproof>> {
+/// fn compile_piop_subproof(&mut self) -> SnarkResult<Option<Subproof>> {
 ///     // just the algorithm
 /// }
 /// ```
@@ -102,7 +102,7 @@ fn snapshot_phase(literal: &LitStr) -> proc_macro2::TokenStream {
 /// # Why the body moves into a closure
 ///
 /// The end snapshot has to fire on *every* exit path. Stages return early —
-/// `compile_sc_subproof` has two `return Ok(None)` paths for the claim-free
+/// `compile_piop_subproof` has two `return Ok(None)` paths for the claim-free
 /// case, and any `?` is another exit. A hand-written snapshot above the
 /// final `Ok(..)` silently skips all of them, which is exactly the bug this
 /// attribute exists to make unwritable. Running the body as a closure turns

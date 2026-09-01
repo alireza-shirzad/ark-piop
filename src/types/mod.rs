@@ -1,23 +1,16 @@
-//! Core types shared across the prover and verifier.
-//!
-//! This module defines the lightweight identifier types ([`TrackerID`],
-//! [`PointID`], [`CommitmentID`], [`ConstantID`]) used throughout the
-//! framework, as well as the [`SharedArgConfig`] and proof-level structs.
+//! Core types shared by prover and verifier: identifier types ([`TrackerID`],
+//! [`PointID`], [`CommitmentID`], [`ConstantID`]), [`SharedArgConfig`], and
+//! proof-level structs.
 
 pub mod artifact;
 pub mod claim;
 
-/// Shared configuration for ArgProver and ArgVerifier.
+/// Shared configuration for ArgProver and ArgVerifier: these parameters must
+/// be identical on both sides, so pass the same instance to each.
 ///
-/// Protocol-level parameters that must be identical on both sides.
-/// Pass the same instance to both the prover and verifier.
-///
-/// The sumcheck stage partitions claims into buckets automatically at
-/// compile time — see [`crate::tracker_core::bucketing::pick_bucket_plan`].
-/// There is no operator switch: the picker's cost model decides whether a
-/// given query runs as one sumcheck (its choice when there is only one
-/// distinct claim `num_vars`, or when merging beats the per-bucket
-/// overhead) or splits into per-nv buckets.
+/// The sumcheck stage buckets claims automatically at compile time; the cost
+/// model in [`crate::tracker_core::bucketing::build_buckets`] decides between
+/// one merged sumcheck and per-nv buckets.
 #[derive(Clone, Debug)]
 pub struct SharedArgConfig {
     /// Max multiplicative degree allowed per sumcheck term before the prover
@@ -37,7 +30,6 @@ impl Default for SharedArgConfig {
     }
 }
 
-/////////// Imports ///////////
 use crate::{
     arithmetic::virt_poly::hp_interface::VPAuxInfo, pcs::PCS, piop::structs::SumcheckProof,
 };
@@ -48,13 +40,11 @@ use ark_serialize::{
 };
 use derivative::Derivative;
 use std::{collections::BTreeMap, fmt::Display};
-/////////// Types ///////////
 //TODO: Check a map from point id to (polynomial,F)
 pub type QueryMap<F> = BTreeMap<TrackerID, BTreeMap<PointID, F>>;
 //TODO: Double check uniqueness
 pub type PointMap<F, PC> = BTreeMap<PointID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point>;
 
-/////////// Structs ///////////
 /// A unique identifier for a polynomial, or a commitment to a polynomial.
 #[derive(
     Clone,
@@ -164,11 +154,9 @@ impl ConstantID {
 /// from external context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitmentBinding {
-    /// Bind the commitment into the transcript and include it in proof-owned
-    /// commitment collections.
+    /// Bound into the transcript and included in proof-owned collections.
     ProofEmitted,
-    /// Reuse a commitment supplied by context without re-emitting it as part of
-    /// this proof.
+    /// Reused from external context, not re-emitted as part of this proof.
     External,
 }
 
@@ -205,12 +193,11 @@ pub struct SumcheckSubproof<F>
 where
     F: PrimeField,
 {
-    // One entry per bucket, ordered by ascending `target_nv`. The bucket
-    // count is decided at compile time by the cost-model picker in
-    // [`crate::tracker_core::bucketing`].
+    // One entry per bucket, ordered by ascending `target_nv` (bucket count is
+    // decided by the compile-time picker in `tracker_core::bucketing`).
     buckets: Vec<SumcheckBucketProof<F>>,
-    //TODO: This sumcheck_claims map is not used in all the protocols using this library, so it should not be in the proof.
-    //TODO: Suggestion: Add a field to the proof for the optional and non-constant elements sent via the proof.
+    //TODO: not all protocols use sumcheck_claims; move it into an optional
+    // proof-elements field instead of keeping it in every proof.
     sumcheck_claims: BTreeMap<TrackerID, F>,
 }
 

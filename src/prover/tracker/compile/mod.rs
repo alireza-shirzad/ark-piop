@@ -5,7 +5,7 @@
 //!   conversion, linear-term dedup, nv equalization).
 //! - [`sumcheck`] — claim batching, degree reduction, the single aggregated
 //!   sumcheck invocation, nozerocheck batching, and the orchestrating
-//!   `compile_sc_subproof`.
+//!   `compile_piop_subproof`.
 //! - [`pcs`] — batched multivariate and univariate PCS subproofs.
 //!
 //! This `mod.rs` hosts the top-level `compile_proof` entry point and the
@@ -19,12 +19,8 @@ mod virt_poly;
 use super::*;
 
 /// Run one statement inside a `bench_stats` span named `$name`, so a
-/// subscriber can time it. For whole functions prefer
-/// [`ark_piop_macros::piop_stage`]; this covers the mid-function regions an
-/// attribute can't reach, such as the stages of `run_bucket_pipeline`.
-///
-/// The span closes at the end of the statement, so `?` propagates from the
-/// enclosing function exactly as it would without the wrapper.
+/// subscriber can time it. Covers mid-function regions that a
+/// `#[piop_stage]` attribute can't reach; `?` propagates unchanged.
 macro_rules! region {
     ($name:literal, $body:expr) => {{
         let _region = ::tracing::info_span!(target: SNARK_PROVER_SPAN_TARGET, $name).entered();
@@ -33,28 +29,14 @@ macro_rules! region {
 }
 pub(crate) use region;
 
-/// The `bench_stats`-targeted spans whose open→close duration *is* the
-/// timing for that subproof, paired with the `bench_stats` record key a
-/// subscriber should file the duration under.
-///
-/// `compile_proof` used to wrap each of these three calls in its own
-/// `Instant` and emit a `snark_prover_times` event, duplicating a clock
-/// that `#[instrument]` already ran over exactly the same code. The spans
-/// are now the only measurement, and this table is the contract a
-/// subscriber needs: it can't infer the key from the span name, and a
-/// silently-renamed function would otherwise drop a metric with no error.
-///
-/// Each listed span is declared `#[instrument(target = "bench_stats",
-/// level = "info")]`. Both parts matter: `bench_stats` keeps the span out
-/// of the console tree/timing layers (which filter that target out — this
-/// is data, not a log line), and `info` is required because the default
-/// env filter is `off` + `bench_stats=info`, so a `debug` span would
-/// never be created during a normal bench run.
-///
-/// Renaming any of these functions without updating this table is caught
-/// by the `snark_prover_timed_spans_are_instrumented` test below.
+/// The spans whose open→close duration *is* each subproof's timing, paired
+/// with the record key a subscriber files it under. This table is a contract
+/// with out-of-tree subscribers; each span must stay declared
+/// `#[instrument(target = "bench_stats", level = "info")]` (the default env
+/// filter only enables `bench_stats=info`). Renames are caught by the
+/// `snark_prover_timed_spans_are_instrumented` test below.
 pub const SNARK_PROVER_TIMED_SPANS: &[(&str, &str)] = &[
-    ("compile_sc_subproof", "snark_prover_piop_time_s"),
+    ("compile_piop_subproof", "snark_prover_piop_time_s"),
     ("compile_mv_pcs_subproof", "snark_prover_mv_pcs_time_s"),
     ("compile_uv_pcs_subproof", "snark_prover_uv_pcs_time_s"),
 ];
@@ -64,44 +46,21 @@ pub const SNARK_PROVER_TIMED_SPANS: &[(&str, &str)] = &[
 /// [`SC_REGION_SPANS`].
 pub const SNARK_PROVER_SPAN_TARGET: &str = "bench_stats";
 
-/// Span wrapping one bucket's run of the sumcheck compile pipeline. Carries
-/// `bucket_index` and `target_nv` fields; every [`SC_REGION_SPANS`] span
-/// opened inside it belongs to that bucket, which is how a subscriber
-/// attributes region durations without the prover threading an index
-/// through.
-///
-/// Its own open→close timestamps replace the `wall_start_ms` /
-/// `wall_end_ms` the prover used to stamp by hand. Those exist so the
-/// dashboard can overlay bucket boundaries on the RSS-over-time curve, and
-/// the sampler producing that curve lives in the subscriber's process —
-/// so a timestamp taken there is in a strictly better reference frame than
-/// one taken here.
+/// Span wrapping one bucket's run of the sumcheck compile pipeline. Every
+/// [`SC_REGION_SPANS`] span opened inside it belongs to that bucket — how a
+/// subscriber attributes region durations — and its own timestamps mark
+/// bucket boundaries on the dashboard's RSS curve.
 pub const SC_BUCKET_SPAN: &str = "sc_bucket";
 
-/// Regions in the sumcheck compile pipeline whose span duration *is* that
-/// stage's timing. The name doubles as the key: a subscriber files each
-/// under `snark_prover_piop_<name>_time_s` in the aggregate (summed across
-/// buckets) and under `timing.<name>_time_s` in the per-bucket
-/// `sc_buckets_json` entry.
-///
-/// Named at the call site rather than reusing each callee's own span
-/// because two of them — `z_check_claim_to_s_check_claim` and
-/// `batch_s_check_claims` — run on both sides of degree reduction, and the
-/// record reports the two passes separately. A callee-owned span could not
-/// tell them apart.
-///
-/// The first two run *before* the partition is drawn, so they sit in
-/// `compile_sc_subproof` rather than in a bucket. They therefore reach the
-/// aggregate but have no per-bucket entry to land in — which is the honest
-/// shape, since neither is per-bucket work any more.
-///
-/// Order here is execution order, which is also the order the dashboard
-/// renders the breakdown in.
+/// Regions whose span duration *is* that stage's timing; the name doubles
+/// as the subscriber's record key. Named at the call site because two
+/// stages run on both sides of degree reduction and are reported as
+/// separate passes. The first two run before the partition is drawn, so
+/// they reach the aggregate but no per-bucket entry. Order is execution
+/// order, which the dashboard renders.
 pub const SC_REGION_SPANS: &[&str] = &[
     "nozerocheck_batching",
-    // Batching folded in: `convert_zerochecks_by_nv` batches each nv group
-    // and converts it under this one span, so the separate
-    // `first_batch_zerocheck` region it used to pair with is gone.
+    // Also covers per-nv batching inside `convert_zerochecks_by_nv`.
     "first_zerocheck_to_sumcheck",
     "first_batch_sumcheck",
     "reduce_sumcheck",
@@ -137,7 +96,7 @@ where
     where
         B: SnarkBackend,
     {
-        let sc_subproof = self.compile_sc_subproof()?;
+        let sc_subproof = self.compile_piop_subproof()?;
         let mv_pcs_subproof = self.compile_mv_pcs_subproof()?;
         let uv_pcs_subproof = self.compile_uv_pcs_subproof()?;
 
@@ -183,11 +142,8 @@ mod tests {
             if event.metadata().target() != SNARK_PROVER_SPAN_TARGET {
                 return;
             }
-            // The payload is one JSON field; pull `phase` back out of it
-            // rather than re-deriving what the prover meant to emit. It is
-            // recorded with `%`, which reaches a visitor as `record_debug`
-            // over a `format_args!` — whose Debug is the Display string, so
-            // it round-trips through serde as-is.
+            // `%`-recorded fields reach a visitor via `record_debug`, whose
+            // Debug output is the Display string — JSON round-trips as-is.
             struct PhaseVisitor(Option<String>);
             impl tracing::field::Visit for PhaseVisitor {
                 fn record_debug(
@@ -227,14 +183,10 @@ mod tests {
         capture
     }
 
-    /// [`SNARK_PROVER_TIMED_SPANS`] is a contract with out-of-tree
-    /// subscribers (tt-exec's JSONL stats layers) that match on span name
-    /// to recover a duration. Nothing else fails if a listed function is
-    /// renamed or loses its `bench_stats`/`info` attribute — the metric
-    /// just silently stops appearing in the dashboard. So assert the spans
-    /// really open, on the target and at the level the subscriber filters
-    /// on. An empty compile is enough: the spans open before any of the
-    /// three subproof bodies decide they have nothing to do.
+    /// Nothing else fails if a listed function is renamed or loses its
+    /// `bench_stats`/`info` attribute — the metric just silently disappears
+    /// from the dashboard — so assert the spans really open on the target
+    /// and level the subscriber filters on.
     #[test]
     fn snark_prover_timed_spans_are_instrumented() {
         let capture = capture_empty_compile();
@@ -261,17 +213,10 @@ mod tests {
         }
     }
 
-    /// The four pipeline-boundary snapshots moved off `compile_proof` and
-    /// into `#[piop_stage]` attributes on the stages themselves. The phase
-    /// strings are a wire contract: the dashboard's `_describe_phase` has a
-    /// hardcoded table keyed on exactly these, and an unrecognised phase
-    /// silently degrades to a raw-string marker label rather than failing.
-    ///
-    /// This also pins the property a hand-written version would not have.
-    /// A claim-free compile takes `compile_sc_subproof`'s early
-    /// `return Ok(None)` path, so `after_compile_sc_subproof` only fires
-    /// because the macro runs the body as a closure and snapshots after it.
-    /// Written inline above the final `Ok(..)`, it would be skipped here.
+    /// The phase strings are a wire contract with the dashboard, and an
+    /// unrecognised phase silently degrades to a raw label. Also pins that
+    /// snapshots fire on early-return paths — the `#[piop_stage]` macro
+    /// snapshots after the body closure, which an inline version would skip.
     #[test]
     fn pipeline_boundary_snapshots_fire_on_every_exit_path() {
         let capture = capture_empty_compile();
@@ -279,7 +224,7 @@ mod tests {
 
         let expected = [
             "compile_start",
-            "after_compile_sc_subproof",
+            "after_compile_piop_subproof",
             "after_compile_mv_pcs_subproof",
             "after_compile_uv_pcs_subproof",
         ];
@@ -290,9 +235,7 @@ mod tests {
                  attribute was dropped or renamed. Saw: {phases:?}"
             );
         }
-        // Order matters: the dashboard plots these as sequential markers on
-        // the RSS curve, and each `after_*` doubles as the next stage's
-        // start boundary.
+        // The dashboard plots these as sequential markers on the RSS curve.
         let ordered: Vec<&str> = phases
             .iter()
             .map(String::as_str)

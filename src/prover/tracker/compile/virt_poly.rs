@@ -23,14 +23,10 @@ where
         if poly.is_empty() {
             return HPVirtualPolynomial::new(1);
         }
-        // Use the tracker's registered nv rather than peeking at the first
-        // factor: with the empty-product convention for bare constants
-        // (see `add_scalar`), a term may have an empty factor list and
-        // `poly[0].1[0]` would panic. The cached value is what
-        // `equalize_mat_poly_nv_to` scaled the sumcheck claim to expect;
-        // using the current material `num_vars()` (which might have been
-        // bumped by an earlier bucket's `equalize`) would compile the
-        // sumcheck at a nv that no longer matches the claim.
+        // Use the tracker's registered nv: a bare-constant term has an empty
+        // factor list (peeking would panic), and the registered value is what
+        // `equalize_mat_poly_nv_to` scaled the sumcheck claim to expect — a
+        // material nv bumped by an earlier bucket would no longer match.
         let nv = self.poly_nv(id);
 
         // Optimize away linear combinations of committed polynomials by
@@ -121,15 +117,10 @@ where
                 continue;
             }
 
-            // Ensure all factors have matching nv AND are not backed by a
-            // lazy storage variant. Lazy-backed factors (see phat B in
-            // `keyed_sumcheck`) would trigger 2^nv on-demand inversions
-            // if we fell into the `.evaluations()` fold below — exactly
-            // the O(2^nv) cost we introduced the lazy backing to avoid.
-            // Sumcheck will consume these directly via its streaming path
-            // (`piop/sum_check/prover.rs:135-168`), so keeping them out
-            // of this linear-optimisation pass is both correct and the
-            // whole point.
+            // Factors must share an nv and must not be lazy-backed: the
+            // `.evaluations()` fold below would trigger the 2^nv on-demand
+            // inversions the lazy backing exists to avoid. Sumcheck consumes
+            // lazy polys directly via its streaming path.
             if signature_map.iter().any(|(id, _)| {
                 self.mat_mv_poly(*id)
                     .map(|mle| {
@@ -213,38 +204,25 @@ where
         (other_terms, optimized_terms)
     }
 
-    /// Lift every materialized polynomial with `num_vars < target_nv` to
-    /// `target_nv` via a virtual override; polynomials already at or above
-    /// `target_nv` are left untouched. Sumcheck claims scaled by
-    /// `2^(target_nv - poly_nv)` (padding a poly by repetition multiplies
-    /// its hypercube sum by the repeat factor), and eval-claim points are
-    /// only *extended* — never truncated. Called once per bucket during
-    /// sumcheck compile so polys that don't participate in a bucket keep
-    /// their native size.
+    /// Lift every materialized poly with `num_vars < target_nv` to
+    /// `target_nv` via a virtual override; wider polys are untouched.
+    /// Sumcheck claims scale by `2^(target_nv - poly_nv)` (repetition
+    /// multiplies the hypercube sum) and eval-claim points are only ever
+    /// extended. Called once per bucket.
     #[instrument(level = "debug", skip(self))]
     pub(super) fn equalize_mat_poly_nv_to(&mut self, target_nv: usize) {
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv < target_nv {
-                // Zero-cost path: just update the virtual nv on the existing
-                // storage. For Field-backed polys this is unchanged behaviour
-                // (nv semantics do the cyclic repetition on access); for
-                // compressed-backed polys this critically avoids materializing
-                // to a full-size Vec<F>, keeping the tracker's memory
-                // footprint at inner-size for the whole compile pipeline.
+                // Zero-cost path: bump the virtual nv on the existing
+                // storage (cyclic repetition happens on access), never
+                // materializing compressed polys to a full Vec<F>.
                 //
-                // `Arc::make_mut` instead of `get_mut`: some polys are shared
-                // via multiple Arc holders — specifically, the keyed_sumcheck
-                // `LazyInverseShifted`/`LazyInverseShiftedSum` phat backings
-                // keep an Arc reference to their source `p` (or `p1`, `p2`).
-                // `get_mut` would panic on those (refcount > 1); `make_mut`
-                // clones-on-write only when actually shared, so the common
-                // unshared case still pays no allocation. When the source
-                // *is* shared, we get a fresh Arc for `materialized_polys[id]`
-                // while the lazy backing keeps its snapshot of the source at
-                // the pre-bump nv — which is semantically fine because our
-                // lazy `lift(i)` cycles `i` modulo the source's inner_len,
-                // producing the same values the bumped-in-place source would.
+                // `Arc::make_mut`, not `get_mut`: keyed_sumcheck lazy
+                // backings hold extra Arc refs to their source, on which
+                // `get_mut` would panic. When shared, the lazy backing keeps
+                // a pre-bump snapshot — fine, since lazy `lift(i)` cycles
+                // modulo inner_len and produces the same values.
                 let inner_poly = Arc::make_mut(poly);
                 inner_poly.set_virtual_nv(target_nv);
             }

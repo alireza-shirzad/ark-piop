@@ -86,10 +86,8 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
         }
     }
 
-    /// Trim the universal parameters to specialize the public parameters
-    /// for multilinear polynomials to the given `supported_num_vars`, and
-    /// returns committer key and verifier key. `supported_num_vars` should
-    /// be in range `1..=params.num_vars`
+    /// Trim to committer and verifier keys for `supported_num_vars`, which should be
+    /// in range `1..=params.num_vars`.
     fn trim(
         &self,
         supported_num_vars: usize,
@@ -118,8 +116,7 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
     }
 
     /// Build SRS for testing.
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
+    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, num_vars: usize) -> SnarkResult<Self> {
         if num_vars == 0 {
             panic!("num_vars should be positive");
@@ -135,7 +132,7 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
         let mut eq: LinkedList<DenseMultilinearExtension<E::ScalarField>> =
             LinkedList::from_iter(eq_extension(&t));
         let mut eq_arr = LinkedList::new();
-        // TODO: See if you can get rid of the clone next line
+        // TODO: avoid the clone
         let mut base = eq.pop_back().unwrap().evaluations;
 
         for i in (0..num_vars).rev() {
@@ -166,7 +163,7 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
             let pp_k_g = Evaluations {
                 evals: pp_g[start..(start + size)].to_vec(),
             };
-            // check correctness of pp_k_g
+            // Sanity-check pp_k_g against a direct eq evaluation.
             let t_eval_0 = eq_eval(&vec![E::ScalarField::zero(); num_vars - i], &t[i..num_vars])?;
             assert_eq!((g * t_eval_0).into(), pp_k_g.evals[0]);
             powers_of_g.push(pp_k_g);

@@ -59,14 +59,10 @@ pub trait TrackerCore {
     /// Add a constant to a tracked polynomial and return the new ID.
     fn add_scalar(&mut self, id: TrackerID, c: Self::F) -> TrackerID;
 
-    /// Return the multiplicative degree of the polynomial tree rooted at `id`.
-    /// Number of variables of the polynomial `id`, or 0 if unknown.
-    ///
-    /// Together with [`TrackerCore::virt_poly_degree`] and the degree limit
-    /// in [`TrackerCore::config`], this is everything
-    /// [`bucketing::build_buckets`](crate::tracker_core::bucketing::build_buckets)
-    /// needs to partition claims — and everything the two sides must agree
-    /// on for their partitions to match.
+    /// Number of variables of the polynomial `id`, or 0 if unknown. With
+    /// [`TrackerCore::virt_poly_degree`] and the config's degree limit, this
+    /// is everything bucketing partitions on — and everything the two sides
+    /// must agree on for their partitions to match.
     fn poly_nv(&self, id: TrackerID) -> usize;
 
     fn virt_poly_degree(&self, id: TrackerID) -> usize;
@@ -103,6 +99,20 @@ pub trait TrackerCore {
 
     /// Drain all sumcheck claims, returning them as a `Vec`.
     fn take_sumcheck_claims(&mut self) -> Vec<TrackerSumcheckClaim<Self::F>>;
+
+    /// Group sumcheck claims by their polynomial's `num_vars`. Callers rely
+    /// on the `BTreeMap`'s ascending order to keep both transcripts in step.
+    fn group_sumcheck_claims_by_nv(
+        &self,
+        claims: Vec<TrackerSumcheckClaim<Self::F>>,
+    ) -> std::collections::BTreeMap<usize, Vec<TrackerSumcheckClaim<Self::F>>> {
+        let mut by_nv: std::collections::BTreeMap<usize, Vec<TrackerSumcheckClaim<Self::F>>> =
+            std::collections::BTreeMap::new();
+        for c in claims {
+            by_nv.entry(self.poly_nv(c.id())).or_default().push(c);
+        }
+        by_nv
+    }
 
     /// Append a sumcheck claim with the given polynomial ID and claimed sum.
     fn push_sumcheck_claim(&mut self, id: TrackerID, claimed_sum: Self::F);

@@ -1,11 +1,10 @@
 //! Cost-model-based partitioner for the sumcheck bucketing pipeline.
 //!
-//! Claims are grouped by `num_vars`, and adjacent nvs may share a bucket —
-//! but only by lifting the smaller ones to the bucket's `target_nv`. That is
-//! the tension: merging pays one bucket's fixed cost instead of two, while
-//! every merged-up claim pays a `2^Δnv` blow-up. Prover and verifier run the
-//! same model over the same stats, so they land on the same partition with
-//! no wire-format hint.
+//! Claims are grouped by `num_vars`; adjacent nvs may share a bucket by
+//! lifting the smaller ones to the bucket's `target_nv`. Merging saves one
+//! bucket's fixed cost; every lifted claim pays a `2^Δnv` blow-up. Prover
+//! and verifier run the same model over the same stats, so they land on the
+//! same partition with no wire-format hint.
 //!
 //! ```text
 //! cost(bucket) = 2^target_nv * (2*D^2 + Σ batch_weight + per_bucket_overhead)
@@ -14,52 +13,21 @@
 //! batch_weight = Σ over claims in bucket of (degree_i + 1)
 //! ```
 //!
-//! Units are one field multiplication per hypercube point. The crux is that
-//! the two claim statistics aggregate differently:
+//! Units: field multiplications per hypercube point. The two statistics
+//! aggregate differently on merge, and that is the crux: `2*D^2` takes a
+//! `max` (the claims fold into one sumcheck by RLC, and a sum of polys has
+//! the max degree — merging equal-degree nvs is nearly free), while
+//! `batch_weight` takes a `sum` (each claim still gets its own batching pass
+//! at `2^target_nv`). Summing degrees instead once over-priced merges and
+//! cost LIKE-nation 25% of its wall clock.
 //!
-//! - **`2*D^2` is a `max`.** A bucket folds all its claims into a *single*
-//!   sumcheck by random linear combination, and a sum of polynomials has the
-//!   max of their degrees — so this term ignores claim count entirely, which
-//!   is why merging equal-degree nvs is nearly free. Squared because each
-//!   round evaluates at `D + 1` points and each is a product over `D` MLEs;
-//!   doubled because rounds halve, so `≈ 2 * 2^target_nv` point-visits.
-//! - **`batch_weight` is a `sum`.** Each claim still gets its own batching
-//!   pass over its terms at `2^target_nv`.
+//! Degrees are **pre-reduction**. `D` is clamped because
+//! `reduce_sumcheck_dgree` really caps the sumcheck's degree at
+//! `degree_limit - 1`; `batch_weight` is not, because the excess becomes
+//! chunk commits and link constraints paid at `2^target_nv` all the same.
 //!
-//! Getting that backwards — summing degrees — over-prices merges by roughly
-//! the claim count and cost LIKE-nation 25% of its wall clock.
-//!
-//! # Degree reduction
-//!
-//! The degrees here are **pre-reduction**: bucketing runs before any bucket
-//! executes, while `reduce_sumcheck_dgree` runs inside one and caps term
-//! degree at `degree_limit - 1`. The two terms treat that cap differently on
-//! purpose. `D` is clamped, because reduction really does stop the sumcheck's
-//! degree growing. `batch_weight` is not, because the excess becomes
-//! chunk-poly commits and link constraints — roughly linear in the excess,
-//! and paid at `2^target_nv` all the same.
-//!
-//! # Not modelled
-//!
-//! The ratios above come from operation counts, not measurement, and cannot
-//! be fitted from the current benches: `D` only spans 3-5 across the large
-//! buckets and correlates with nv, while measured per-point cost is U-shaped
-//! in nv for unrelated reasons (thread starvation below nv ~18, memory
-//! bandwidth at nv 24). Only the resulting *plans* have been validated,
-//! against LIKE-nation and LIKE-lineitem. Fitting the coefficients needs a
-//! sweep varying claim count and degree independently at a fixed nv.
-//!
-//! Also absent: the post-reduction chunk count; MLE work shared between
-//! claims over overlapping trees; commitment vs field arithmetic, lumped
-//! into one constant; memory pressure; and parallelism, since buckets run
-//! sequentially and the objective is a sum rather than a makespan.
-//!
-//! The model no longer has to distinguish claim *kinds* — every claim
-//! reaches it as a sumcheck claim, at its own nv, carrying its true degree.
-//! What used to make that distinction matter is now priced directly: a
-//! converted zerocheck's `eq(x, r)` shows up in `max_degree` instead of a
-//! blanket `+1`, and nozerocheck batching's commits are paid before the
-//! partition exists rather than inside a bucket at its `target_nv`.
+//! The coefficients come from operation counts, not measurement; only the
+//! resulting plans have been validated (LIKE-nation, LIKE-lineitem).
 
 use crate::{SnarkBackend, tracker_core::TrackerCore, types::claim::TrackerSumcheckClaim};
 use std::collections::BTreeMap;
@@ -76,11 +44,8 @@ pub struct BucketPlan {
 }
 
 impl BucketPlan {
-    /// The bucket that merging `group` (ascending) would produce.
-    ///
-    /// This is the merge rule: widest nv, summed batch weight, **maxed**
-    /// degree. Merging equal-degree claims adds no degree at all — see the
-    /// module docs for why that distinction matters.
+    /// The merge rule: widest nv, **summed** batch weight, **maxed** degree.
+    /// See the module docs for why sum-vs-max matters.
     fn from_group(group: &[NvClaimStats]) -> BucketPlan {
         BucketPlan {
             target_nv: group.last().expect("bucket group is never empty").nv,
@@ -92,18 +57,11 @@ impl BucketPlan {
 }
 
 /// Default [`CostModel::per_bucket_overhead`]: aux/chunk poly commits and
-/// transcript rounds.
-///
-/// Also the merge/split threshold — for adjacent nvs of equal degree,
-/// `merge - split = 2^(n-1) * (w_lo - 2*D^2 - per_bucket_overhead)`, so the
-/// model merges when `w_lo < 2*D^2 + per_bucket_overhead`. Only meaningful
-/// relative to the weight unit: an earlier reweighting moved this threshold
-/// without moving the constant and cost LIKE-nation 25% of its wall clock.
-///
-/// Fitted, not derived. The explicit `2*D^2` term now carries most of what
-/// it used to stand in for, so plans are no longer sensitive to it — on the
-/// measured workloads merging nvs 15/16 holds for any value, splitting 16
-/// from 20 needs `< 72`, and splitting 20 from 24 needs `< 1228`.
+/// transcript rounds. Fitted, not derived; for adjacent equal-degree nvs the
+/// model merges when `w_lo < 2*D^2 + per_bucket_overhead`, so this constant
+/// is the merge/split threshold and only meaningful relative to the weight
+/// unit. Measured plans tolerate a wide range (up to ~72 for the tightest
+/// split decision).
 pub const DEFAULT_PER_BUCKET_OVERHEAD: usize = 12;
 
 /// The claims at one `num_vars`, as the cost model sees them. Two numbers
@@ -118,12 +76,29 @@ pub struct NvClaimStats {
     pub max_degree: usize,
 }
 
-/// The two tunable numbers in the cost formula.
-///
-/// [`CostModel::cost_of`] prices a [`BucketPlan`] with them and
-/// [`pick_bucket_plan`] keeps the cheapest partition, so between them these
-/// decide every merge. Prover and verifier build the model from the same
-/// shared config, which is what makes their partitions agree.
+impl NvClaimStats {
+    /// The stats for the claims at one `nv`, with degrees read from the
+    /// tracker's `virt_poly_degree`.
+    fn from_sumcheck_claims<T: TrackerCore + ?Sized>(
+        nv: usize,
+        claims: &[TrackerSumcheckClaim<T::F>],
+        tracker: &T,
+    ) -> NvClaimStats {
+        let degrees: Vec<usize> = claims
+            .iter()
+            .map(|c| tracker.virt_poly_degree(c.id()))
+            .collect();
+        NvClaimStats {
+            nv,
+            batch_weight: degrees.iter().map(|d| d + 1).sum(),
+            max_degree: degrees.iter().copied().max().unwrap_or(0),
+        }
+    }
+}
+
+/// The two tunable numbers in the cost formula. Prover and verifier build
+/// the model from the same shared config, which is what makes their
+/// partitions agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CostModel {
     /// Caps `D`, mirroring the cap `reduce_sumcheck_dgree` applies for real.
@@ -144,20 +119,13 @@ impl CostModel {
         }
     }
 
-    /// Cost of running `bucket`, in field multiplications per hypercube
-    /// point. Only meaningful compared against another plan's total.
-    ///
-    /// ```text
-    /// cost = 2^target_nv * (2*D^2 + batch_weight + per_bucket_overhead)
-    /// D    = min(max_degree, degree_limit - 1)
-    /// ```
-    ///
-    /// See the module docs for why the sumcheck term is a capped square over
-    /// the max degree while the batching term is an uncapped sum.
-    fn cost_of(&self, bucket: &BucketPlan) -> u128 {
-        // No `+1` for `eq(x, r)`: claims reach the planner already converted,
-        // so `max_degree` counts that factor. `.max(1)` so a bucket never
-        // looks free.
+    /// Cost of running `bucket`: `2^target_nv * (2*D^2 + batch_weight +
+    /// per_bucket_overhead)` with `D = min(max_degree, degree_limit - 1)`.
+    /// Only meaningful compared against another plan's total; see the module
+    /// docs for the formula's rationale.
+    pub fn cost_of(&self, bucket: &BucketPlan) -> u128 {
+        // No `+1` for `eq(x, r)` — `max_degree` already counts that factor.
+        // `.max(1)` so a bucket never looks free.
         let agg_degree = bucket
             .max_degree
             .min(self.degree_limit.saturating_sub(1))
@@ -168,16 +136,9 @@ impl CostModel {
     }
 }
 
-/// Record what the planner saw and what it chose, for offline calibration.
-///
-/// The per-bucket stats emitted later carry only the *resulting* buckets, so a
-/// merged bucket reports one summed `batch_weight` and the per-nv weights that
-/// drove the decision are gone — which is exactly what replaying a candidate
-/// cost model against a past run needs. Emitting the planner's input alongside
-/// its output makes those replays exact.
-///
-/// Fires on both prover and verifier, which run the same model over the same
-/// stats; `side` distinguishes the two copies.
+/// Record what the planner saw and what it chose, for offline calibration —
+/// the later per-bucket stats only carry the merged results, not the per-nv
+/// inputs a cost-model replay needs. Fires on both prover and verifier.
 fn emit_plan_input_stats(nv_stats: &[NvClaimStats], plan: &[BucketPlan], model: &CostModel) {
     let payload = serde_json::json!({
         "model": {
@@ -205,14 +166,12 @@ fn emit_plan_input_stats(nv_stats: &[NvClaimStats], plan: &[BucketPlan], model: 
     );
 }
 
-/// Min-cost plan over every *contiguous* partition of the ascending
-/// `nv_stats`. Contiguous only: merging `{a, c}` while `b` is separate would
-/// run `a`'s claims at `c`'s width for no gain over `{a}` or `{a, b}`.
-/// Practical nv count is 1-4, so brute-forcing the `2^(k-1)` cut masks is
-/// fine.
+/// Pick the best plan for bucketing the sumcheck claims and return the decision.
 ///
-/// Empty when there are no claims — callers treat that as "nothing to prove".
-pub fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<BucketPlan> {
+/// With `k` distinct nvs among the claims, there are `2^(k-1)` ways to bucket
+/// them. The search enumerates all of them, prices each with the given cost model, and
+/// keeps the cheapest — exhaustive, so the result is the true optimum.
+fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<BucketPlan> {
     let k = nv_stats.len();
     if k == 0 {
         return Vec::new();
@@ -237,17 +196,10 @@ pub fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<Buc
             }
         }
         push_bucket(&nv_stats[start..], &mut plan, &mut cost, model);
-        // A `target_nv == 0` bucket cannot run: its sumcheck has no variables,
-        // so `z_check_claim_to_s_check_claim` samples an empty `r` and
-        // `build_eq_x_r` rejects it. nv-0 claims are real — a scalar aggregate
-        // such as TPC-H Q6 produces several — so they have to ride along in a
-        // wider bucket, lifted like any other under-width claim. Rejecting the
-        // plan here rather than filtering the claims keeps prover and verifier
-        // in step, since both run this same search.
-        //
-        // Only the first bucket can be nv 0 (stats are ascending), and only
-        // when it is the singleton `{0}`. Skipping those masks is exactly the
-        // "merge nv 0 upward" rule, and it costs nothing to state as a filter.
+        // A singleton nv-0 bucket cannot run — a 0-variable sumcheck has no
+        // `r` to sample — so nv-0 claims (real: TPC-H Q6's scalar aggregates)
+        // must ride along in a wider bucket. Skipping those masks here, in
+        // the search both sides run, keeps prover and verifier in step.
         if plan.len() > 1 && plan[0].target_nv == 0 {
             continue;
         }
@@ -256,6 +208,12 @@ pub fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<Buc
             best_plan = plan;
         }
     }
+
+    debug!(
+        plan = ?best_plan.iter().map(|b| (b.target_nv, b.included_nvs.clone())).collect::<Vec<_>>(),
+        "sumcheck bucketing plan"
+    );
+    emit_plan_input_stats(nv_stats, &best_plan, model);
 
     best_plan
 }
@@ -272,13 +230,8 @@ fn push_bucket(
 }
 
 /// One bucket ready to run: the claims that landed in it plus the
-/// `target_nv` they are all lifted to. Owning the claims — rather than
-/// leaving them in an nv-keyed map — keeps planning and running independent.
-///
-/// Sumcheck claims only. Zerocheck and nozerocheck claims are discharged
-/// before the partition is drawn — see [`build_buckets`] — so a bucket has
-/// no way to represent one, which is the invariant stated as a type rather
-/// than as an assertion someone has to remember to keep true.
+/// `target_nv` they are all lifted to. Sumcheck claims only — zerocheck and
+/// nozerocheck claims are discharged before the partition is drawn.
 #[derive(Clone, Debug)]
 pub struct SumcheckBucket<B: SnarkBackend> {
     pub target_nv: usize,
@@ -286,68 +239,17 @@ pub struct SumcheckBucket<B: SnarkBackend> {
     pub sum_check_claims: Vec<TrackerSumcheckClaim<B::F>>,
 }
 
-/// Group the claims by nv, run the cost model, and hand back one
-/// [`SumcheckBucket`] per planned bucket. Empty when there are no claims.
-///
-/// Takes sumcheck claims alone. Callers run
-/// [`batch_nozero_check_claims_by_nv`] and
-/// [`convert_zerochecks_by_nv`](crate::tracker_core::pipeline::convert_zerochecks_by_nv)
-/// first, each of which resolves its claim kind at that claim's own nv. So
-/// by the time the partition is chosen there is one kind of claim left, and
-/// every claim carries the degree it will actually be proved at — including
-/// the `eq(x, r)` factor a converted zerocheck picked up. The planner used
-/// to approximate that factor with a blanket `+1`.
-///
-/// [`batch_nozero_check_claims_by_nv`]: crate::prover::tracker::ProverTracker
-//TODO: There should be a configuration for which the prover sends the information about bucketing to the verifier so that the verifier doesn't compute the buckets itself
-pub fn build_buckets<B, T>(
-    tracker: &T,
-    sum_check_claims: Vec<TrackerSumcheckClaim<B::F>>,
-) -> Vec<SumcheckBucket<B>>
-where
-    B: SnarkBackend,
-    T: TrackerCore<F = B::F> + ?Sized,
-{
-    let nv_of = |id| tracker.poly_nv(id);
-    let degree_of = |id| tracker.virt_poly_degree(id);
-    let model = CostModel::new(tracker.config().sumcheck_term_degree_limit);
-
-    let mut sc_by_nv: BTreeMap<usize, Vec<TrackerSumcheckClaim<B::F>>> = BTreeMap::new();
-    for c in sum_check_claims {
-        sc_by_nv.entry(nv_of(c.id())).or_default().push(c);
-    }
-
-    // Collect both statistics the cost model needs per nv. They are gathered
-    // in one pass over the same claims but aggregated differently — summed
-    // for batching work, maxed for the aggregated sumcheck's degree — so
-    // they cannot be collapsed into a single number. See [`bucket_cost`].
-    let nv_stats: Vec<NvClaimStats> = sc_by_nv
-        .iter()
-        .map(|(nv, claims)| {
-            let degrees: Vec<usize> = claims.iter().map(|c| degree_of(c.id())).collect();
-            NvClaimStats {
-                nv: *nv,
-                batch_weight: degrees.iter().map(|d| d + 1).sum(),
-                max_degree: degrees.iter().copied().max().unwrap_or(0),
-            }
-        })
-        .collect();
-
-    if nv_stats.is_empty() {
-        return Vec::new();
-    }
-
-    let plan = pick_bucket_plan(&nv_stats, &model);
-    debug!(
-        plan = ?plan.iter().map(|b| (b.target_nv, b.included_nvs.clone())).collect::<Vec<_>>(),
-        "sumcheck bucketing plan"
-    );
-    emit_plan_input_stats(&nv_stats, &plan, &model);
+/// Pick the min-cost partition (see [`pick_bucket_plan`]) and distribute the
+/// claims from `sc_by_nv` into the planned buckets.
+fn optimize_sumcheck_bucket_plans<B: SnarkBackend>(
+    nv_stats: &[NvClaimStats],
+    mut sc_by_nv: BTreeMap<usize, Vec<TrackerSumcheckClaim<B::F>>>,
+    model: &CostModel,
+) -> Vec<SumcheckBucket<B>> {
+    let plan = pick_bucket_plan(nv_stats, model);
 
     // `remove` rather than `get`: the plan partitions the nvs, so each one is
-    // claimed exactly once and anything left behind would be a claim the plan
-    // forgot. Asserted below, on every call rather than in one unit test —
-    // a dropped claim is unprovable rather than merely slow.
+    // claimed exactly once
     let buckets: Vec<SumcheckBucket<B>> = plan
         .into_iter()
         .map(|bucket| {
@@ -365,10 +267,6 @@ where
         })
         .collect();
 
-    // `assert!`, not `debug_assert!`: benches and every real proof run in
-    // release, which is exactly where an uncovered nv would go unnoticed.
-    // The claim would not be proved at all — unsound, not merely slow — and
-    // one `is_empty()` per compile is not a cost worth trading for that.
     assert!(
         sc_by_nv.is_empty(),
         "bucket plan did not cover every nv — {} sumcheck claim group(s) \
@@ -376,6 +274,37 @@ where
         sc_by_nv.len(),
     );
     buckets
+}
+
+/// Group the claims by nv, run the cost model, and hand back one
+/// [`SumcheckBucket`] per planned bucket. Empty when there are no claims.
+//TODO: There should be a configuration for which the prover sends the information about bucketing to the verifier so that the verifier doesn't compute the buckets itself
+pub fn build_buckets<B, T>(
+    tracker: &T,
+    sum_check_claims: Vec<TrackerSumcheckClaim<B::F>>,
+    model: CostModel,
+) -> Vec<SumcheckBucket<B>>
+where
+    B: SnarkBackend,
+    T: TrackerCore<F = B::F> + ?Sized,
+{
+    // 1. If there is no claims, return early
+    if sum_check_claims.is_empty() {
+        return Vec::new();
+    }
+
+    // 2. group the sumcheck claims by their number of variables
+    let sc_by_nv = tracker.group_sumcheck_claims_by_nv(sum_check_claims);
+
+    // 3. Extract the needed statistics from each group
+    let nv_stats: Vec<NvClaimStats> = sc_by_nv
+        .iter()
+        .map(|(nv, claims)| NvClaimStats::from_sumcheck_claims(*nv, claims, tracker))
+        .collect();
+
+    // 4. Run the optimizer w.r.t the model and given stats, and distribute
+    //    the claims into the planned buckets
+    optimize_sumcheck_bucket_plans::<B>(&nv_stats, sc_by_nv, &model)
 }
 
 #[cfg(test)]

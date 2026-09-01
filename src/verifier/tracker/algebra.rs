@@ -138,17 +138,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         res_id
     }
 
-    /// Adds a scalar to an oracle, returns a new virtual oracle.
-    ///
-    /// Represents the scalar as a bare-constant term `(scalar, vec![])` —
-    /// the empty factor list means "empty product = 1", so the term
-    /// contributes exactly `scalar` at every point. This matches the
-    /// prover-side `add_scalar` convention (see
-    /// `prover/tracker/algebra.rs`) so both sides construct structurally
-    /// identical virtual polys.
-    ///
-    /// Adding a constant does not change the max multiplicative degree
-    /// of the sum, so the result's degree equals the input's degree.
+    /// Adds a scalar to an oracle, returns a new virtual oracle. The scalar
+    /// is a bare-constant term `(scalar, vec![])` (empty product = 1),
+    /// matching the prover's `add_scalar` so both sides build structurally
+    /// identical virtual polys. Degree is unchanged.
     pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         let o1_terms = self.state.virtual_polys.get(&o1_id).unwrap().clone();
         let o1_degree = self.state.poly_degrees.get(&o1_id).copied().unwrap_or(0);

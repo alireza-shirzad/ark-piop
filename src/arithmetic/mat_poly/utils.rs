@@ -19,9 +19,8 @@ pub(crate) fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
 }
 
 pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
-    // Bind Cow returns to locals so their (potentially owned) storage lives
-    // long enough for the zipped iteration below. For Field-backed MLEs this
-    // is a zero-cost borrow; compressed-backed MLEs materialize once here.
+    // Bind Cow returns to locals so potentially-owned storage outlives the
+    // zipped iteration (compressed backings materialize once here).
     let eq_field = eq.mat_mle();
     let poly_field = poly.mat_mle();
     assert_eq!(poly_field.num_vars, eq.num_vars());
@@ -31,7 +30,7 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
         .sum::<F>()
 }
 
-//TODO: Why do we need this when we have a fix-variables method for MLE? is it because of the way MLE fixes variables?
+//TODO: why keep this when MLE already has a fix_variables method?
 pub(crate) fn fix_variables<F: Field>(poly: &MLE<F>, partial_point: &[F]) -> MLE<F> {
     poly.fix_variables(partial_point)
 }
@@ -51,24 +50,9 @@ pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
     Ok(res)
 }
 
-/// This function build the eq(x, r) polynomial for any given r.
-///
-/// Evaluate
-///      eq(x,y) = \prod_i=1^num_var (x_i * y_i + (1-x_i)*(1-y_i))
-/// over r, which is
-///      eq(x,y) = \prod_i=1^num_var (x_i * r_i + (1-x_i)*(1-r_i))
+/// Build eq(x, r) = \prod_i (x_i * r_i + (1-x_i)*(1-r_i)) as an MLE from its
+/// 2^num_vars evaluations over x \in {0, 1}^num_vars.
 pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<MLE<F>> {
-    // we build eq(x,r) from its evaluations
-    // we want to evaluate eq(x,r) over x \in {0, 1}^num_vars
-    // for example, with num_vars = 4, x is a binary vector of 4, then
-    //  0 0 0 0 -> (1-r0)   * (1-r1)    * (1-r2)    * (1-r3)
-    //  1 0 0 0 -> r0       * (1-r1)    * (1-r2)    * (1-r3)
-    //  0 1 0 0 -> (1-r0)   * r1        * (1-r2)    * (1-r3)
-    //  1 1 0 0 -> r0       * r1        * (1-r2)    * (1-r3)
-    //  ....
-    //  1 1 1 1 -> r0       * r1        * r2        * r3
-    // we will need 2^num_var evaluations
-
     if r.is_empty() {
         return Err(ArithErrors::InvalidParameters("r length is 0".to_string()).into());
     }
@@ -139,9 +123,8 @@ pub fn build_sparse_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<SparsePolynomi
     Ok(SparsePolynomial::from_coefficients_vec(r.len(), coeffs))
 }
 
-/// Generate eq(t,x), a product of multilinear polynomials with fixed t.
-/// eq(a,b) is takes extensions of a,b in {0,1}^num_vars such that if a and b in
-/// {0,1}^num_vars are equal then this polynomial evaluates to 1.
+/// Generate eq(t, x) as a product of per-variable multilinear factors with
+/// fixed t; evaluates to 1 iff a == b for a, b in {0,1}^num_vars.
 pub(crate) fn eq_extension<F: PrimeField>(t: &[F]) -> Vec<DenseMultilinearExtension<F>> {
     let dim = t.len();
     let mut result = Vec::new();
