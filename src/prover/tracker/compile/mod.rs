@@ -127,7 +127,7 @@ mod tests {
 
     impl<S> Layer<S> for SpanCapture
     where
-        S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        S: tracing::Subscriber + for<'a> LookupSpan<'a>
     {
         fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
             let meta = attrs.metadata();

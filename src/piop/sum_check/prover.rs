@@ -27,12 +27,18 @@ pub(crate) enum StreamPolicy {
     Auto,
 }
 
-/// Read `TT_SUMCHECK_STREAM_K` (cached per-process): unset/`auto`/unrecognized → Auto,
-/// `0` → Eager, positive `N` → Explicit(N) (capped at `num_variables` later).
+/// Read `TT_SUMCHECK_STREAM_K` (cached per-process): unset/`0`/unrecognized → Eager,
+/// `auto` → Auto, positive `N` → Explicit(N) (capped at `num_variables` later).
+///
+/// Streaming is OFF by default: the auto heuristic counts compressed factors
+/// but not bytes, so it engaged on ordinary nv-20 TPC-H sumchecks — where it
+/// saves tens of MiB but costs ~30-45% prover time. Until the decision is
+/// byte-budgeted, streaming is opt-in via `TT_SUMCHECK_STREAM_K=auto` (or an
+/// explicit window) for the char-domain workloads it was built for.
 pub(crate) fn stream_policy() -> StreamPolicy {
     static CACHED: OnceLock<StreamPolicy> = OnceLock::new();
     *CACHED.get_or_init(|| match std::env::var("TT_SUMCHECK_STREAM_K") {
-        Err(_) => StreamPolicy::Auto,
+        Err(_) => StreamPolicy::Eager,
         Ok(s) => {
             let trimmed = s.trim();
             if trimmed.eq_ignore_ascii_case("auto") {
@@ -44,7 +50,7 @@ pub(crate) fn stream_policy() -> StreamPolicy {
                     StreamPolicy::Explicit(n)
                 }
             } else {
-                StreamPolicy::Auto
+                StreamPolicy::Eager
             }
         }
     })
