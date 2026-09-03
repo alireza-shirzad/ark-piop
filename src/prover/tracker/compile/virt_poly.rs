@@ -139,35 +139,35 @@ where
             let signature: Vec<(TrackerID, B::F)> = signature_map.into_iter().collect();
 
             // Reuse or build the linear combo MLE.
-            let linear_mle =
-                if let Some((_, mle)) = linear_cache.iter().find(|(sig, _)| *sig == signature) {
-                    mle.clone()
-                } else {
-                    let mut evals = vec![B::F::zero(); 1 << nv];
-                    for (id, coeff) in &signature {
-                        let mle = self.mat_mv_poly(*id).unwrap();
-                        // Fix 6b: skip the 2^nv Vec allocation when the
-                        // factor is Constant-backed — the added contribution
-                        // is a uniform `coeff * value` per slot, so we just
-                        // add that scalar across the accumulator without
-                        // materialising a same-valued eval vector.
-                        if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
-                            value,
-                            ..
-                        } = mle.storage()
-                        {
-                            let cv = *coeff * *value;
-                            cfg_iter_mut!(evals).for_each(|acc| *acc += cv);
-                        } else {
-                            cfg_iter_mut!(evals)
-                                .zip(mle.evaluations())
-                                .for_each(|(acc, v)| *acc += *coeff * v);
-                        }
+            let linear_mle = if let Some((_, mle)) =
+                linear_cache.iter().find(|(sig, _)| *sig == signature)
+            {
+                mle.clone()
+            } else {
+                let mut evals = vec![B::F::zero(); 1 << nv];
+                for (id, coeff) in &signature {
+                    let mle = self.mat_mv_poly(*id).unwrap();
+                    // Fix 6b: skip the 2^nv Vec allocation when the
+                    // factor is Constant-backed — the added contribution
+                    // is a uniform `coeff * value` per slot, so we just
+                    // add that scalar across the accumulator without
+                    // materialising a same-valued eval vector.
+                    if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
+                        value, ..
+                    } = mle.storage()
+                    {
+                        let cv = *coeff * *value;
+                        cfg_iter_mut!(evals).for_each(|acc| *acc += cv);
+                    } else {
+                        cfg_iter_mut!(evals)
+                            .zip(mle.evaluations())
+                            .for_each(|(acc, v)| *acc += *coeff * v);
                     }
-                    let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
-                    linear_cache.push((signature.clone(), mle.clone()));
-                    mle
-                };
+                }
+                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
+                linear_cache.push((signature.clone(), mle.clone()));
+                mle
+            };
 
             // Mark terms as used.
             for (idx, _, _) in &active_entries {

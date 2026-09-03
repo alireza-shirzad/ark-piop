@@ -1226,11 +1226,16 @@ impl<F: Field> MLEStorage<F> {
     pub fn to_field(&self) -> Cow<'_, DenseMultilinearExtension<F>> {
         match self {
             Self::Field(m) => Cow::Borrowed(m),
+            // Route through `to_evaluations_vec` for its lazy-inverse batch
+            // fast paths: element-wise `lift` here costs one inversion per
+            // slot when the backing is lazy (and this is called per poly per
+            // eval point during PCS query-map construction).
             _ => {
                 let n = self.inner_num_vars();
-                let len = self.inner_len();
-                let evals: Vec<F> = (0..len).map(|i| self.lift(i)).collect();
-                Cow::Owned(DenseMultilinearExtension::from_evaluations_vec(n, evals))
+                Cow::Owned(DenseMultilinearExtension::from_evaluations_vec(
+                    n,
+                    self.to_evaluations_vec(),
+                ))
             }
         }
     }
@@ -1239,6 +1244,32 @@ impl<F: Field> MLEStorage<F> {
     pub fn to_evaluations_vec(&self) -> Vec<F> {
         match self {
             Self::Field(m) => m.evaluations.clone(),
+            // Batch-inversion fast paths: per-element `lift` pays one field
+            // inversion per slot, which turns materializing a lazy phat into
+            // 2^nv sequential inversions (the dominant cost of PCS-opening
+            // one). Montgomery batching makes it one inversion + 3 muls per
+            // slot. `batch_inversion` leaves zeros at zero, matching `lift`'s
+            // `.inverse().unwrap_or(zero)` fallback.
+            Self::LazyInverseShifted { source, shift, .. } => {
+                let src = source.storage();
+                let src_len = src.inner_len();
+                let mut v: Vec<F> = (0..self.inner_len())
+                    .map(|i| src.lift(i % src_len) - *shift)
+                    .collect();
+                ark_ff::fields::batch_inversion(&mut v);
+                v
+            }
+            Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
+                let (s1, s2) = (s1.storage(), s2.storage());
+                let (l1, l2) = (s1.inner_len(), s2.inner_len());
+                let n = self.inner_len();
+                let mut a: Vec<F> = (0..n).map(|i| s1.lift(i % l1) - *shift).collect();
+                let mut b: Vec<F> = (0..n).map(|i| s2.lift(i % l2) - *shift).collect();
+                ark_ff::fields::batch_inversion(&mut a);
+                ark_ff::fields::batch_inversion(&mut b);
+                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                a
+            }
             _ => (0..self.inner_len()).map(|i| self.lift(i)).collect(),
         }
     }
@@ -1254,6 +1285,22 @@ impl<F: Field> MLEStorage<F> {
 pub struct MLE<F: Field> {
     storage: MLEStorage<F>,
     nv: Option<usize>,
+}
+
+/// Repeat `inner` cyclically out to `outer_len` elements — the materialized
+/// form of virtual-nv padding, matching `lift(i % inner_len)`.
+fn cyclic_repeat<F: Clone>(inner: Vec<F>, outer_len: usize) -> Vec<F> {
+    if inner.len() >= outer_len {
+        let mut v = inner;
+        v.truncate(outer_len);
+        return v;
+    }
+    let mut out = Vec::with_capacity(outer_len);
+    while out.len() < outer_len {
+        let take = inner.len().min(outer_len - out.len());
+        out.extend_from_slice(&inner[..take]);
+    }
+    out
 }
 
 impl<F: Field> MLE<F> {
@@ -1817,7 +1864,12 @@ impl<F: Field> MLE<F> {
 
     pub fn evaluations(&self) -> Vec<F> {
         match (self.nv, &self.storage) {
-            (Some(_), _) => self.iter().collect::<Vec<F>>(),
+            // Materialize the inner backing once (batch-inverting lazy
+            // storage), then repeat cyclically — element-wise `lift` here
+            // would bypass the lazy fast path and pay per-slot inversions.
+            (Some(nv), _) => {
+                cyclic_repeat(self.storage.to_evaluations_vec(), 1usize << nv)
+            }
             (None, MLEStorage::Field(m)) => m.evaluations.clone(),
             (None, _) => self.storage.to_evaluations_vec(),
         }
@@ -1825,12 +1877,7 @@ impl<F: Field> MLE<F> {
 
     pub fn into_evaluations(self) -> Vec<F> {
         match (self.nv, self.storage) {
-            (Some(nv), storage) => {
-                // Rebuild an iterator that respects virtual repetition.
-                let inner_len = storage.inner_len();
-                let outer_len = 1usize << nv;
-                (0..outer_len).map(|i| storage.lift(i % inner_len)).collect()
-            }
+            (Some(nv), storage) => cyclic_repeat(storage.to_evaluations_vec(), 1usize << nv),
             (None, MLEStorage::Field(m)) => m.evaluations,
             (None, storage) => storage.to_evaluations_vec(),
         }
