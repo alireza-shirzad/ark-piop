@@ -20,23 +20,20 @@ use either::Either;
 
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-/// A tracked polynomial that is tracked by the prover tracker
+/// A polynomial handle registered with the prover tracker.
 pub struct TrackedPoly<B>
 where
     B: SnarkBackend,
 {
     pub id_or_const: Either<TrackerID, B::F>,
-    /// Cached tracker ID for constant polynomials. Set when this is a committed
-    /// constant (from track_and_commit), or lazily populated on first `.id()`
-    /// call for derived constants (from arithmetic on constants).
-    /// Arithmetic sees `Either::Right(cnst)` for constant-folding, while
-    /// `.id()` falls back to this for sumcheck/zerocheck claims.
+    /// Tracker ID for constants: set for committed constants, lazily filled on
+    /// first `.id()` for derived ones. Arithmetic still sees
+    /// `Either::Right(cnst)` for constant-folding; `.id()` falls back to this.
     cached_constant_id: Cell<Option<TrackerID>>,
     log_size: usize,
     tracker: Rc<RefCell<ProverTracker<B>>>,
 }
 
-/// Debug implementation for TrackedPoly
 impl<B: SnarkBackend> Debug for TrackedPoly<B>
 where
     B: SnarkBackend,
@@ -49,7 +46,6 @@ where
     }
 }
 
-/// PartialEq implementation for TrackedPoly
 impl<B: SnarkBackend> PartialEq for TrackedPoly<B>
 where
     B: SnarkBackend,
@@ -59,7 +55,6 @@ where
     }
 }
 
-/// Other functionalities for TrackedPoly
 impl<B: SnarkBackend> TrackedPoly<B>
 where
     B: SnarkBackend,
@@ -100,10 +95,8 @@ where
         self.id_or_const
     }
 
-    /// Returns `Some(c)` if this tracked polynomial is a folded constant and
-    /// has not yet been materialized into a committed oracle, `None` otherwise.
-    /// Prefer this over pattern-matching on [`Self::id_or_const`] when the
-    /// caller only cares about the constant-vs-non-constant distinction.
+    /// `Some(c)` if this is a folded constant not yet materialized into a
+    /// committed oracle, `None` otherwise.
     pub fn as_constant(&self) -> Option<B::F> {
         match self.id_or_const {
             Either::Right(c) => Some(c),
@@ -128,10 +121,8 @@ where
                 };
 
                 if let Some(id) = self.cached_constant_id.get() {
-                    // Committed constant — ID exists but may not have an MLE
-                    // in materialized_polys yet. Lazily register one under the
+                    // Committed constant: lazily register an MLE under the
                     // existing ID so sumcheck/zerocheck claims can reference it.
-                    // The entry check avoids re-creating on repeated .id() calls.
                     if !self.tracker.borrow().has_materialized_mv_poly(id) {
                         self.tracker
                             .borrow_mut()
@@ -153,8 +144,7 @@ where
         self.tracker.clone()
     }
 
-    /// Return the log size of the polynomial
-    /// This is the number of variables in multivariate polynomials
+    /// Log size (number of variables for multivariate polynomials).
     pub fn log_size(&self) -> usize {
         self.log_size
     }
@@ -201,8 +191,7 @@ where
     }
 
     pub fn evaluations(&self) -> Vec<B::F> {
-        // TODO: Noe that this has to actually clone the evaluations, which can be
-        // expensive
+        // TODO: clones the evaluations, which can be expensive
         match &self.id_or_const {
             Either::Left(id) => self.tracker.borrow_mut().evaluations(*id).clone(),
             Either::Right(c) => vec![*c; 1 << self.log_size],
@@ -463,16 +452,32 @@ where
                 shift % domain_size
             };
 
-            let mut evals: Vec<B::F> = (0..domain_size).map(|i| B::F::from(i as u64)).collect();
-            if domain_size > 0 {
-                if is_right {
-                    evals.rotate_right(normalized_shift);
-                } else {
-                    evals.rotate_left(normalized_shift);
+            // Build evaluations via `MLE::from_u32s`: compact U32 storage is
+            // 8x smaller than a Field-storage `Vec<F>` (512 MiB per shift poly
+            // at log_size=24) and all downstream paths support it natively.
+            // For log_size >= 32 the u32 counts would overflow, so fall back
+            // to the field path (defensive guard; SRS caps log_size near 30).
+            let poly = if log_size < 32 {
+                let mut evals: Vec<u32> = (0..(domain_size as u32)).collect();
+                if domain_size > 0 {
+                    if is_right {
+                        evals.rotate_right(normalized_shift);
+                    } else {
+                        evals.rotate_left(normalized_shift);
+                    }
                 }
-            }
-
-            let poly = prover.track_mat_mv_poly(MLE::from_evaluations_vec(log_size, evals));
+                prover.track_mat_mv_poly(MLE::from_u32s(evals, log_size))
+            } else {
+                let mut evals: Vec<B::F> = (0..domain_size).map(|i| B::F::from(i as u64)).collect();
+                if domain_size > 0 {
+                    if is_right {
+                        evals.rotate_right(normalized_shift);
+                    } else {
+                        evals.rotate_left(normalized_shift);
+                    }
+                }
+                prover.track_mat_mv_poly(MLE::from_evaluations_vec(log_size, evals))
+            };
             prover.add_indexed_tracked_poly(label, poly.clone());
             poly
         }

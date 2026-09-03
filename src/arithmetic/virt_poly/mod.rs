@@ -1,20 +1,9 @@
 //! Symbolic representation of virtual (sum-of-products) polynomials.
 //!
-//! A [`VirtualPoly`] stores a polynomial expression of the form
-//!
-//! ```text
-//!   sum_i  c_i * prod_j  p_{i,j}
-//! ```
-//!
-//! where each `c_i` is a scalar coefficient and each `p_{i,j}` is identified
-//! by its [`TrackerID`].  The actual polynomial data (evaluations, commitments,
-//! oracle closures) lives in the prover or verifier tracker; `VirtualPoly`
-//! only records the *structure* of the expression.
-//!
-//! This type is used on **both** the prover side (where factors are MLEs) and
-//! the verifier side (where factors are oracle handles).  It was historically
-//! called `VirtualOracle` on the verifier side; that name is kept as a type
-//! alias for backward compatibility.
+//! A [`VirtualPoly`] records only the *structure* `sum_i c_i * prod_j p_{i,j}`,
+//! each factor identified by its [`TrackerID`]; the actual polynomial data
+//! lives in the prover or verifier tracker. Used on both sides (prover factors
+//! are MLEs, verifier factors are oracle handles).
 
 use crate::types::TrackerID;
 
@@ -23,15 +12,9 @@ use derivative::Derivative;
 use std::ops::{Deref, DerefMut};
 use std::slice;
 
-/// A symbolic sum-of-products polynomial expression.
-///
-/// Each entry `(coefficient, factors)` represents a product term:
-/// `coefficient * factors[0] * factors[1] * ...` where each factor is a
-/// [`TrackerID`] referencing a tracked polynomial or oracle.
-///
-/// The full polynomial is the sum of all such terms.
-///
-/// Used identically on both the prover and verifier sides of the protocol.
+/// A symbolic sum-of-products polynomial expression: each entry
+/// `(coefficient, factors)` is one product term, with factors given as
+/// [`TrackerID`]s referencing tracked polynomials or oracles.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "F: Clone"))]
 #[derivative(Default(bound = ""))]

@@ -1,4 +1,4 @@
-//! This module is copied from the [hyperplonk](https://github.com/EspressoSystems/hyperplonk/tree/main) library.
+//! Copied from the [hyperplonk](https://github.com/EspressoSystems/hyperplonk) library.
 
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
@@ -9,44 +9,20 @@ use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::Add, sync::A
 use crate::arithmetic::{errors::ArithErrors, mat_poly::mle::MLE};
 
 #[rustfmt::skip]
-/// A virtual polynomial is a sum of products of multilinear polynomials;
-/// where the multilinear polynomials are stored via their multilinear
-/// extensions:  `(coefficient, MLE)`
-/// 
-/// TODO: The only reason we have the hyperplonk virtual polynomial is to be compatible with the sumcheck. we need to merge this virtual polynomial to our virtual polynomial.
+/// A sum of products of multilinear polynomials:
+/// $$ \sum_{i} c_i \cdot \prod_{j} P_{ij} $$
+/// where `products[i] = (c_i, indices into flattened_ml_extensions)`.
 ///
-/// * Number of products n = `polynomial.products.len()`,
-/// * Number of multiplicands of ith product m_i =
-///   `polynomial.products[i].1.len()`,
-/// * Coefficient of ith product c_i = `polynomial.products[i].0`
-///
-/// The resulting polynomial is
-///
-/// $$ \sum_{i=0}^{n} c_i \cdot \prod_{j=0}^{m_i} P_{ij} $$
-///
-/// Example:
-///  f = c0 * f0 * f1 * f2 + c1 * f3 * f4
-/// where f0 ... f4 are multilinear polynomials
-///
-/// - flattened_ml_extensions stores the multilinear extension representation of
-///   f0, f1, f2, f3 and f4
-/// - products is 
-///   \[ 
-///   (c0, \[0, 1, 2\]), 
-///   (c1, \[3, 4\]) 
-///   \]
-/// - raw_pointers_lookup_table maps fi to i
-///
+/// TODO: only kept for sumcheck compatibility; merge into our VirtualPoly.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct HPVirtualPolynomial<F: PrimeField> {
     /// Aux information about the multilinear polynomial
     pub aux_info: VPAuxInfo<F>,
-    /// list of reference to products (as usize) of multilinear extension
+    /// Product terms: `(coefficient, indices into flattened_ml_extensions)`
     pub products: Vec<(F, Vec<usize>)>,
-    /// Stores multilinear extensions in which product multiplicand can refer
-    /// to.
+    /// The MLEs that product multiplicands refer to
     pub flattened_ml_extensions: Vec<Arc<MLE<F>>>,
-    /// Pointers to the above poly extensions
+    /// Maps each MLE pointer to its index in `flattened_ml_extensions`
     raw_pointers_lookup_table: HashMap<*const MLE<F>, usize>,
 }
 
@@ -104,24 +80,18 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
 
         HPVirtualPolynomial {
             aux_info: VPAuxInfo {
-                // The max degree is the max degree of any individual variable
                 max_degree: 1,
                 num_variables: mle.num_vars(),
                 phantom: PhantomData,
             },
-            // here `0` points to the first polynomial of `flattened_ml_extensions`
             products: vec![(coefficient, vec![0])],
             flattened_ml_extensions: vec![mle.clone()],
             raw_pointers_lookup_table: hm,
         }
     }
 
-    /// Add a product of list of multilinear extensions to self
-    /// Returns an error if the list is empty, or the MLE has a different
-    /// `num_vars` from self.
-    ///
-    /// The MLEs will be multiplied together, and then multiplied by the scalar
-    /// `coefficient`.
+    /// Add the product `coefficient * mle_list[0] * mle_list[1] * ...` to self.
+    /// Errors if the list is empty or any MLE's `num_vars` differs from self's.
     pub(crate) fn add_mle_list(
         &mut self,
         mle_list: impl IntoIterator<Item = Arc<MLE<F>>>,
@@ -178,9 +148,7 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
             .flattened_ml_extensions
             .iter()
             .map(|x| {
-                x.evaluate(&point.to_vec()) // safe unwrap here since we have
-                // already checked that num_var
-                // matches
+                x.evaluate(&point.to_vec()) // num_vars already checked above
             })
             .collect();
 

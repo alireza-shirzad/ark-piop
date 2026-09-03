@@ -9,13 +9,8 @@ pub mod mat_poly;
 pub mod msm;
 pub mod virt_poly;
 
-// Input index
-// - `i := (i_0, ...i_{n-1})`,
-// - `num_vars := n`
-// return three elements:
-// - `x0 := (i_1, ..., i_{n-1}, 0)`
-// - `x1 := (i_1, ..., i_{n-1}, 1)`
-// - `sign := i_0`
+// For input index `i := (i_0, ..., i_{n-1})` with `num_vars := n`, returns
+// `x0 := (i_1, ..., i_{n-1}, 0)`, `x1 := (i_1, ..., i_{n-1}, 1)`, `sign := i_0`.
 #[inline]
 pub fn index(i: usize, num_vars: usize) -> (usize, usize, bool) {
     let bit_sequence = bit_decompose(i as u64, num_vars);

@@ -1,11 +1,8 @@
-/////////// Imports ///////////
 use super::TrackerID;
 use crate::pcs::PCS;
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use derivative::Derivative;
-
-/////////// Structs ///////////
 
 /// A claim that a polynomial evaluates to a certain value at a certain point.
 #[derive(Derivative)]

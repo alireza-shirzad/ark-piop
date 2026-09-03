@@ -38,15 +38,11 @@ impl<B> KeyedSumcheck<B>
 where
     B: SnarkBackend,
 {
-    /// A helper function to check if the prover input is valid.
-    /// Since the function is huge, we put it in a seperate file.
-    // TODO: Although the performance does not matter for release, we should
-    // parallelize this
+    /// Checks that the prover input is a valid multiset-equality claim.
+    // TODO: parallelize
     pub(crate) fn honest_prover_check_helper(
         input: &KeyedSumcheckProverInput<B>,
     ) -> SnarkResult<()> {
-        // Check that we do actually have some polynomial on the left hand side
-
         use crate::errors::InputShapeError::EmptyInput;
         use std::collections::BTreeMap;
         if input.fxs.is_empty() {
@@ -59,8 +55,6 @@ where
                 HonestProverError::WrongInputShape(EmptyInput),
             )));
         }
-        // Check that we have as many multiplicity polynomials as we do polynomials on
-        // the left side
         if input.fxs.len() != input.mfxs.len() {
             use crate::errors::InputShapeError::InputLengthMismatch;
             use crate::errors::SnarkError;
@@ -73,7 +67,6 @@ where
             )));
         }
 
-        // Check that we do actually have some polynomial on the right hand side
         if input.gxs.is_empty() {
             use crate::errors::InputShapeError::EmptyInput;
             use crate::{
@@ -84,8 +77,6 @@ where
                 HonestProverError::WrongInputShape(EmptyInput),
             )));
         }
-        // Check that we have as many multiplicity polynomials as we do polynomials on
-        // the right side
         if input.gxs.len() != input.mgxs.len() {
             use crate::errors::InputShapeError::InputLengthMismatch;
             use crate::prover::errors::ProverError;

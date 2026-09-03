@@ -39,19 +39,15 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     type SRS = KZG10UniversalParams<E>;
     // Polynomial and its associated types
     type Poly = LDE<E::ScalarField>;
-    // Polynomial and its associated types
     type Commitment = KZG10Commitment<E>;
     type Proof = KZG10Proof<E>;
 
-    // We do not implement batch univariate KZG at the current version.
+    // Batch univariate KZG is not implemented; this is a vector of single proofs.
     type BatchProof = KZG10BatchProof<E>;
 
-    /// Build SRS for testing.
+    /// Build SRS for testing; `supported_size` is the maximum degree.
     ///
-    /// - For univariate polynomials, `supported_size` is the maximum degree.
-    ///
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
+    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing_inner<R: Rng>(
         rng: &mut R,
         supported_size: usize,
@@ -59,9 +55,8 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Self::SRS::gen_srs_for_testing(rng, supported_size)
     }
 
-    /// Trim the universal parameters to specialize the public parameters.
-    /// Input `max_degree` for univariate.
-    /// `supported_num_vars` must be None or an error is returned.
+    /// Trim the universal parameters to `supported_degree`.
+    /// Panics if `supported_num_vars` is Some or `supported_degree` is None.
     fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
@@ -81,8 +76,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok((ml_ck, ml_vk))
     }
 
-    /// Generate a commitment for a polynomial
-    /// Note that the scheme is not hiding
+    /// Generate a commitment for a polynomial. The scheme is not hiding.
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
@@ -107,8 +101,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         })
     }
 
-    /// On input a polynomial `p` and a point `point`, outputs a proof for the
-    /// same.
+    /// Produce an opening proof for `polynomial` at `point`.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -165,8 +158,8 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok(batch_proof)
     }
 
-    /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
-    /// `poly_i` committed inside `comm`.
+    /// Verifies each `value_i` against the corresponding commitment at `point_i`;
+    /// returns the AND of the individual verifications.
     fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
         _comitments: &[Self::Commitment],
@@ -175,7 +168,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<bool> {
-        // The output bool is the and of all the individual verifications.
         let mut aggr_res = true;
         _comitments
             .iter()
@@ -191,8 +183,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok(aggr_res)
     }
 
-    /// Verifies that `value` is the evaluation at `x` of the polynomial
-    /// committed inside `comm`.
+    /// Verifies that `value` is the evaluation at `point` of the committed polynomial.
     fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,

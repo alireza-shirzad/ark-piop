@@ -8,9 +8,7 @@ use std::{
     io::{Read, Write},
     sync::Arc,
 };
-// Clone is only implemented if PCS satisfies the PCS<F>
-// bound, which guarantees that PCS::ProverParam
-
+// Clone(bound = "") is sound: the PCS<F> bound already makes components clonable.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct SNARKPk<B>

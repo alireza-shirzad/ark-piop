@@ -1,36 +1,16 @@
 //! # ark-piop
 //!
 //! A general-purpose **Polynomial Interactive Oracle Proof (PIOP)** framework
-//! built on top of the [arkworks](https://github.com/arkworks-rs) ecosystem.
+//! built on the [arkworks](https://github.com/arkworks-rs) ecosystem.
 //!
-//! ## Architecture
+//! Layers: [`arithmetic`], [`transcript`], [`types`], [`errors`] (foundation);
+//! [`pcs`] (commitment schemes); [`piop`] (protocols); [`setup`] (key
+//! generation); [`prover`] / [`verifier`] (proof pipelines); and
+//! [`tracker_core`] (claim batching shared by prover and verifier).
 //!
-//! The crate is organized into layers:
-//!
-//! | Layer | Modules | Purpose |
-//! |-------|---------|---------|
-//! | **Foundation** | [`arithmetic`], [`transcript`], [`types`], [`errors`] | Field math, Fiat-Shamir transcript, shared types and serialization |
-//! | **Commitment** | [`pcs`] | Polynomial commitment schemes (KZG10, PST13) |
-//! | **Protocol** | [`piop`] | PIOP trait, sumcheck, lookup-check sub-protocols |
-//! | **Setup** | [`setup`] | Key generation (proving key + verifying key) |
-//! | **Proving** | [`prover`] | Prover tracker, proof compilation pipeline |
-//! | **Verification** | [`verifier`] | Verifier tracker, proof verification pipeline |
-//! | **Shared infra** | [`tracker_core`] | Generic tracker trait + claim-batching pipeline reused by prover and verifier |
-//!
-//! ## Usage
-//!
-//! A typical workflow:
-//!
-//! 1. Define a [`SnarkBackend`] (field + PCS choices).
-//! 2. Generate keys via [`setup::KeyGenerator`].
-//! 3. Implement your protocol via the [`piop::PIOP`] trait.
-//! 4. Prove with [`prover::ArgProver`], verify with [`verifier::ArgVerifier`].
-//!
-//! ## Backend abstraction
-//!
-//! [`SnarkBackend`] bundles the field, multivariate PCS, and univariate PCS
-//! into a single trait so that protocol code remains generic over the
-//! cryptographic instantiation.
+//! Typical workflow: define a [`SnarkBackend`] (field + PCS choices), generate
+//! keys via [`setup::KeyGenerator`], implement [`piop::PIOP`], then prove with
+//! [`prover::ArgProver`] and verify with [`verifier::ArgVerifier`].
 //!
 //! ## Example
 //!
@@ -68,10 +48,8 @@
 //! verifier.verify().unwrap();
 //! ```
 //!
-//! See [`tests/pipeline.rs`] in the repository for a richer example
-//! exercising zerocheck and lookup claims.
-//!
-//! [`tests/pipeline.rs`]: https://github.com/alireza-shirzad/ark-piop/blob/master/tests/pipeline.rs
+//! See `tests/pipeline.rs` in the repository for a richer example exercising
+//! zerocheck and lookup claims.
 
 pub mod arithmetic;
 pub mod errors;
@@ -85,18 +63,14 @@ pub mod types;
 
 pub mod verifier;
 
-// Make test utilities available to downstream crates' tests via a feature.
-// `cfg(test)` only applies when compiling this crate's own tests, so use
-// `any(test, feature = "test-utils")` to expose it for dependents' tests too.
+// `cfg(test)` doesn't cover dependents' tests, so also expose via the
+// `test-utils` feature.
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
-/// Backend abstraction that bundles the scalar field and polynomial commitment
-/// schemes used by the SNARK.
-///
-/// Implement this trait once per cryptographic instantiation (e.g. BN254 with
-/// KZG10 + PST13) and pass it as the generic parameter `B` throughout the
-/// framework.
+/// Bundles the scalar field and polynomial commitment schemes used by the
+/// SNARK; implemented once per cryptographic instantiation and passed as the
+/// generic parameter `B` throughout the framework.
 pub trait SnarkBackend: 'static + Send + Sync {
     /// The prime field used for all polynomial evaluations and proof elements.
     type F: ark_ff::PrimeField + Default;
@@ -112,8 +86,7 @@ pub trait SnarkBackend: 'static + Send + Sync {
         + Sync;
 }
 
-/// Default backend for testing: BN254 with PST13 (multivariate) and KZG10
-/// (univariate).
+/// Default backend for testing: BN254 with PST13 (mv) and KZG10 (uv).
 #[cfg(any(test, feature = "test-utils"))]
 use ark_bn254::Bn254;
 #[cfg(any(test, feature = "test-utils"))]
@@ -123,4 +96,17 @@ impl SnarkBackend for DefaultSnarkBackend {
     type F = <Bn254 as ark_ec::pairing::Pairing>::ScalarField;
     type MvPCS = pcs::pst13::PST13<Bn254>;
     type UvPCS = pcs::kzg10::KZG10<Bn254>;
+}
+
+/// Test backend on BLS12-381, for benchmarks needing parity with systems
+/// hard-coded to that curve (e.g. QEDB).
+#[cfg(feature = "test-utils-bls12-381")]
+use ark_bls12_381::Bls12_381;
+#[cfg(feature = "test-utils-bls12-381")]
+pub struct Bls12_381SnarkBackend;
+#[cfg(feature = "test-utils-bls12-381")]
+impl SnarkBackend for Bls12_381SnarkBackend {
+    type F = <Bls12_381 as ark_ec::pairing::Pairing>::ScalarField;
+    type MvPCS = pcs::pst13::PST13<Bls12_381>;
+    type UvPCS = pcs::kzg10::KZG10<Bls12_381>;
 }

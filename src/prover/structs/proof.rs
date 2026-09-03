@@ -7,12 +7,13 @@ use crate::{
     types::artifact::{Artifact, SizeBreakdown},
 };
 
-/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump
-/// whenever the wire format of the proof changes so that old clients fail
-/// fast on new proofs (and vice versa) with [`SnarkError::Artifact`] instead
-/// of silently decoding garbage or producing a misleading
-/// `ark_serialize::SerializationError`.
-pub const PROOF_ENCODING_VERSION: u8 = 1;
+/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump on
+/// wire-format changes so mismatched clients fail fast with
+/// [`SnarkError::Artifact`] instead of silently decoding garbage.
+///
+/// v2: `PCSSubproof.constant_num_vars` carries per-constant `num_vars` so the
+/// verifier mirrors `poly_log_sizes`; v1 hardcoded 0, causing gen_id drift.
+pub const PROOF_ENCODING_VERSION: u8 = 2;
 use crate::{
     pcs::PCS,
     types::{CommitmentID, ConstantID, PointID, PointMap, SumcheckSubproof, TrackerID},
@@ -57,10 +58,13 @@ where
     pub unique_constants: BTreeMap<ConstantID, F>,
     /// Maps each TrackerID to its ConstantID in `unique_constants`.
     pub constant_map: BTreeMap<TrackerID, ConstantID>,
+    /// Per-TrackerID `num_vars` for constants; the verifier mirrors these into
+    /// `poly_log_sizes` so both sides compute identical sizes (pre-v2 the
+    /// verifier assumed 0, causing gen_id drift for `num_vars > 0` constants).
+    pub constant_num_vars: BTreeMap<TrackerID, u32>,
     pub point_map: PointMap<F, PC>,
-    /// Query map keyed by CommitmentID: each unique (commitment, point) pair
-    /// has one evaluation entry. Avoids duplicate openings when multiple
-    /// TrackerIDs share the same polynomial.
+    /// One evaluation per unique (commitment, point) pair, avoiding duplicate
+    /// openings when multiple TrackerIDs share the same polynomial.
     pub query_map: BTreeMap<CommitmentID, BTreeMap<PointID, F>>,
 }
 
@@ -120,6 +124,10 @@ where
             + self
                 .mv_pcs_subproof
                 .constant_map
+                .serialized_size(Compress::Yes)
+            + self
+                .mv_pcs_subproof
+                .constant_num_vars
                 .serialized_size(Compress::Yes);
         let mv_query_map = self
             .mv_pcs_subproof
@@ -146,6 +154,10 @@ where
             + self
                 .uv_pcs_subproof
                 .constant_map
+                .serialized_size(Compress::Yes)
+            + self
+                .uv_pcs_subproof
+                .constant_num_vars
                 .serialized_size(Compress::Yes);
         let uv_query_map = self
             .uv_pcs_subproof
@@ -159,8 +171,7 @@ where
         let miscellaneous_field_vectors = self
             .miscellaneous_field_vectors
             .serialized_size(Compress::Yes);
-        // +1 for the one-byte PROOF_ENCODING_VERSION envelope that `to_bytes`
-        // prepends; keeps the reported total in sync with the on-disk size.
+        // +1 for the version byte `to_bytes` prepends, matching on-disk size.
         let total = self.serialized_size(Compress::Yes) + 1;
 
         Some(SizeBreakdown::node(

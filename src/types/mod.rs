@@ -1,16 +1,16 @@
-//! Core types shared across the prover and verifier.
-//!
-//! This module defines the lightweight identifier types ([`TrackerID`],
-//! [`PointID`], [`CommitmentID`], [`ConstantID`]) used throughout the
-//! framework, as well as the [`SharedArgConfig`] and proof-level structs.
+//! Core types shared by prover and verifier: identifier types ([`TrackerID`],
+//! [`PointID`], [`CommitmentID`], [`ConstantID`]), [`SharedArgConfig`], and
+//! proof-level structs.
 
 pub mod artifact;
 pub mod claim;
 
-/// Shared configuration for ArgProver and ArgVerifier.
+/// Shared configuration for ArgProver and ArgVerifier: these parameters must
+/// be identical on both sides, so pass the same instance to each.
 ///
-/// Protocol-level parameters that must be identical on both sides.
-/// Pass the same instance to both the prover and verifier.
+/// The sumcheck stage buckets claims automatically at compile time; the cost
+/// model in [`crate::tracker_core::bucketing::build_buckets`] decides between
+/// one merged sumcheck and per-nv buckets.
 #[derive(Clone, Debug)]
 pub struct SharedArgConfig {
     /// Max multiplicative degree allowed per sumcheck term before the prover
@@ -30,7 +30,6 @@ impl Default for SharedArgConfig {
     }
 }
 
-/////////// Imports ///////////
 use crate::{
     arithmetic::virt_poly::hp_interface::VPAuxInfo, pcs::PCS, piop::structs::SumcheckProof,
 };
@@ -41,13 +40,11 @@ use ark_serialize::{
 };
 use derivative::Derivative;
 use std::{collections::BTreeMap, fmt::Display};
-/////////// Types ///////////
 //TODO: Check a map from point id to (polynomial,F)
 pub type QueryMap<F> = BTreeMap<TrackerID, BTreeMap<PointID, F>>;
 //TODO: Double check uniqueness
 pub type PointMap<F, PC> = BTreeMap<PointID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point>;
 
-/////////// Structs ///////////
 /// A unique identifier for a polynomial, or a commitment to a polynomial.
 #[derive(
     Clone,
@@ -157,12 +154,40 @@ impl ConstantID {
 /// from external context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitmentBinding {
-    /// Bind the commitment into the transcript and include it in proof-owned
-    /// commitment collections.
+    /// Bound into the transcript and included in proof-owned collections.
     ProofEmitted,
-    /// Reuse a commitment supplied by context without re-emitting it as part of
-    /// this proof.
+    /// Reused from external context, not re-emitted as part of this proof.
     External,
+}
+
+/// One sumcheck round emitted by the prover. The subproof carries one of
+/// these per bucket produced by the compile-time picker (see
+/// [`crate::tracker_core::bucketing`]), ordered by ascending `target_nv`.
+#[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+pub struct SumcheckBucketProof<F>
+where
+    F: PrimeField,
+{
+    sc_proof: SumcheckProof<F>,
+    sc_aux_info: VPAuxInfo<F>,
+}
+
+impl<F: PrimeField> SumcheckBucketProof<F> {
+    pub(crate) fn new(sc_proof: SumcheckProof<F>, sc_aux_info: VPAuxInfo<F>) -> Self {
+        Self {
+            sc_proof,
+            sc_aux_info,
+        }
+    }
+    pub fn sc_proof(&self) -> &SumcheckProof<F> {
+        &self.sc_proof
+    }
+    pub(crate) fn sc_aux_info(&self) -> &VPAuxInfo<F> {
+        &self.sc_aux_info
+    }
+    pub fn num_vars(&self) -> usize {
+        self.sc_aux_info.num_variables
+    }
 }
 
 // The sumcheck subproof of a SNARK for the ZKSQL protocol.
@@ -171,22 +196,21 @@ pub struct SumcheckSubproof<F>
 where
     F: PrimeField,
 {
-    sc_proof: SumcheckProof<F>,
-    sc_aux_info: VPAuxInfo<F>,
-    //TODO: This sumcheck_claims map is not used in all the protocols using this library, so it should not be in the proof.
-    //TODO: Suggestion: Add a field to the proof for the optional and non-constant elements sent via the proof.
+    // One entry per bucket, ordered by ascending `target_nv` (bucket count is
+    // decided by the compile-time picker in `tracker_core::bucketing`).
+    buckets: Vec<SumcheckBucketProof<F>>,
+    //TODO: not all protocols use sumcheck_claims; move it into an optional
+    // proof-elements field instead of keeping it in every proof.
     sumcheck_claims: BTreeMap<TrackerID, F>,
 }
 
 impl<F: PrimeField> SumcheckSubproof<F> {
     pub(crate) fn new(
-        sc_proof: SumcheckProof<F>,
-        sc_aux_info: VPAuxInfo<F>,
+        buckets: Vec<SumcheckBucketProof<F>>,
         sumcheck_claims: BTreeMap<TrackerID, F>,
     ) -> Self {
         Self {
-            sc_proof,
-            sc_aux_info,
+            buckets,
             sumcheck_claims,
         }
     }
@@ -194,12 +218,8 @@ impl<F: PrimeField> SumcheckSubproof<F> {
         &self.sumcheck_claims
     }
 
-    pub fn sc_proof(&self) -> &SumcheckProof<F> {
-        &self.sc_proof
-    }
-
-    pub(crate) fn sc_aux_info(&self) -> &VPAuxInfo<F> {
-        &self.sc_aux_info
+    pub fn buckets(&self) -> &[SumcheckBucketProof<F>] {
+        &self.buckets
     }
 }
 

@@ -1,5 +1,7 @@
+pub(crate) mod small_scalar_msm;
 pub(crate) mod srs;
 pub mod structs;
+use crate::arithmetic::mat_poly::mle::MLEStorage;
 use crate::arithmetic::mat_poly::utils::build_eq_x_r;
 use crate::arithmetic::mat_poly::utils::eq_eval;
 use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
@@ -28,13 +30,45 @@ use ark_poly::MultilinearExtension;
 use ark_poly::Polynomial;
 use ark_std::log2;
 use ark_std::rand::Rng;
+use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
 use std::collections::BTreeMap;
 use std::iter;
 use std::ops::Deref;
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
-// use batching::{batch_verify_internal, multi_open_internal};
-use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
-/// KZG Polynomial Commitment Scheme on multilinear polynomials.
+
+/// Shared commit path for all `Sparse*` storage variants: rewrites `MSM(bases, values)` as
+/// `default * Σ bases[..inner_len] + Σ bases[idx] * (val - default)` over the exceptions.
+/// With `default == 0` only `|exceptions|` scalar-muls are paid; otherwise the baseline sum
+/// costs `Ω(inner_len)` group additions but still avoids materializing a `Vec<F>`.
+/// Callers pass F-lifted values so `F::from` is paid once per exception, not per element.
+fn sparse_commit<E: Pairing>(
+    bases: &[E::G1Affine],
+    committed_nv: usize,
+    default: E::ScalarField,
+    exceptions: impl Iterator<Item = (u32, E::ScalarField)>,
+) -> E::G1Affine {
+    let inner_len = 1usize << committed_nv;
+    let mut acc: E::G1 = if default.is_zero() {
+        E::G1::zero()
+    } else {
+        let mut sum_bases: E::G1 = E::G1::zero();
+        for base in bases.iter().take(inner_len) {
+            sum_bases += base;
+        }
+        if default.is_one() {
+            sum_bases
+        } else {
+            sum_bases.mul(default)
+        }
+    };
+    for (idx, val) in exceptions {
+        let delta = val - default;
+        if !delta.is_zero() {
+            acc += bases[idx as usize].mul(delta);
+        }
+    }
+    acc.into_affine()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PST13<E: Pairing> {
@@ -87,36 +121,165 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         Ok((ml_ck, ml_vk))
     }
 
-    /// Generate a commitment for a polynomial.
+    /// Generate a commitment for a polynomial (`2^num_vars` G1 scalar muls).
     ///
-    /// This function takes `2^num_vars` number of scalar multiplications over
-    /// G1.
+    /// Compressed backings (`Bit`/`U8`/`U32`/`U64`) feed the raw small-scalar slice
+    /// straight to [`small_scalar_msm`], avoiding both the dense `Vec<F>`
+    /// materialization and a full-width Pippenger MSM.
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
-        let committed_poly = poly.mat_mle();
-        let committed_nv = committed_poly.num_vars;
-
+        // Commit over the physically-stored hypercube only — never over virtual
+        // padding, which is a cyclic repetition the SRS must not consume.
+        let committed_nv = poly.storage().inner_num_vars();
         if prover_param.num_vars < committed_nv {
             return Err(PCSErrors(TooLargePolynomial(
                 committed_nv,
                 prover_param.num_vars,
             )));
         }
-        Self::commit_dense_mle(prover_param, committed_poly)
+        let ignored = prover_param.num_vars - committed_nv;
+        let bases = &prover_param.powers_of_g[ignored].evals;
+
+        let com = match poly.storage() {
+            MLEStorage::Field(m) => E::G1::msm_unchecked(bases, &m.evaluations).into_affine(),
+            MLEStorage::Bit { bits, .. } => {
+                // Unpack on the fly (little-endian per byte, per `MLEStorage::Bit`'s
+                // contract); the tail beyond `inner_len` is cut by `msm_u1`'s length-min.
+                let inner_len = 1usize << committed_nv;
+                let scalars: Vec<bool> = (0..inner_len)
+                    .map(|i| (bits[i >> 3] >> (i & 7)) & 1 == 1)
+                    .collect();
+                small_scalar_msm::msm_u1::<E::G1>(bases, &scalars).into_affine()
+            }
+            MLEStorage::U8 { bytes, .. } => {
+                small_scalar_msm::msm_u8::<E::G1>(bases, bytes).into_affine()
+            }
+            MLEStorage::U32 { words, .. } => {
+                small_scalar_msm::msm_u32::<E::G1>(bases, words).into_affine()
+            }
+            MLEStorage::U64 { words, .. } => {
+                small_scalar_msm::msm_u64::<E::G1>(bases, words).into_affine()
+            }
+            MLEStorage::Constant { value, .. } => {
+                // `value * Σ bases[..2^committed_nv]`, summed on the fly (no Vec<F>);
+                // short-circuits for value 0 and skips the scalar mul for value 1.
+                if value.is_zero() {
+                    E::G1::zero().into_affine()
+                } else {
+                    let inner_len = 1usize << committed_nv;
+                    let mut sum: E::G1 = E::G1::zero();
+                    for base in bases.iter().take(inner_len) {
+                        sum += base;
+                    }
+                    if value.is_one() {
+                        sum.into_affine()
+                    } else {
+                        sum.mul(*value).into_affine()
+                    }
+                }
+            }
+            MLEStorage::Rle { runs, .. } => {
+                // Each run `(v, count)` contributes `v * Σ bases[cursor..cursor+count]`;
+                // zero-value runs are skipped.
+                let mut acc: E::G1 = E::G1::zero();
+                let mut cursor: usize = 0;
+                for (value, count) in runs.iter() {
+                    let count = *count as usize;
+                    if !value.is_zero() {
+                        let mut run_sum: E::G1 = E::G1::zero();
+                        for base in bases.iter().skip(cursor).take(count) {
+                            run_sum += base;
+                        }
+                        if value.is_one() {
+                            acc += run_sum;
+                        } else {
+                            acc += run_sum.mul(*value);
+                        }
+                    }
+                    cursor += count;
+                }
+                acc.into_affine()
+            }
+            MLEStorage::Sparse {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                *default,
+                exceptions.iter().map(|(i, v)| (*i, *v)),
+            ),
+            MLEStorage::SparseU8 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default as u64),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v as u64))),
+            ),
+            MLEStorage::SparseU32 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default as u64),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v as u64))),
+            ),
+            MLEStorage::SparseU64 {
+                default,
+                exceptions,
+                ..
+            } => sparse_commit::<E>(
+                bases,
+                committed_nv,
+                E::ScalarField::from(*default),
+                exceptions
+                    .iter()
+                    .map(|(i, v)| (*i, E::ScalarField::from(*v))),
+            ),
+            // `value[i] = (high[i] << 64) | low[i]`, so the commit is
+            // `msm_u64(bases, low) + 2^64 * msm_u64(bases, high)`. `scale` is
+            // fixed-point decoding metadata, not part of the polynomial value,
+            // so it does not participate in the commit (see mle.rs).
+            MLEStorage::PackedDecimal { high, low, .. } => {
+                let lo_msm = small_scalar_msm::msm_u64::<E::G1>(bases, low);
+                let hi_msm = small_scalar_msm::msm_u64::<E::G1>(bases, high);
+                let two_pow_64 = E::ScalarField::from(1u128 << 64);
+                (lo_msm + hi_msm.mul(two_pow_64)).into_affine()
+            }
+            // Lazy variants are registered only after their dense form was committed
+            // and dropped; committing one directly is a caller bug, and materializing
+            // here (O(2^nv) inversions) would defeat the memory optimization.
+            MLEStorage::LazyInverseShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
+                panic!(
+                    "PST13::commit: cannot commit an MLE with lazy inverse-shifted storage. \
+                     Lazy backings are for post-commit re-registration only; commit the dense \
+                     source-based MLE first, then swap in the lazy backing via \
+                     `register_mat_mv_poly`."
+                );
+            }
+        };
+
+        Ok(PST13Commitment {
+            com,
+            nv: committed_nv as u8,
+        })
     }
 
-    /// On input a polynomial `p` and a point `point`, outputs a proof for the
-    /// same. This function does not need to take the evaluation value as an
-    /// input.
-    ///
-    /// This function takes 2^{num_var +1} number of scalar multiplications over
-    /// G1:
-    /// - it prodceeds with `num_var` number of rounds,
-    /// - at round i, we compute an MSM for `2^{num_var - i + 1}` number of G2
-    ///   elements.
+    /// Produce an opening proof for `polynomial` at `point` (the evaluation is
+    /// computed internally). Costs ~`2^{num_var+1}` G1 scalar muls over `num_var` rounds.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -125,7 +288,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         let prover_param = prover_param.borrow();
 
-        // There are two possible errors in opening:
         if polynomial.num_vars() > prover_param.num_vars {
             return Err(PCSErrors(TooLargePolynomial(
                 polynomial.num_vars(),
@@ -148,7 +310,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             total_msm_scalars = (1usize << nv).saturating_sub(1),
         );
         let _open_enter = open_span.enter();
-        // the first `ignored` SRS vectors are unused for opening.
+        // The first `ignored` SRS vectors are unused for opening.
         let ignored = prover_param.num_vars - nv + 1;
         let mut f = polynomial.to_evaluations();
 
@@ -172,11 +334,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             let mut r = vec![E::ScalarField::zero(); cur_dim];
 
             {
-                let qr_span = tracing::span!(
-                    tracing::Level::DEBUG,
-                    "pst13.open.round.qr",
-                    size = cur_dim,
-                );
+                let qr_span =
+                    tracing::span!(tracing::Level::DEBUG, "pst13.open.round.qr", size = cur_dim,);
                 let _qr_enter = qr_span.enter();
                 for b in 0..(1 << k) {
                     // q[b] = f[1, b] - f[0, b]
@@ -212,8 +371,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ) -> SnarkResult<PST13BatchProof<E, Self>> {
         #[cfg(feature = "honest-prover")]
         {
-            // First check if the evaluations are actually correct
-
+            // Check the claimed evaluations are actually correct.
             for (i, ((poly, point), eval)) in polynomials
                 .iter()
                 .zip(points.iter())
@@ -235,10 +393,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
 
         // eq(t, i) for i in [0..k]
-
         let eq_t_i_list = build_eq_x_r(t.as_ref())?.into_evaluations();
-        // combine the polynomials that have same opening point first to reduce the
-        // cost of sum check later.
+        // Merge polynomials sharing an opening point to cheapen the sumcheck.
         let point_indices = points
             .iter()
             .fold(BTreeMap::<_, _>::new(), |mut indices, point| {
@@ -293,8 +449,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 .collect()
         };
 
-        // built the virtual polynomial for SumCheck
-
         let mut sum_check_vp = HPVirtualPolynomial::new(num_var);
         for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
             sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
@@ -321,8 +475,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         // a2 := sumcheck's point
         let a2 = &proof.point[..num_var];
 
-        // build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is the
-        // sumcheck's point \tilde eq_i(a2) = eq(a2, point_i)
+        // g'(X) = Σ_i eq(a2, point_i) * tilde_g_i(X), a2 being the sumcheck point.
         let mut g_prime = Arc::new(MLE::zero());
         {
             let span = tracing::span!(
@@ -347,7 +500,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             let _enter = span.enter();
             Self::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?
         };
-        // assert_eq!(g_prime_eval, tilde_g_eval);
 
         Ok(PST13BatchProof {
             sum_check_proof: proof,
@@ -356,12 +508,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         })
     }
 
-    /// Verifies that `value` is the evaluation at `x` of the polynomial
-    /// committed inside `comm`.
-    ///
-    /// This function takes
-    /// - num_var number of pairing product.
-    /// - num_var number of MSM
+    /// Verifies that `value` is the evaluation at `point` of the polynomial committed
+    /// inside `commitment`. Costs `num_var` pairing products and `num_var` MSMs.
     fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
@@ -482,23 +630,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     }
 }
 
-impl<E: Pairing> PST13<E> {
-    fn commit_dense_mle(
-        prover_param: &PST13ProverParam<E>,
-        poly: &ark_poly::DenseMultilinearExtension<E::ScalarField>,
-    ) -> SnarkResult<PST13Commitment<E>> {
-        let ignored = prover_param.num_vars - poly.num_vars;
-        let commitment =
-            E::G1::msm_unchecked(&prover_param.powers_of_g[ignored].evals, &poly.evaluations)
-                .into_affine();
-
-        Ok(PST13Commitment {
-            com: commitment,
-            nv: poly.num_vars as u8,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -554,7 +685,7 @@ mod tests {
         let (ck, _) = PST13::trim(&params, None, Some(6))?;
 
         let inner = MLE::rand(3, &mut rng);
-        let wrapped = Arc::new(MLE::new(inner.mat_mle().clone(), Some(6)));
+        let wrapped = Arc::new(MLE::new(inner.mat_mle().into_owned(), Some(6)));
         let inner = Arc::new(inner);
 
         let wrapped_commit = PST13::commit(&ck, &wrapped)?;

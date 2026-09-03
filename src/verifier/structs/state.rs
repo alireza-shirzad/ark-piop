@@ -23,8 +23,7 @@ use crate::{
     },
 };
 use indexmap::IndexMap;
-// Clone is only implemented if PCS satisfies the PCS<F>
-// bound, which guarantees that PCS::ProverParam
+// Clone(bound = "") is sound: the PCS<F> bound already makes components clonable.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derivative(Default(bound = ""))]
@@ -55,9 +54,8 @@ where
     PC: PCS<F>,
 {
     pub materialized_comms: BTreeMap<TrackerID, PC::Commitment>,
-    // External commitments mirror prover-side context commitments. They are
-    // tracked so claims can reference them, but they are not expected to be
-    // present in the proof's serialized commitment map.
+    // Mirrors prover-side context commitments: tracked so claims can reference
+    // them, but absent from the proof's serialized commitment map.
     pub external_materialized_comm_ids: BTreeSet<TrackerID>,
     pub eval_claims: VerifierEvalClaimMap<F, PC>,
     pub zero_check_claims: Vec<TrackerZerocheckClaim>,
@@ -114,6 +112,10 @@ where
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub constants: BTreeMap<TrackerID, F>,
+    /// Per-TrackerID `num_vars` for entries in `constants`, mirrored from the
+    /// proof so `track_mv_constant_by_id` can set `poly_log_sizes[id]` to the
+    /// prover's value instead of a hardcoded `0` — see PROOF_ENCODING_VERSION.
+    pub constant_num_vars: BTreeMap<TrackerID, usize>,
     pub point_map: Arc<PointMap<F, PC>>,
     /// TrackerID-keyed query map, reconstructed for oracle evaluation closures.
     pub query_map: Arc<QueryMap<F>>,
@@ -133,9 +135,8 @@ where
     <PC::Poly as Polynomial<F>>::Point: CanonicalSerialize + CanonicalDeserialize,
 {
     pub fn new_from_pcs_subproof(pcs_subproof: &PCSSubproof<F, PC>) -> Self {
-        // Reconstruct the full TrackerID → Commitment map from the deduplicated
-        // representation in the proof. Only proof-owned commitments appear in
-        // unique_comitments; external ones are skipped (loaded from context).
+        // Rebuild TrackerID → Commitment from the deduplicated proof form; only
+        // proof-owned entries exist there, external ones come from context.
         let comitments = pcs_subproof
             .comitment_map
             .iter()
@@ -147,7 +148,6 @@ where
             })
             .collect();
 
-        // Reconstruct the full TrackerID → F map from the deduplicated constants.
         let constants = pcs_subproof
             .constant_map
             .iter()
@@ -160,8 +160,14 @@ where
             })
             .collect();
 
-        // Reconstruct TrackerID-keyed query map for oracle closures:
-        // each TrackerID gets the evaluations from its CommitmentID.
+        // Widen prover-emitted u32 num_vars into the usize map the tracker uses.
+        let constant_num_vars: BTreeMap<TrackerID, usize> = pcs_subproof
+            .constant_num_vars
+            .iter()
+            .map(|(tracker_id, nv)| (*tracker_id, *nv as usize))
+            .collect();
+
+        // Each TrackerID gets the evaluations from its CommitmentID.
         let mut query_map: BTreeMap<TrackerID, BTreeMap<PointID, F>> = BTreeMap::new();
         for (tracker_id, comm_id) in &pcs_subproof.comitment_map {
             if let Some(evals) = pcs_subproof.query_map.get(comm_id) {
@@ -173,6 +179,7 @@ where
             opening_proof: pcs_subproof.opening_proof.clone(),
             comitments,
             constants,
+            constant_num_vars,
             point_map: Arc::new(pcs_subproof.point_map.clone()),
             query_map: Arc::new(query_map),
             deduped_query_map: Arc::new(pcs_subproof.query_map.clone()),

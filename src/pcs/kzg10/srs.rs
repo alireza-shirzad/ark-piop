@@ -77,10 +77,8 @@ impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
         }
     }
 
-    /// Trim the universal parameters to specialize the public parameters
-    /// for univariate polynomials to the given `supported_size`, and
-    /// returns committer key and verifier key. `supported_size` should
-    /// be in range `1..params.len()`
+    /// Trim to committer and verifier keys for `supported_size`, which should be in
+    /// range `1..params.len()`.
     fn trim(&self, supported_size: usize) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)> {
         let powers_of_g = self.powers_of_g[..=supported_size].to_vec();
 
@@ -94,8 +92,7 @@ impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
     }
 
     /// Build SRS for testing.
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
+    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, max_degree: usize) -> SnarkResult<Self> {
         let beta = E::ScalarField::rand(rng);
         let g = E::G1::rand(rng);
@@ -108,8 +105,6 @@ impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
             powers_of_beta.push(cur);
             cur *= &beta;
         }
-
-        // let window_size = FixedBase::mul_window_size(max_degree + 1);
 
         // TODO: parallelization
         let powers_of_g = g.batch_mul(&powers_of_beta);

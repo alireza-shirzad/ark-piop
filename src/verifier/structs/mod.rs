@@ -1,11 +1,9 @@
 pub mod oracle;
 pub mod state;
-////////////////// Imports ////////////////
 use crate::{SnarkBackend, pcs::PCS, setup::structs::SNARKVk, types::TrackerID};
 use ark_poly::Polynomial;
 use derivative::Derivative;
 use indexmap::IndexSet;
-///////////// Structs & Enums ///////////
 
 pub type VerifierEvalClaimMap<F, PC> = IndexSet<(
     (TrackerID, <<PC as PCS<F>>::Poly as Polynomial<F>>::Point),

@@ -1,7 +1,5 @@
-//! Fiat-Shamir transcript based on Merlin.
-//!
-//! Provides a [`Tr`] wrapper around [`merlin::Transcript`] that supports
-//! appending field elements, serializable objects, and generating challenges.
+//! Fiat-Shamir transcript: [`Tr`] wraps [`merlin::Transcript`] to append
+//! field/serializable elements and generate challenges.
 
 pub(crate) mod errors;
 use crate::to_bytes;
@@ -10,15 +8,9 @@ use ark_serialize::CanonicalSerialize;
 use errors::TranscriptError;
 use merlin::Transcript;
 use std::marker::PhantomData;
-/// An IOP transcript consists of a Merlin transcript and a flag `is_empty` to
-/// indicate that if the transcript is empty.
-///
-/// It is associated with a prime field `F` for which challenges are generated
-/// over.
-///
-/// The `is_empty` flag is useful in the case where a protocol is initiated by
-/// the verifier, in which case the prover should start its phase by receiving a
-/// `non-empty` transcript.
+/// IOP transcript over field `F`: a Merlin transcript plus an `is_empty` flag.
+/// Challenges are refused on an empty transcript — when the verifier initiates
+/// a protocol, the prover must start from a non-empty one.
 #[derive(Clone)]
 pub struct Tr<F: PrimeField> {
     transcript: Transcript,
@@ -48,7 +40,6 @@ impl<F: PrimeField> Tr<F> {
         }
     }
 
-    // Append the message to the transcript.
     pub(crate) fn append_message(
         &mut self,
         label: &'static [u8],
@@ -59,7 +50,6 @@ impl<F: PrimeField> Tr<F> {
         Ok(())
     }
 
-    // Append the message to the transcript.
     #[allow(dead_code)]
     pub(crate) fn append_field_element(
         &mut self,
@@ -69,7 +59,6 @@ impl<F: PrimeField> Tr<F> {
         self.append_message(label, &to_bytes!(field_elem)?)
     }
 
-    // Append the message to the transcript.
     pub(crate) fn append_serializable_element<S: CanonicalSerialize>(
         &mut self,
         label: &'static [u8],
@@ -78,12 +67,8 @@ impl<F: PrimeField> Tr<F> {
         self.append_message(label, &to_bytes!(group_elem)?)
     }
 
-    // Generate the challenge from the current transcript
-    // and append it to the transcript.
-    //
-    // The output field element is statistical uniform as long
-    // as the field has a size less than 2^384.
-
+    // Generate a challenge and append it to the transcript. The output is
+    // statistically uniform as long as the field size is below 2^384.
     pub(crate) fn get_and_append_challenge(
         &mut self,
         label: &'static [u8],
@@ -102,12 +87,8 @@ impl<F: PrimeField> Tr<F> {
         Ok(challenge)
     }
 
-    // Generate a list of challenges from the current transcript
-    // and append them to the transcript.
-    //
-    // The output field element are statistical uniform as long
-    // as the field has a size less than 2^384.
-
+    // Generate `len` challenges, each appended to the transcript (same
+    // uniformity bound as `get_and_append_challenge`).
     pub(crate) fn get_and_append_challenge_vectors(
         &mut self,
         label: &'static [u8],
@@ -128,9 +109,7 @@ impl<F: PrimeField> Tr<F> {
     }
 }
 
-/// Takes as input a struct, and converts them to a series of bytes. All traits
-/// that implement `CanonicalSerialize` can be automatically converted to bytes
-/// in this manner.
+/// Serialize any `CanonicalSerialize` value into compressed bytes.
 #[macro_export]
 macro_rules! to_bytes {
     ($x:expr) => {{

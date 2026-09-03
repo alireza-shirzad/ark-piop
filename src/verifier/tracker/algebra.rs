@@ -138,49 +138,28 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         res_id
     }
 
+    /// Adds a scalar to an oracle, returns a new virtual oracle. The scalar
+    /// is a bare-constant term `(scalar, vec![])` (empty product = 1),
+    /// matching the prover's `add_scalar` so both sides build structurally
+    /// identical virtual polys. Degree is unchanged.
     pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         let o1_terms = self.state.virtual_polys.get(&o1_id).unwrap().clone();
         let o1_degree = self.state.poly_degrees.get(&o1_id).copied().unwrap_or(0);
         let log_size = self.state.poly_log_sizes.get(&o1_id).copied().unwrap_or(0);
         let o1_kind = *self.state.poly_kinds.get(&o1_id).unwrap();
 
-        let scalar_id = self.gen_id();
-        let scalar_oracle = match o1_kind {
-            crate::verifier::structs::oracle::OracleKind::Multivariate => {
-                Oracle::new_multivariate(log_size, move |_pt: Vec<B::F>| Ok(scalar))
-            }
-            crate::verifier::structs::oracle::OracleKind::Univariate => {
-                Oracle::new_univariate(log_size, move |_pt: B::F| Ok(scalar))
-            }
-            crate::verifier::structs::oracle::OracleKind::Constant => {
-                Oracle::new_constant(log_size, scalar)
-            }
-        };
-        let mut scalar_terms = VirtualOracle::new();
-        scalar_terms.push((B::F::one(), vec![scalar_id]));
-        self.state.base_oracles.insert(scalar_id, scalar_oracle);
-        self.state.virtual_polys.insert(scalar_id, scalar_terms);
-        self.state.poly_log_sizes.insert(scalar_id, log_size);
-        self.state.poly_kinds.insert(scalar_id, o1_kind);
-        self.state.poly_is_material.insert(scalar_id, true);
-        self.state.poly_degrees.insert(scalar_id, 1);
-
-        let o1_mat = *self.state.poly_is_material.get(&o1_id).unwrap_or(&false);
         let mut res_terms = VirtualOracle::new();
-        if o1_mat {
-            res_terms.extend(o1_terms);
-            res_terms.push((B::F::one(), vec![scalar_id]));
-        } else {
-            res_terms.push((B::F::one(), vec![scalar_id]));
-            res_terms.extend(o1_terms);
+        res_terms.extend(o1_terms);
+        if !scalar.is_zero() {
+            // Bare constant term: empty factor list, coefficient is the scalar.
+            res_terms.push((scalar, Vec::new()));
         }
         let res_id = self.gen_id();
         self.state.virtual_polys.insert(res_id, res_terms);
         self.state.poly_log_sizes.insert(res_id, log_size);
         self.state.poly_kinds.insert(res_id, o1_kind);
         self.state.poly_is_material.insert(res_id, false);
-        self.state.poly_degrees.insert(res_id, o1_degree.max(1));
-        // Return the new TrackerID
+        self.state.poly_degrees.insert(res_id, o1_degree);
         res_id
     }
 

@@ -227,9 +227,9 @@ where
             ))));
         }
 
-        let mut evals = vec![B::F::zero(); total];
-        evals[s..end].fill(B::F::one());
-        let mle = MLE::from_evaluations_vec(nv, evals);
+        // The [0…0, 1…1, 0…0] window stores as a 2-3 run RLE (O(1) memory)
+        // instead of a full 2^nv Field Vec (512 MiB at nv 24).
+        let mle = MLE::from_window_activator(s, n, nv);
         let poly_id = self.track_mat_mv_poly(mle);
 
         let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {

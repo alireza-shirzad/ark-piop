@@ -17,24 +17,27 @@ where
                         .iter()
                         .all(|(_, ids)| ids.iter().all(|id| self.mat_mv_poly(*id).is_some()))
                 );
-                // Ensure all the product polynomials have the same number of variables
-                // assert_eq!(
-                //     virt_poly
-                //         .iter()
-                //         .flat_map(|(_, ids)| ids.iter().map(|id| self.poly_nv(*id)))
-                //         .collect::<HashSet<_>>()
-                //         .len(),
-                //     1
-                // );
                 let nv = self.poly_nv(id);
 
                 let evals = virt_poly.iter().fold(
                     vec![B::F::ZERO; 1 << nv],
                     |mut acc, (coeff, products)| {
                         let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
-                            cfg_iter_mut!(acc)
-                                .zip(self.mat_mv_poly(*id).unwrap().evaluations())
-                                .for_each(|(a, b)| *a *= b);
+                            let mle = self.mat_mv_poly(*id).unwrap();
+                            // Constant-backed factor: one scalar multiply per
+                            // slot, skipping an O(2^nv) Vec allocation.
+                            if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
+                                value,
+                                ..
+                            } = mle.storage()
+                            {
+                                let v = *value;
+                                cfg_iter_mut!(acc).for_each(|a| *a *= v);
+                            } else {
+                                cfg_iter_mut!(acc)
+                                    .zip(mle.evaluations())
+                                    .for_each(|(a, b)| *a *= b);
+                            }
                             acc
                         });
                         cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);

@@ -4,6 +4,7 @@
 //! verifier-side seam methods (`track_eq_x_r`) create succinct oracle
 //! closures rather than materializing polynomial data.
 
+use ark_ff::Zero;
 use std::mem::take;
 
 use crate::{
@@ -68,6 +69,10 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
 
     fn add_scalar(&mut self, id: TrackerID, c: Self::F) -> TrackerID {
         VerifierTracker::add_scalar(self, id, c)
+    }
+
+    fn poly_nv(&self, id: TrackerID) -> usize {
+        self.state.poly_log_sizes.get(&id).copied().unwrap_or(0)
     }
 
     fn virt_poly_degree(&self, id: TrackerID) -> usize {
@@ -159,8 +164,22 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
     // ── Seam: verifier-specific ─────────────────────────────────────
 
     fn track_eq_x_r(&mut self, r: &[Self::F], max_nv: usize) -> SnarkResult<TrackerID> {
+        // The oracle may be queried at a point longer than `r` (extended
+        // eval-claim points; `eq` built at a claim's nv then lifted to its
+        // bucket). The prover lifts by cyclic repeat, so a lifted `eq` is
+        // constant in the added variables: truncate the point to `r.len()`.
+        // Zero-extending `r` instead would multiply in a spurious
+        // `Π (1 - p_i)` that is wrong at a random sumcheck point.
         let r = r.to_vec();
-        let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> { eq_eval(&pt, r.as_ref()) };
+        let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> {
+            let mut pt = pt;
+            if pt.len() < r.len() {
+                pt.resize(r.len(), B::F::zero());
+            } else {
+                pt.truncate(r.len());
+            }
+            eq_eval(&pt, &r)
+        };
         let eq_x_r_oracle = Oracle::new_multivariate(max_nv, eq_x_r_closure);
         Ok(self.track_base_oracle(eq_x_r_oracle))
     }

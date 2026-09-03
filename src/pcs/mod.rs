@@ -65,52 +65,32 @@ pub trait PCS<F: PrimeField>: Clone {
         + CanonicalSerialize
         + CanonicalDeserialize;
 
-    /// Build SRS for testing.
+    /// Build SRS for testing. `supported_size` is the max degree (univariate) or the
+    /// number of variables (multilinear).
     ///
-    /// - For univariate polynomials, `supported_size` is the maximum degree.
-    /// - For multilinear polynomials, `supported_size` is the number of
-    ///   variables.
-    ///
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
-    // Core methods that implementations must provide (uninstrumented).
+    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing_inner<R: Rng>(
         rng: &mut R,
         supported_size: usize,
     ) -> SnarkResult<Self::SRS>;
 
-    /// Trim the universal parameters to specialize the public parameters.
-    /// Input both `supported_degree` for univariate and
-    /// `supported_num_vars` for multilinear.
-    /// ## Note on function signature
-    /// Usually, data structure like SRS and ProverParam are huge and users
-    /// might wish to keep them in heap using different kinds of smart pointers
-    /// (instead of only in stack) therefore our `impl Borrow<_>` interface
-    /// allows for passing in any pointer type, e.g.: `trim(srs: &Self::SRS,
-    /// ..)` or `trim(srs: Box<Self::SRS>, ..)` or `trim(srs: Arc<Self::SRS>,
-    /// ..)` etc.
+    /// Trim the universal parameters: `supported_degree` for univariate,
+    /// `supported_num_vars` for multilinear. `impl Borrow<_>` lets callers pass the
+    /// (typically huge) SRS via any pointer type (`&`, `Box`, `Arc`, ...).
     fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
     ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
-    /// Generate a commitment for a polynomial
-    /// ## Note on function signature
-    /// Usually, data structure like SRS and ProverParam are huge and users
-    /// might wish to keep them in heap using different kinds of smart pointers
-    /// (instead of only in stack) therefore our `impl Borrow<_>` interface
-    /// allows for passing in any pointer type, e.g.: `commit(prover_param:
-    /// &Self::ProverParam, ..)` or `commit(prover_param:
-    /// Box<Self::ProverParam>, ..)` or `commit(prover_param:
-    /// Arc<Self::ProverParam>, ..)` etc.
+    /// Generate a commitment for a polynomial. `impl Borrow<_>` lets callers pass the
+    /// prover params via any pointer type — see [`Self::trim_impl_inner`].
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment>;
 
-    /// On input a polynomial `p` and a point `point`, outputs a proof for the
-    /// same.
+    /// Produce an opening proof for `polynomial` at `point`.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -118,8 +98,7 @@ pub trait PCS<F: PrimeField>: Clone {
         commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, F)>;
 
-    /// Input a list of multilinear extensions, and a same number of points, and
-    /// a transcript, compute a multi-opening for all the polynomials.
+    /// Compute a multi-opening for `polynomials` at the corresponding `points`.
     fn multi_open_inner(
         _prover_param: impl Borrow<Self::ProverParam>,
         _polynomials: &[Arc<Self::Poly>],
@@ -130,8 +109,7 @@ pub trait PCS<F: PrimeField>: Clone {
         unimplemented!()
     }
 
-    /// Verifies that `value` is the evaluation at `x` of the polynomial
-    /// committed inside `comm`.
+    /// Verifies that `value` is the evaluation at `point` of the committed polynomial.
     fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
@@ -140,8 +118,7 @@ pub trait PCS<F: PrimeField>: Clone {
         proof: &Self::Proof,
     ) -> SnarkResult<bool>;
 
-    /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
-    /// `poly_i` committed inside `comm`.
+    /// Verifies each `value_i` against the corresponding commitment at `point_i`.
     fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
         _comitments: &[Self::Commitment],
@@ -289,25 +266,15 @@ pub trait StructuredReferenceString<E: Pairing>: Sized {
     /// Extract the verifier parameters from the public parameters.
     fn extract_verifier_param(&self, supported_size: usize) -> Self::VerifierParam;
 
-    /// Trim the universal parameters to specialize the public parameters
-    /// for polynomials to the given `supported_size`, and
-    /// returns committer key and verifier key.
-    ///
-    /// - For univariate polynomials, `supported_size` is the maximum degree.
-    /// - For multilinear polynomials, `supported_size` is 2 to the number of
-    ///   variables.
-    ///
-    /// `supported_log_size` should be in range `1..=params.log_size`
+    /// Trim the universal parameters to committer and verifier keys for
+    /// `supported_size`: the max degree (univariate) or `2^num_vars` (multilinear).
+    /// `supported_log_size` should be in range `1..=params.log_size`.
     fn trim(&self, supported_size: usize) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
-    /// Build SRS for testing.
+    /// Build SRS for testing. `supported_size` is the max degree (univariate) or the
+    /// number of variables (multilinear).
     ///
-    /// - For univariate polynomials, `supported_size` is the maximum degree.
-    /// - For multilinear polynomials, `supported_size` is the number of
-    ///   variables.
-    ///
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
+    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self>;
 }
 

@@ -65,6 +65,10 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
         ProverTracker::add_scalar(self, id, c)
     }
 
+    fn poly_nv(&self, id: TrackerID) -> usize {
+        self.state.num_vars.get(&id).copied().unwrap_or(0)
+    }
+
     fn virt_poly_degree(&self, id: TrackerID) -> usize {
         ProverTracker::virt_poly_degree(self, id)
     }

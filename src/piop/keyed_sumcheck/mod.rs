@@ -1,7 +1,6 @@
-//! A PIOP to check if the mulltisets of two columns are equal considering their
-//! multiplicities.
-//!
-//! More precisely, this PIOP checks if the union of the multisets of the activated elements in a set of columns with certain multiplicity polynomials is equal to the union of the multisets of the activated elements in another set of columns with other multiplicity polynomials. It's a genralization of the [Logup](https://eprint.iacr.org/2022/1530.pdf) protocol and is heavily used throughout other PIOPs in the `col-toolbox`.
+//! A PIOP checking that two unions of multiset columns (each weighted by optional
+//! multiplicity polynomials) are equal — a generalization of
+//! [Logup](https://eprint.iacr.org/2022/1530.pdf), used heavily by other PIOPs.
 
 mod honest_prover;
 use crate::{
@@ -61,12 +60,10 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
-        // Get the challenge gamma for the check -- Gamma appears in the denominator of
-        // the sum
+        // gamma appears in the denominator of the sum.
         let gamma = prover.get_and_append_challenge(b"gamma")?;
-        // Iterate over vector elements and generate subclaims.
-        // When two adjacent terms have the same domain size and unit multiplicity
-        // (m = None), batch them into a single proxy witness commitment.
+        // Generate subclaims; adjacent terms with equal domain size and unit
+        // multiplicity (m = None) are batched into a single proxy witness commitment.
         let mut i = 0;
         while i < input.fxs.len() {
             if i + 1 < input.fxs.len()
@@ -154,12 +151,36 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
             )));
         }
 
-        // create challenges and comitments in same fashion as prover
-        // assumption is that proof inputs are already added to the tracker
+        // Challenges/commitments must mirror the prover's order; proof inputs are
+        // assumed to already be in the tracker.
         let gamma = verifier.get_and_append_challenge(b"gamma")?;
-        // iterate over vector elements and generate subclaims:
-        let max_nv_f = input.fxs.iter().map(|x| x.log_size()).max().unwrap();
-        let max_nv_g = input.gxs.iter().map(|x| x.log_size()).max().unwrap();
+        // Un-scale each recorded sum by the *claim poly's* nv (max over phat =
+        // col nv and the multiplicity poly — mirroring `track_virt_poly`), not
+        // the col's own nv: a col whose multiplicity is materialized at a
+        // larger nv registers (and is recorded) at that nv, and col-nv
+        // accounting drifts by a power of two. Pair subclaims use phat alone,
+        // so their claim nv is the col nv.
+        let claim_nv = |p: &TrackedOracle<B>, m: &Option<TrackedOracle<B>>| -> usize {
+            let mut nv = p.log_size();
+            if let Some(m) = m {
+                nv = nv.max(m.log_size());
+            }
+            nv
+        };
+        let max_nv_f = input
+            .fxs
+            .iter()
+            .zip(&input.mfxs)
+            .map(|(x, m)| claim_nv(x, m))
+            .max()
+            .unwrap();
+        let max_nv_g = input
+            .gxs
+            .iter()
+            .zip(&input.mgxs)
+            .map(|(x, m)| claim_nv(x, m))
+            .max()
+            .unwrap();
         let max_nv = max_nv_f.max(max_nv_g);
         let mut lhs_v: B::F = B::F::zero();
         let mut rhs_v: B::F = B::F::zero();
@@ -189,7 +210,7 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
                 input.mfxs[i].clone(),
                 gamma,
             )?;
-            let ratio = 2_usize.pow((max_nv - input.fxs[i].log_size()) as u32);
+            let ratio = 2_usize.pow((max_nv - claim_nv(&input.fxs[i], &input.mfxs[i])) as u32);
             let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
             lhs_v += sum_claim_v_adj;
             i += 1;
@@ -221,7 +242,7 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
                 input.mgxs[i].clone(),
                 gamma,
             )?;
-            let ratio = 2_usize.pow((max_nv - input.gxs[i].log_size()) as u32);
+            let ratio = 2_usize.pow((max_nv - claim_nv(&input.gxs[i], &input.mgxs[i])) as u32);
             let sum_claim_v_adj = sum_claim_v / B::F::from(ratio as u64);
             rhs_v += sum_claim_v_adj;
             i += 1;
@@ -291,14 +312,16 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         gamma: B::F,
     ) -> SnarkResult<()> {
         let nv = p.log_size();
-        // construct phat = 1/(p(x) - gamma), i.e. the denominator of the sum
-        let mut p_evals = p.evaluations().to_vec();
-        let mut p_minus_gamma: Vec<B::F> = p_evals.iter_mut().map(|x| *x - gamma).collect();
-        let phat_evals = p_minus_gamma.as_mut_slice();
-        ark_ff::fields::batch_inversion(phat_evals);
-        let phat_mle = MLE::from_evaluations_slice(nv, phat_evals);
+        // phat = 1/(p(x) - gamma), the denominator of the sum. Subtract and invert
+        // in place: peak transient is 1× 2^nv.
+        let mut phat_evals: Vec<B::F> = p.evaluations();
+        for x in phat_evals.iter_mut() {
+            *x -= gamma;
+        }
+        ark_ff::fields::batch_inversion(phat_evals.as_mut_slice());
+        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals);
 
-        // calculate what the final sum should be
+        // Calculate what the final sum should be.
         let mut v = B::F::zero();
         let phat = tracker.track_and_commit_mat_mv_poly(&phat_mle)?;
         let (sumcheck_challenge_poly, v) = match m {
@@ -317,11 +340,30 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
             }
         };
 
-        // Create Zerocheck claim for proving phat(x) is created correctly,
-        // i.e. ZeroCheck [(p(x)-gamma) * phat(x) - 1] = [(p * phat) - gamma * phat - 1]
+        // If `p` is materialized, swap the dense phat (already committed above) for a
+        // lazy `1/(p - γ)` backing referencing p's tracked Arc — frees ~2^nv·sizeof(F)
+        // per phat; sumcheck reads it via the streaming path. When p is virtual there
+        // is no Arc to reference and forcing it dense would be a wash, so keep dense.
+        let p_id = p.id();
+        let has_mat = tracker.tracker().borrow().has_materialized_mv_poly(p_id);
+        if has_mat {
+            drop(phat_mle);
+            let p_source = tracker.mat_mv_poly(p_id);
+            let lazy_phat = MLE::from_lazy_inverse_shifted(p_source, gamma);
+            // Resolve the id *before* the mutable borrow: `phat.id()` on a
+            // constant-backed poly borrows the tracker and would panic the RefCell.
+            let phat_id = phat.id();
+            tracker
+                .tracker()
+                .borrow_mut()
+                .register_mat_mv_poly(phat_id, lazy_phat);
+        } else {
+            drop(phat_mle);
+        }
+
+        // Zerocheck that phat is well-formed: (p(x)-gamma) * phat(x) - 1 == 0.
         let phat_gamma = phat.clone() * gamma;
         let phat_check_poly = (&(&p * &phat) - &phat_gamma) + B::F::one().neg();
-        // add the delayed prover claims to the tracker
         tracker.add_mv_sumcheck_claim(sumcheck_challenge_poly.id(), v)?;
         tracker.add_mv_zerocheck_claim(phat_check_poly.id())?;
         Ok(())
@@ -336,22 +378,55 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         let nv = p1.log_size();
         debug_assert_eq!(nv, p2.log_size());
 
-        // Build phat = 1/(p1-gamma) + 1/(p2-gamma).
-        let mut p1_minus_gamma: Vec<B::F> = p1.evaluations().iter().map(|x| *x - gamma).collect();
-        let mut p2_minus_gamma: Vec<B::F> = p2.evaluations().iter().map(|x| *x - gamma).collect();
+        // phat = 1/(p1-gamma) + 1/(p2-gamma), built in place with a 2× 2^nv peak
+        // transient — batch inversion needs each full vector at once.
+        let mut p1_minus_gamma: Vec<B::F> = p1.evaluations();
+        for x in p1_minus_gamma.iter_mut() {
+            *x -= gamma;
+        }
+        let mut p2_minus_gamma: Vec<B::F> = p2.evaluations();
+        for x in p2_minus_gamma.iter_mut() {
+            *x -= gamma;
+        }
         ark_ff::fields::batch_inversion(p1_minus_gamma.as_mut_slice());
         ark_ff::fields::batch_inversion(p2_minus_gamma.as_mut_slice());
 
-        let phat_evals = p1_minus_gamma
-            .iter()
-            .zip(p2_minus_gamma.iter())
-            .map(|(a, b)| *a + *b)
-            .collect::<Vec<_>>();
-        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals.clone());
+        // Fuse the two inverse tables into p2's allocation, accumulating v in the
+        // same pass.
+        let mut v = B::F::zero();
+        for (dst, add) in p2_minus_gamma.iter_mut().zip(p1_minus_gamma.iter()) {
+            *dst += *add;
+            v += *dst;
+        }
+        // Free 1× 2^nv before the MLE / tracker take over.
+        drop(p1_minus_gamma);
+        let phat_evals = p2_minus_gamma;
+        let phat_mle = MLE::from_evaluations_vec(nv, phat_evals);
         let phat = tracker.track_and_commit_mat_mv_poly(&phat_mle)?;
 
-        // Sumcheck claim is over the paired contribution itself.
-        let v = phat_evals.iter().fold(B::F::zero(), |acc, x| acc + *x);
+        // Swap the dense phat_mle for a lazy `1/(p1 - γ) + 1/(p2 - γ)` backing, but
+        // only when BOTH sources are materialized — see the single-side branch.
+        let p1_id = p1.id();
+        let p2_id = p2.id();
+        let both_mat = {
+            let tracker_rc = tracker.tracker();
+            let borrow = tracker_rc.borrow();
+            borrow.has_materialized_mv_poly(p1_id) && borrow.has_materialized_mv_poly(p2_id)
+        };
+        if both_mat {
+            drop(phat_mle);
+            let p1_source = tracker.mat_mv_poly(p1_id);
+            let p2_source = tracker.mat_mv_poly(p2_id);
+            let lazy_phat = MLE::from_lazy_inverse_shifted_sum(p1_source, p2_source, gamma);
+            // See `prove_generate_subclaims`: resolve the id before the mutable borrow.
+            let phat_id = phat.id();
+            tracker
+                .tracker()
+                .borrow_mut()
+                .register_mat_mv_poly(phat_id, lazy_phat);
+        } else {
+            drop(phat_mle);
+        }
 
         // Zerocheck:
         // phat*(p1-gamma)*(p2-gamma) - ((p1-gamma) + (p2-gamma)) == 0
@@ -371,9 +446,8 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
         m: Option<TrackedOracle<B>>,
         gamma: B::F,
     ) -> SnarkResult<B::F> {
-        // get phat mat comm from proof and add it to the tracker
         let phat = tracker.track_next_mv_com()?;
-        // make the virtual comms as prover does
+        // Build the virtual comms exactly as the prover does.
         let sumcheck_challenge_comm = match m {
             Some(m) => &phat * &m,
             None => phat.clone(),
@@ -381,7 +455,6 @@ impl<B: SnarkBackend> KeyedSumcheck<B> {
 
         let phat_gamma = phat.clone() * gamma;
         let phat_check_poly = (&(&p * &phat) - &phat_gamma) + B::F::one().neg();
-        // add the delayed prover claims to the tracker
         let sum_claim_v = tracker.prover_claimed_sum(sumcheck_challenge_comm.id())?;
         tracker.add_mv_sumcheck_claim(sumcheck_challenge_comm.id(), sum_claim_v);
         tracker.add_mv_zerocheck_claim(phat_check_poly.id());

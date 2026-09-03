@@ -1,14 +1,11 @@
 //! Prover side of the PIOP framework.
 //!
-//! [`ArgProver`] is the main entry point. It wraps a [`ProverTracker`](tracker::ProverTracker)
-//! (via `Rc<RefCell<...>>`) and exposes methods to track polynomials,
-//! add claims, and compile proofs.
+//! [`ArgProver`] wraps a shared [`ProverTracker`](tracker::ProverTracker) and
+//! exposes methods to track polynomials, add claims, and compile proofs.
 
-///////// Modules and reexports /////////
 pub mod errors;
 pub mod structs;
-mod tracker;
-///////// Imports /////////
+pub mod tracker;
 use crate::{
     SnarkBackend,
     arithmetic::{
@@ -36,7 +33,6 @@ use tracing::{Span, field::debug, info, instrument, trace};
 use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 use structs::proof::SNARKProof;
 use tracker::ProverTracker;
-///////////// Body /////////////
 
 /// A prover for the ZKSQL protocol.
 #[derive(Derivative)]
@@ -45,8 +41,7 @@ pub struct ArgProver<B: SnarkBackend> {
     tracker_rc: Rc<RefCell<ProverTracker<B>>>,
 }
 
-/// Implement PartialEq for Prover
-/// Two provers are equal if they point to the same tracker
+/// Two provers are equal iff they point to the same tracker.
 impl<B> PartialEq for ArgProver<B>
 where
     B: SnarkBackend,
@@ -57,7 +52,6 @@ where
     }
 }
 
-/// Prover implementation
 impl<B> ArgProver<B>
 where
     B: SnarkBackend,
@@ -136,9 +130,8 @@ where
         )
     }
 
-    /// Track a materialized multivariate polynomial
-    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
-    /// map and returns the TrackerID
+    /// Track a materialized multivariate polynomial, assigning it a fresh
+    /// `TrackerID`.
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackedPoly<B> {
         let num_vars = polynomial.num_vars();
@@ -153,9 +146,7 @@ where
         )
     }
 
-    /// Track a materialized multivariate polynomial
-    /// moves the multivariate polynomial to heap, assigns a TracckerID to it in
-    /// map and returns the TrackerID
+    /// Track a constant multivariate polynomial (no evaluations materialized).
     #[instrument(level = "debug", skip(self))]
     pub fn track_mat_mv_cnst_poly(&mut self, nv: usize, cnst: B::F) -> TrackedPoly<B> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -165,10 +156,8 @@ where
         TrackedPoly::new(Either::Right(cnst), nv, self.tracker_rc.clone())
     }
 
-    /// Track a materialized multivariate polynomial
-    /// sends a commitment to the polynomials to the verifier, moves the
-    /// multivariate polynomial to heap, assigns a TracckerID to it in map and
-    /// returns the TrackerID
+    /// Track a materialized multivariate polynomial and send its commitment to
+    /// the verifier.
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_mv_poly(
         &mut self,
@@ -196,10 +185,8 @@ where
     }
 
     #[instrument(level = "trace", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
-    /// Track a materialized polynomial using a pre-computed commitment.
-    ///
-    /// `binding` makes the proof-owned vs external-context distinction explicit
-    /// at the call site.
+    /// Track a materialized polynomial using a pre-computed commitment;
+    /// `binding` says whether the commitment is proof-owned or external.
     pub fn track_mat_mv_poly_with_commitment(
         &mut self,
         polynomial: &MLE<B::F>,
@@ -221,9 +208,8 @@ where
         Ok(tracked_poly)
     }
 
-    /// Track a materialized univariate polynomial
-    /// moves the univariate polynomial to heap, assigns a TracckerID to it in
-    /// map and returns the TrackerID
+    /// Track a materialized univariate polynomial, assigning it a fresh
+    /// `TrackerID`.
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     pub fn track_mat_uv_poly(&mut self, polynomial: LDE<B::F>) -> TrackedPoly<B> {
         let degree = polynomial.degree();
@@ -238,10 +224,8 @@ where
         )
     }
 
-    /// Track a materialized univariate polynomial
-    /// sends a commitment to the polynomials to the verifier, moves the
-    /// univariate polynomial to heap, assigns a TracckerID to it in map and
-    /// returns the TrackerID
+    /// Track a materialized univariate polynomial and send its commitment to
+    /// the verifier.
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_uv_poly(
         &mut self,
@@ -265,10 +249,7 @@ where
 
     #[instrument(level = "trace", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     /// Track a materialized univariate polynomial using a pre-computed
-    /// commitment.
-    ///
-    /// `binding` makes the proof-owned vs external-context distinction explicit
-    /// at the call site.
+    /// commitment; `binding` says whether it is proof-owned or external.
     pub fn track_mat_uv_poly_with_commitment(
         &mut self,
         polynomial: &LDE<B::F>,
@@ -290,8 +271,7 @@ where
         Ok(tracked_poly)
     }
 
-    /// Get a shared to the materialized multivariate polynomial given its
-    /// TrackerID
+    /// Shared handle to the materialized multivariate polynomial for `id`.
     #[instrument(level = "debug", skip(self))]
     pub fn mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
@@ -300,8 +280,7 @@ where
             .clone()
     }
 
-    /// Get a shared to the materialized univariate polynomial given its
-    /// TrackerID
+    /// Shared handle to the materialized univariate polynomial for `id`.
     #[instrument(level = "debug", skip(self))]
     pub fn mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
@@ -444,10 +423,8 @@ where
                 .push(claim.sub_poly());
         }
 
-        // Capture (subsets-per-superset) distribution for bench reporting.
-        // Total lookup claims = sum; distinct supersets = len.
-        let subset_counts_per_superset: Vec<usize> =
-            by_super.values().map(|v| v.len()).collect();
+        // Bench reporting: subsets-per-superset distribution (sum = claims, len = supersets).
+        let subset_counts_per_superset: Vec<usize> = by_super.values().map(|v| v.len()).collect();
         self.tracker_rc
             .borrow_mut()
             .state
@@ -682,7 +659,6 @@ mod tests {
         let mut prover = setup();
         let const_mle = MLE::from_evaluations_vec(3, vec![F::from(99); 8]);
         let tracked = prover.track_and_commit_mat_mv_poly(&const_mle).unwrap();
-        // Should be detected as constant (Right)
         assert!(tracked.id_or_const().is_right());
         assert_eq!(tracked.id_or_const().right().unwrap(), F::from(99));
     }
@@ -694,5 +670,43 @@ mod tests {
             MLE::from_evaluations_vec(2, vec![F::from(1), F::from(2), F::from(3), F::from(4)]);
         let tracked = prover.track_and_commit_mat_mv_poly(&mle).unwrap();
         assert!(tracked.id_or_const().is_left());
+    }
+
+    // ── Shift poly compact storage ─────────────────────────────────
+
+    /// Guards a memory regression: `get_or_insert_shift_poly` must route
+    /// through `MLE::from_u32s` (compact `U32` storage), not build a
+    /// size-`2^log_size` `Vec<F>` (512 MiB per shift poly at log_size=24).
+    #[test]
+    fn shift_poly_uses_u32_storage_not_field_vec() {
+        use crate::arithmetic::mat_poly::mle::MLEStorage;
+        use crate::prover::structs::polynomial::get_or_insert_shift_poly;
+        use either::Either;
+
+        let mut prover = setup();
+        // Storage-variant choice is independent of log_size (as long as < 32).
+        let log_size = 4;
+        let shift = 1;
+        let is_right = true;
+        let tracked = get_or_insert_shift_poly(&mut prover, log_size, shift, is_right);
+        let id = match tracked.id_or_const() {
+            Either::Left(id) => id,
+            Either::Right(_) => panic!("shift poly is not a constant"),
+        };
+        let tracker = prover.tracker_rc.borrow();
+        let mle = tracker
+            .mat_mv_poly(id)
+            .expect("shift poly should be materialized in the tracker");
+
+        assert!(
+            matches!(mle.storage(), MLEStorage::U32 { .. }),
+            "shift poly storage must be U32 (compact), not Field (would be \
+             8× larger and route to the slow Field-vec MSM path)"
+        );
+
+        // For `is_right = true, shift = 1` the evaluations must be `[N-1, 0, 1, …, N-2]`.
+        let n = 1usize << log_size;
+        let expected: Vec<F> = (0..n).map(|i| F::from(((i + n - 1) % n) as u64)).collect();
+        assert_eq!(mle.evaluations(), expected);
     }
 }
