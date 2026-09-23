@@ -1,7 +1,9 @@
 use crate::prover::structs::polynomial::TrackedPoly;
 use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
-use ark_ff::PrimeField;
-use indexmap::IndexMap;
+use ark_ff::Zero;
+use ark_std::cfg_iter;
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 // TODO: check for optimization; put in the paper
 /// Output an MLE of the multiplicities with which super-column elements appear across
@@ -39,54 +41,61 @@ pub fn calc_inclusion_multiplicity_from_evals<B>(
 where
     B: SnarkBackend,
 {
-    let super_col_len = super_col_evals.len();
-
-    let mut included_col_mults_map = included_col_evals
+    // Sort-based rather than a hash map: on a 2^23-entry super column the
+    // map version was several seconds of one core per lookup, and this
+    // runs inside a parallel job per super column.
+    let mut included: Vec<B::F> = included_col_evals
         .iter()
-        .map(|evals| vec_multiplicity_count::<B::F>(evals, None))
-        .fold(IndexMap::<B::F, u64>::new(), |mut acc, map| {
-            for (val, count) in map {
-                *acc.entry(val).or_insert(0) += count;
-            }
-            acc
-        });
+        .flat_map(|evals| evals.iter().copied())
+        .collect();
+    sort_unstable(&mut included);
+    // (value, count) runs, in value order.
+    let mut runs: Vec<(B::F, u64)> = Vec::new();
+    for val in included {
+        match runs.last_mut() {
+            Some((last, n)) if *last == val => *n += 1,
+            _ => runs.push((val, 1)),
+        }
+    }
 
-    let mut super_col_mult_evals = Vec::with_capacity(super_col_len);
+    // Super positions by value, ties by position: the first of each run is
+    // the value's first occurrence, which carries the count; later
+    // duplicates get 0 so the super-column total equals the sub-union total.
+    let mut sup: Vec<(B::F, usize)> = cfg_iter!(super_col_evals)
+        .enumerate()
+        .map(|(i, &v)| (v, i))
+        .collect();
+    sort_unstable(&mut sup);
 
-    // Consume each value's count at its first super position; later duplicates get 0
-    // so the super-column total equals the sub-union total.
-    for &val in super_col_evals.iter() {
-        let count = included_col_mults_map.get(&val).copied().unwrap_or(0);
-        super_col_mult_evals.push(B::F::from(count));
-        if count > 0 {
-            included_col_mults_map.insert(val, 0);
+    let mut super_col_mult_evals = vec![B::F::zero(); super_col_evals.len()];
+    let mut runs = runs.iter().peekable();
+    let mut previous: Option<&B::F> = None;
+    for (val, pos) in &sup {
+        if previous == Some(val) {
+            continue;
+        }
+        previous = Some(val);
+        while runs.peek().is_some_and(|(v, _)| v < val) {
+            runs.next();
+        }
+        if let Some((v, n)) = runs.peek()
+            && v == val
+        {
+            super_col_mult_evals[*pos] = B::F::from(*n);
         }
     }
 
     MLE::from_evaluations_vec(super_col_nv, super_col_mult_evals)
 }
 
-// Map from unique evaluations to multiplicities, skipping zero-selector positions.
-fn vec_multiplicity_count<F>(poly: &[F], sel: Option<&[F]>) -> IndexMap<F, u64>
-where
-    F: PrimeField,
-{
-    let mut mults_map = IndexMap::<F, u64>::new();
-
-    if let Some(sel) = sel {
-        for (i, &val) in poly.iter().enumerate() {
-            if sel[i] == F::zero() {
-                continue;
-            }
-            *mults_map.entry(val).or_insert(0) += 1;
-        }
-    } else {
-        for &val in poly {
-            *mults_map.entry(val).or_insert(0) += 1;
-        }
+fn sort_unstable<T: Ord + Send>(v: &mut [T]) {
+    #[cfg(feature = "parallel")]
+    {
+        use rayon::slice::ParallelSliceMut;
+        v.par_sort_unstable();
     }
-
-    mults_map
+    #[cfg(not(feature = "parallel"))]
+    v.sort_unstable();
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use ark_ff::{Field, Zero};
 use ark_poly::{DenseMultilinearExtension, MultilinearExtension, Polynomial};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Valid, Validate};
-use ark_std::{cfg_chunks, cfg_chunks_mut, cfg_iter, rand::Rng};
+use ark_std::{cfg_chunks, cfg_chunks_mut, cfg_into_iter, cfg_iter, cfg_iter_mut, rand::Rng};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use std::{
@@ -1244,7 +1244,7 @@ impl<F: Field> MLEStorage<F> {
             Self::LazyInverseShifted { source, shift, .. } => {
                 let src = source.storage();
                 let src_len = src.inner_len();
-                let mut v: Vec<F> = (0..self.inner_len())
+                let mut v: Vec<F> = cfg_into_iter!(0..self.inner_len())
                     .map(|i| src.lift(i % src_len) - *shift)
                     .collect();
                 ark_ff::fields::batch_inversion(&mut v);
@@ -1254,14 +1254,23 @@ impl<F: Field> MLEStorage<F> {
                 let (s1, s2) = (s1.storage(), s2.storage());
                 let (l1, l2) = (s1.inner_len(), s2.inner_len());
                 let n = self.inner_len();
-                let mut a: Vec<F> = (0..n).map(|i| s1.lift(i % l1) - *shift).collect();
-                let mut b: Vec<F> = (0..n).map(|i| s2.lift(i % l2) - *shift).collect();
+                let mut a: Vec<F> = cfg_into_iter!(0..n)
+                    .map(|i| s1.lift(i % l1) - *shift)
+                    .collect();
+                let mut b: Vec<F> = cfg_into_iter!(0..n)
+                    .map(|i| s2.lift(i % l2) - *shift)
+                    .collect();
                 ark_ff::fields::batch_inversion(&mut a);
                 ark_ff::fields::batch_inversion(&mut b);
-                a.iter_mut().zip(b).for_each(|(x, y)| *x += y);
+                cfg_iter_mut!(a).zip(b).for_each(|(x, y)| *x += y);
                 a
             }
-            _ => (0..self.inner_len()).map(|i| self.lift(i)).collect(),
+            // Element-wise lift of compressed storage, in parallel: a 2^23
+            // column expanded this way sat on one core for most of the
+            // virtual-polynomial build before each big sumcheck.
+            _ => cfg_into_iter!(0..self.inner_len())
+                .map(|i| self.lift(i))
+                .collect(),
         }
     }
 }
