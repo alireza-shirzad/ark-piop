@@ -85,6 +85,14 @@ where
                 .into_iter()
                 .collect();
 
+            // A point whose only claims are on materialized/base polys (no
+            // PCS commitment to open) yields no openable ids — nothing to
+            // batch-evaluate, and `batch_evaluate_mv` returns `None` on an
+            // empty id set. Skip it; the verifier checks such claims by
+            // direct evaluation of the reconstructed base poly.
+            if all_mat_ids.is_empty() {
+                continue;
+            }
             let all_evals = self.batch_evaluate_mv(&all_mat_ids, point).unwrap();
 
             for (mat_id, eval) in all_mat_ids.into_iter().zip(all_evals) {

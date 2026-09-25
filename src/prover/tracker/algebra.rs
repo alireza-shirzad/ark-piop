@@ -15,7 +15,16 @@ where
         {
             return BTreeSet::from([id]);
         }
-        let poly = self.virt_poly(id).unwrap();
+        // A top-level id that is neither a materialized *commitment* nor a
+        // virtual poly is a materialized-but-uncommitted poly (e.g. a
+        // `track_mat_mv_poly` all-ones / index column, reconstructed by the
+        // verifier via a base oracle). It carries no PCS commitment, so it
+        // contributes no openable ids here — the verifier checks its eval
+        // claim by direct evaluation. Mirror the leaf handling below
+        // ("dangling reference => silently ignore") instead of panicking.
+        let Some(poly) = self.virt_poly(id) else {
+            return BTreeSet::new();
+        };
         // 1)  Initialise the DFS stack with every TrackerID mentioned up-front
         let mut stack: Vec<TrackerID> = poly
             .iter()
