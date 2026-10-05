@@ -19,6 +19,15 @@ where
         self.track_mat_arc_mv_poly(polynomial)
     }
 
+    /// Tracks a constant that arithmetic folded, so a claim can reference
+    /// it. The verifier tracks a constant oracle at the same ID, of degree 0;
+    /// recording the ID keeps this side's degree the same.
+    pub fn track_derived_mv_constant(&mut self, constant: MLE<B::F>) -> TrackerID {
+        let id = self.track_mat_mv_poly(constant);
+        self.state.mv_pcs_substate.derived_constants.insert(id);
+        id
+    }
+
     /// Tracks a materialized polynomial.
     ///
     /// moves the polynomial to heap, assigns a TracckerID to it in map and

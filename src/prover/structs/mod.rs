@@ -96,6 +96,10 @@ where
     // `num_vars` for `constants` entries, emitted so the verifier can mirror
     // `poly_log_sizes` — see `PROOF_ENCODING_VERSION = 2`.
     pub constants_num_vars: BTreeMap<TrackerID, usize>,
+    // Constants that arithmetic folded and a claim then needed an ID for.
+    // They are materialized but not sent, and have degree 0 like the
+    // constant oracle the verifier tracks for them.
+    pub derived_constants: BTreeSet<TrackerID>,
     // Commitments reused from external context (e.g. base tables): tracked for
     // openings but not emitted as proof-owned in the PCS subproof.
     pub external_materialized_comm_ids: BTreeSet<TrackerID>,

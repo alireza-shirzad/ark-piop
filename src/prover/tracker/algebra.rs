@@ -133,7 +133,8 @@ where
         if let Some(&cached) = memo.get(&id) {
             return cached;
         }
-        if self.state.mv_pcs_substate.constants.contains_key(&id) {
+        let pcs = &self.state.mv_pcs_substate;
+        if pcs.constants.contains_key(&id) || pcs.derived_constants.contains(&id) {
             memo.insert(id, 0);
             return 0;
         }

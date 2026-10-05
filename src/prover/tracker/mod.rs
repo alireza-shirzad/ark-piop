@@ -840,6 +840,20 @@ mod tests {
         assert_eq!(tracker.virt_poly_degree(expr), 2);
     }
 
+    #[test]
+    fn degree_of_derived_constant_is_zero() {
+        // The verifier tracks a constant oracle (degree 0) for a constant
+        // that arithmetic folded; the two sides plan sumcheck buckets from
+        // these degrees, so they have to agree.
+        let mut tracker = make_tracker();
+        let a = tracker.track_mat_mv_poly(random_mle(3));
+        let constant = MLE::from_evaluations_vec(0, vec![F::from(7u64)]);
+        let c = tracker.track_derived_mv_constant(constant);
+        assert_eq!(tracker.virt_poly_degree(c), 0);
+        let prod = tracker.mul_polys(a, c);
+        assert_eq!(tracker.virt_poly_degree(prod), 1);
+    }
+
     // ── Constant tracking ──────────────────────────────────────────
 
     #[test]

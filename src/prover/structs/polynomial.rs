@@ -132,7 +132,10 @@ where
                 }
                 // Derived constant (from arithmetic on constants) — generate a
                 // new ID. The verifier mirrors this call, keeping IDs in sync.
-                let id = self.tracker.borrow_mut().track_mat_mv_poly(constant_mle());
+                let id = self
+                    .tracker
+                    .borrow_mut()
+                    .track_derived_mv_constant(constant_mle());
                 self.cached_constant_id.set(Some(id));
                 id
             }
