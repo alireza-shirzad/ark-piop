@@ -21,7 +21,8 @@ use std::{borrow::Borrow, fmt::Debug, hash::Hash, sync::Arc};
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
 };
 use tracing::Level;
 
@@ -315,12 +316,25 @@ pub fn load_or_generate_srs<F: PrimeField, PCSImpl: PCS<F>>(
                 srs_path, err
             );
         }
-        BufWriter::new(
-            File::create(srs_path)
-                .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", srs_path)),
-        )
-        .write_all(&serialized)
-        .unwrap();
+        // Write to a private temporary file and rename it into place, so a
+        // concurrent caller (tests run in parallel) never reads a partial SRS.
+        static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+        let mut tmp_name = srs_path.as_os_str().to_owned();
+        tmp_name.push(format!(
+            ".tmp.{}.{}",
+            std::process::id(),
+            NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let tmp_path = PathBuf::from(tmp_name);
+        let mut writer = BufWriter::new(
+            File::create(&tmp_path)
+                .unwrap_or_else(|_| panic!("could not create file for SRS at {:?}", tmp_path)),
+        );
+        writer.write_all(&serialized).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        std::fs::rename(&tmp_path, srs_path)
+            .unwrap_or_else(|_| panic!("could not move SRS into place at {:?}", srs_path));
         srs
     }
 }
