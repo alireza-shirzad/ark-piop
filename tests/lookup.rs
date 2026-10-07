@@ -615,9 +615,6 @@ fn keyed_sumcheck_constant_columns_and_multiplicities() {
 
 /// As `lookup_constant_sub_wider_than_every_commitment`, through the PIOP.
 #[test]
-#[ignore = "baseline bug: a true keyed sum is rejected by the verifier when a constant column \
-            has more rows than every committed polynomial of the proof (same power-of-two \
-            factor as for lookups)"]
 fn keyed_sumcheck_constant_column_wider_than_every_commitment() {
     let counts = fv((0..16).map(|i| if i == 7 { 32 } else { 0 }));
     assert_accepted(keyed_e2e(
@@ -630,13 +627,6 @@ fn keyed_sumcheck_constant_column_wider_than_every_commitment() {
 /// each term of the sum ranges over the larger of the two, the smaller one
 /// repeating.
 #[test]
-#[ignore = "unsupported on the baseline: a column and its multiplicity must have the same number \
-            of variables. A one-row (constant) column with an 8-row multiplicity is rejected by \
-            the verifier although true (the prover sums one row only); an 8-row column with a \
-            32-row multiplicity panics in TrackedPoly multiplication (mismatched log sizes); a \
-            32-row column with an 8-row multiplicity panics on an out-of-bounds index in \
-            prove_generate_subclaims. Under honest-prover all three are refused as false \
-            claims, because the check pairs column and multiplicity rows without repeating"]
 fn keyed_sum_column_and_multiplicity_of_different_nv() {
     // One key, eight weights adding up to 28.
     let counts = |n: u64| fv((0..16).map(|i| if i == 7 { n } else { 0 }));
@@ -722,6 +712,33 @@ fn lookup_sub_committed_constant_times_activator() {
     assert_rejected(run(16));
 }
 
+/// As above with the sub far wider than the table, so that the claim on the
+/// all-zero sub is the only one of its size in the proof.
+#[test]
+fn lookup_sub_zero_constant_times_activator_far_wider_than_the_table() {
+    let run = |chunk: u64| {
+        prove_and_verify(
+            |prover| {
+                let table = commit(prover, &fv(0..4))?;
+                let data = commit(prover, &fv([chunk; 256]))?;
+                assert!(data.is_constant());
+                let activator = commit(prover, &prefix_activator(8, 201))?;
+                let sub = &data * &activator;
+                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                Ok([table.id(), data.id(), activator.id()])
+            },
+            |verifier, ids| {
+                let oracles = track_all(verifier, &ids)?;
+                let sub = &oracles[1] * &oracles[2];
+                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+            },
+        )
+    };
+    assert_accepted(run(0));
+    assert_accepted(run(3));
+    assert_rejected(run(4));
+}
+
 /// `sub ⊆ 0..16` for a sub with `rows` copies of `chunk`, committed as a
 /// constant. `derived` multiplies it by an all-ones activator, itself a
 /// committed constant, so the sub is a folded constant that only gets a
@@ -785,9 +802,6 @@ fn lookup_sub_derived_constant() {
 /// The constant sub is the largest column of the whole proof: the table and
 /// its multiplicity have 16 rows and nothing else is committed.
 #[test]
-#[ignore = "baseline bug: a true lookup is rejected by the verifier when the sub is a constant \
-            with more rows than every committed polynomial of the proof; the two sides of the \
-            keyed sum come out a factor 2^(sub nv - largest committed nv) apart"]
 fn lookup_constant_sub_wider_than_every_commitment() {
     assert_accepted(constant_sub_e2e(7, 32, false, false));
     assert_accepted(constant_sub_e2e(7, 64, true, false));
@@ -963,9 +977,9 @@ fn lookup_nv0_table_and_sub() {
 
 /// The same lookup as the whole statement: every polynomial is a constant.
 #[test]
-#[ignore = "baseline limitation: a proof whose only claims are on constants cannot be built; \
-            build_proof returns a PolyIOP error (\"Attempt to prove a constant\") for a true \
-            statement"]
+#[ignore = "limitation of the sumcheck, not of the lookup: a proof whose only claims are on \
+            polynomials without variables cannot be built; build_proof returns a PolyIOP error \
+            (\"Attempt to prove a constant\") for a true statement"]
 fn lookup_nv0_only_statement() {
     assert_accepted(lookup_e2e(&fv([7]), &[fv([7])]));
     assert_rejected(lookup_e2e(&fv([7]), &[fv([8])]));
@@ -1446,6 +1460,8 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
 
     let decoded = SNARKProof::<B>::from_bytes(&bytes).unwrap();
     assert_eq!(decoded.to_bytes().unwrap(), bytes);
+    assert!(!proof.logup_gkr_subproofs.is_empty());
+    assert_eq!(decoded.logup_gkr_subproofs, proof.logup_gkr_subproofs);
     verifier.set_proof(decoded);
     assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));
 }

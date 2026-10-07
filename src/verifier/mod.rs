@@ -97,7 +97,6 @@ where
 
     /// Shared handle to the tracker, for protocol code that prover and
     /// verifier run through [`crate::tracker_core::TrackerCore`].
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
         Rc::clone(&self.tracker_rc)
     }

@@ -28,14 +28,10 @@
 //! polynomials the statement is about. For an instance declared with unit
 //! numerators the numerator claim is exactly 1 and needs no opening.
 
-// The trackers can run a batch, but nothing builds an instance or reads a
-// claim until the lookup path switches over.
-#![cfg_attr(not(test), expect(dead_code))]
-
 mod layer;
 mod prover;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod verifier;
 
 use ark_ff::PrimeField;

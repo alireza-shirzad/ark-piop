@@ -89,37 +89,24 @@ where
             )));
         }
 
+        // Each term runs over the larger of its column's and its
+        // multiplicity's hypercubes, the smaller one repeated cyclically, as
+        // in the protocol.
         let mut bookkeeping_map: BTreeMap<B::F, B::F> = BTreeMap::new();
-        for (fx, mfx) in input.fxs.iter().zip(&input.mfxs) {
-            match mfx {
-                None => {
-                    for elem in fx.evaluations() {
-                        *bookkeeping_map.entry(elem).or_insert(B::F::zero()) += B::F::one();
-                    }
-                }
-                Some(mfx) => {
-                    for (elem, mf_elem) in
-                        fx.evaluations().into_iter().zip(mfx.evaluations().iter())
-                    {
-                        *bookkeeping_map.entry(elem).or_insert(B::F::zero()) += *mf_elem;
-                    }
-                }
-            }
-        }
-
-        for (gx, mgx) in input.gxs.iter().zip(&input.mgxs) {
-            match mgx {
-                None => {
-                    for elem in gx.evaluations() {
-                        *bookkeeping_map.entry(elem).or_insert(B::F::zero()) -= B::F::one();
-                    }
-                }
-                Some(mgx) => {
-                    for (elem, mg_elem) in
-                        gx.evaluations().into_iter().zip(mgx.evaluations().iter())
-                    {
-                        *bookkeeping_map.entry(elem).or_insert(B::F::zero()) -= *mg_elem;
-                    }
+        let sides = [
+            (&input.fxs, &input.mfxs, B::F::one()),
+            (&input.gxs, &input.mgxs, -B::F::one()),
+        ];
+        for (cols, mults, sign) in sides {
+            for (col, mult) in cols.iter().zip(mults) {
+                let col = col.evaluations();
+                let mult = mult.as_ref().map(|mult| mult.evaluations());
+                let rows = col.len().max(mult.as_ref().map_or(0, Vec::len));
+                for row in 0..rows {
+                    let weight = mult.as_ref().map_or(sign, |m| sign * m[row % m.len()]);
+                    *bookkeeping_map
+                        .entry(col[row % col.len()])
+                        .or_insert(B::F::zero()) += weight;
                 }
             }
         }

@@ -529,6 +529,20 @@ where
         self.state.logup_gkr_subproofs.push(proof);
         Ok(claims)
     }
+
+    /// [`Self::prove_logup_gkr`] with the batch prover swapped for `prove`,
+    /// for tests that put a prover of their own on the transcript.
+    #[cfg(test)]
+    pub(crate) fn prove_logup_gkr_with(
+        &mut self,
+        prove: impl FnOnce(
+            &mut crate::transcript::Tr<B::F>,
+        ) -> (crate::piop::logup_gkr::LogupGkrProof<B::F>, GkrClaims<B::F>),
+    ) -> GkrClaims<B::F> {
+        let (proof, claims) = prove(&mut self.state.transcript);
+        self.state.logup_gkr_subproofs.push(proof);
+        claims
+    }
 }
 
 #[cfg(test)]

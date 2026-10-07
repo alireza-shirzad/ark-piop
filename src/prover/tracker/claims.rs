@@ -64,6 +64,20 @@ where
             .collect()
     }
 
+    /// Rewrites the sum of the pending claim on `poly_id`, for tests whose
+    /// prover claims one sum to the verifier and proves another.
+    #[cfg(test)]
+    pub(crate) fn set_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        let claim = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter_mut()
+            .find(|claim| claim.id() == poly_id)
+            .expect("no pending sumcheck claim on this polynomial");
+        claim.set_claim(claimed_sum);
+    }
+
     #[cfg(feature = "honest-prover")]
     fn honest_sumcheck_claim_check(
         &mut self,

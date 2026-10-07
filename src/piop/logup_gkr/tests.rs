@@ -121,7 +121,7 @@ fn root_sum(roots: &[[Fr; 2]]) -> Fr {
 
 /// Where a cheating reference prover leaves the protocol.
 #[derive(Clone, Copy, Debug)]
-enum Deviation {
+pub(crate) enum Deviation {
     /// The root of `instance` is sent as the equal fraction
     /// `(scale·P, scale·Q)`.
     ScaleRoot { instance: usize, scale: Fr },
@@ -151,12 +151,12 @@ enum Deviation {
 /// sends is absorbed before the challenges that follow, as in a real attack;
 /// nothing is edited after the fact.
 #[derive(Clone, Copy, Debug)]
-struct Fault {
-    deviation: Deviation,
+pub(crate) struct Fault {
+    pub(crate) deviation: Deviation,
     /// In every iteration before this one the cheater bends one mask so
     /// that the layer check passes, carrying its false claim one layer
     /// down. From this iteration on it sends true masks again.
-    patch_until: usize,
+    pub(crate) patch_until: usize,
 }
 
 /// Layers `0..=n` of an instance, numerators always materialised.
@@ -203,7 +203,7 @@ fn gate([p0, p1, q0, q1]: [Fr; 4], lambda: Fr) -> Fr {
 /// Reference prover. With `fault = None` it is the honest prover and also
 /// asserts, by brute force, the identities the protocol rests on (every
 /// round polynomial sums to the running claim, every layer check holds).
-fn naive_prove_batch(
+pub(crate) fn naive_prove_batch(
     instances: &[FractionInstance<Fr>],
     tr: &mut Tr<Fr>,
     fault: Option<Fault>,
