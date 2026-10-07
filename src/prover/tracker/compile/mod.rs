@@ -52,6 +52,13 @@ pub const SNARK_PROVER_SPAN_TARGET: &str = "bench_stats";
 /// bucket boundaries on the dashboard's RSS curve.
 pub const SC_BUCKET_SPAN: &str = "sc_bucket";
 
+/// Span around the prover's reduction of its lookup and keyed-sum claims,
+/// which runs before the proof is compiled: the multiplicities, their
+/// commitments and the LogUp-GKR runs. It opens on every proof, also one
+/// with nothing to reduce. Not one of [`SNARK_PROVER_TIMED_SPANS`], whose
+/// three durations it is disjoint from.
+pub const LOOKUP_REDUCTION_SPAN: &str = "reduce_lookup_claims";
+
 /// Regions whose span duration *is* that stage's timing; the name doubles
 /// as the subscriber's record key. Named at the call site because two
 /// stages run on both sides of degree reduction and are reported as
@@ -220,7 +227,7 @@ mod tests {
     /// from a span that was renamed away.
     #[test]
     fn lookup_reduction_span_opens_on_every_compile() {
-        let name = "reduce_lookup_claims";
+        let name = LOOKUP_REDUCTION_SPAN;
         let capture = capture_empty_compile();
         let seen = capture.spans.lock().unwrap();
         let (_, target, level) = seen

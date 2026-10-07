@@ -10,8 +10,8 @@ mod tracking;
 // Re-exported for out-of-tree `bench_stats` subscribers, which need the
 // span-name → record-key table to turn the subproof spans into timings.
 pub use compile::{
-    SC_BUCKET_SPAN, SC_REGION_SPANS, SNARK_PROVER_SPAN_TARGET, SNARK_PROVER_TIMED_SPANS,
-    is_sc_region_span, snark_prover_timing_key,
+    LOOKUP_REDUCTION_SPAN, SC_BUCKET_SPAN, SC_REGION_SPANS, SNARK_PROVER_SPAN_TARGET,
+    SNARK_PROVER_TIMED_SPANS, is_sc_region_span, snark_prover_timing_key,
 };
 
 use super::structs::{

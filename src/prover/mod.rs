@@ -480,8 +480,9 @@ where
     /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
     /// one batch. Runs before the subproofs are compiled, outside every
     /// timed subproof span, so it gets a `bench_stats` span of its own for
-    /// subscribers to time. The span covers the whole function: it opens
-    /// even with nothing to reduce.
+    /// subscribers to time, named by
+    /// [`LOOKUP_REDUCTION_SPAN`](tracker::LOOKUP_REDUCTION_SPAN). The span
+    /// covers the whole function: it opens even with nothing to reduce.
     #[instrument(
         target = "bench_stats",
         level = "info",
