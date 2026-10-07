@@ -1,7 +1,7 @@
 use crate::prover::structs::polynomial::TrackedPoly;
 use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
 use ark_ff::PrimeField;
-use ark_std::cfg_iter;
+use ark_std::{cfg_into_iter, cfg_iter};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
@@ -51,6 +51,88 @@ where
 /// The evaluations behind [`calc_inclusion_multiplicity_from_evals`], from
 /// borrowed columns: one multiplicity per super-column row.
 pub(crate) fn inclusion_multiplicities<F: PrimeField>(
+    included_col_evals: &[&[F]],
+    super_col_evals: &[F],
+) -> Vec<F> {
+    multiplicities_by_counting(included_col_evals, super_col_evals)
+        .unwrap_or_else(|| multiplicities_by_sorting(included_col_evals, super_col_evals))
+}
+
+/// The integer `value` is, if it is below `bound`.
+#[inline]
+fn small_key<F: PrimeField>(value: &F, bound: usize) -> Option<usize> {
+    let repr = value.into_bigint();
+    let limbs = repr.as_ref();
+    let low = usize::try_from(limbs[0]).ok()?;
+    (low < bound && limbs[1..].iter().all(|limb| *limb == 0)).then_some(low)
+}
+
+/// [`multiplicities_by_sorting`] for a super column of small integers, such
+/// as a range table: the included values are counted in an array indexed by
+/// value, which takes one reduction per value where sorting takes several
+/// field comparisons. `None` when the super column is not of that kind.
+fn multiplicities_by_counting<F: PrimeField>(
+    included_col_evals: &[&[F]],
+    super_col_evals: &[F],
+) -> Option<Vec<F>> {
+    // The array may be this much longer than the super column. Beyond that
+    // the column is too sparse in its range for an array to pay off.
+    let bound = super_col_evals.len().checked_mul(8)?.max(1 << 16);
+    let super_keys = cfg_iter!(super_col_evals)
+        .map(|value| small_key(value, bound))
+        .collect::<Option<Vec<usize>>>()?;
+    let slots = super_keys.iter().max()? + 1;
+
+    // A chunk of rows is counted on its own and the counts are added up, so
+    // a chunk has to be worth the array it clears.
+    let chunk_rows = slots.max(1 << 16);
+    let chunks: Vec<&[F]> = included_col_evals
+        .iter()
+        .flat_map(|evals| evals.chunks(chunk_rows))
+        .collect();
+    let count = |chunk: &[F]| {
+        let mut counts = vec![0u64; slots];
+        // Equal neighbours are common (the zeros of inactive rows), and
+        // comparing two values is much cheaper than reducing one.
+        let mut previous = None;
+        for value in chunk {
+            let key = match previous {
+                Some((seen, key)) if seen == value => key,
+                _ => small_key(value, slots),
+            };
+            previous = Some((value, key));
+            // A value outside the array is not in the super column.
+            if let Some(key) = key {
+                counts[key] += 1;
+            }
+        }
+        counts
+    };
+    let add = |mut total: Vec<u64>, counts: Vec<u64>| {
+        total.iter_mut().zip(counts).for_each(|(t, c)| *t += c);
+        total
+    };
+    #[cfg(feature = "parallel")]
+    let counts = chunks.into_par_iter().map(count).reduce_with(add);
+    #[cfg(not(feature = "parallel"))]
+    let counts = chunks.into_iter().map(count).reduce(add);
+    let counts = counts.unwrap_or_else(|| vec![0; slots]);
+
+    // The first occurrence of a value carries its count; later duplicates
+    // get 0 so the super-column total equals the sub-union total.
+    let mut seen = vec![false; slots];
+    let credited: Vec<u64> = super_keys
+        .into_iter()
+        .map(|key| match std::mem::replace(&mut seen[key], true) {
+            false => counts[key],
+            true => 0,
+        })
+        .collect();
+    Some(cfg_into_iter!(credited).map(F::from).collect())
+}
+
+/// Multiplicities for any super column, by sorting both sides.
+fn multiplicities_by_sorting<F: PrimeField>(
     included_col_evals: &[&[F]],
     super_col_evals: &[F],
 ) -> Vec<F> {
@@ -115,12 +197,143 @@ fn sort_unstable<T: Ord + Send>(v: &mut [T]) {
 mod tests {
     use super::*;
     use crate::DefaultSnarkBackend;
-    use ark_ff::{One, Zero};
+    use ark_ff::{One, UniformRand, Zero};
+    use ark_std::rand::{Rng, SeedableRng, rngs::StdRng};
+    use proptest::prelude::*;
 
     type F = <DefaultSnarkBackend as SnarkBackend>::F;
 
     fn fr(v: u64) -> F {
         F::from(v)
+    }
+
+    /// Both ways of computing the multiplicities, checked to agree wherever
+    /// counting applies. Returns them and whether it applied.
+    fn both_ways(included: &[Vec<F>], super_col: &[F]) -> (Vec<F>, bool) {
+        let borrowed: Vec<&[F]> = included.iter().map(Vec::as_slice).collect();
+        let sorted = multiplicities_by_sorting(&borrowed, super_col);
+        let counted = multiplicities_by_counting(&borrowed, super_col);
+        if let Some(counted) = &counted {
+            assert_eq!(counted, &sorted);
+        }
+        assert_eq!(inclusion_multiplicities(&borrowed, super_col), sorted);
+        (sorted, counted.is_some())
+    }
+
+    /// The count goes to the first of several equal super rows, and included
+    /// values the super column lacks count nowhere.
+    #[test]
+    fn counting_credits_first_occurrence_and_ignores_missing_values() {
+        let super_col: Vec<F> = [5u64, 3, 5, 0, 3, 9, 0, 5].map(fr).to_vec();
+        let included = vec![
+            [3u64, 3, 7, 5, 0, 0, 0, 1 << 40].map(fr).to_vec(),
+            // A different length, a value above every array bound, and the
+            // negative of a value that is there.
+            vec![fr(9), -fr(3), fr(4), F::from(u128::MAX)],
+        ];
+        let (m, counted) = both_ways(&included, &super_col);
+        assert!(counted);
+        assert_eq!(m, [1u64, 2, 0, 3, 0, 1, 0, 0].map(fr).to_vec());
+    }
+
+    #[test]
+    fn counting_handles_empty_inputs() {
+        let super_col: Vec<F> = (0..4).map(fr).collect();
+        assert_eq!(both_ways(&[], &super_col), (vec![F::zero(); 4], true));
+        assert_eq!(
+            both_ways(&[vec![], vec![]], &super_col),
+            (vec![F::zero(); 4], true)
+        );
+        assert_eq!(both_ways(&[vec![fr(1)]], &[]), (vec![], false));
+    }
+
+    /// A super column that is not small integers in a dense enough range is
+    /// left to sorting.
+    #[test]
+    fn counting_declines_large_or_sparse_super_columns() {
+        let included = vec![vec![fr(1), -fr(1), fr(1 << 20), fr(1)]];
+
+        let (m, counted) = both_ways(&included, &[fr(1), fr(2), -fr(1), fr(1)]);
+        assert!(!counted);
+        assert_eq!(m, [2u64, 0, 1, 0].map(fr).to_vec());
+
+        let (m, counted) = both_ways(&included, &[fr(1), fr(1 << 20)]);
+        assert!(!counted);
+        assert_eq!(m, [2u64, 1].map(fr).to_vec());
+
+        // The largest value an array is still used for, and the first one
+        // it is not.
+        let (_, counted) = both_ways(&included, &[fr(1), fr((1 << 16) - 1)]);
+        assert!(counted);
+        let (_, counted) = both_ways(&included, &[fr(1), fr(1 << 16)]);
+        assert!(!counted);
+    }
+
+    /// Columns longer than one counting chunk, with long runs of one value
+    /// across the chunk boundary.
+    #[test]
+    fn counting_adds_up_across_chunks() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let super_col: Vec<F> = (0..1u64 << 8).map(|i| fr(i % 200)).collect();
+        let included: Vec<Vec<F>> = [(1usize << 17) + 13, 1 << 16, 5]
+            .into_iter()
+            .map(|len| {
+                (0..len)
+                    .map(|i| match (i >> 12) % 3 {
+                        0 => F::zero(),
+                        1 => fr(rng.gen_range(0..260)),
+                        _ => fr(199),
+                    })
+                    .collect()
+            })
+            .collect();
+        let (m, counted) = both_ways(&included, &super_col);
+        assert!(counted);
+        let total: F = m.iter().sum();
+        let in_range = included
+            .iter()
+            .flatten()
+            .filter(|value| **value < fr(200))
+            .count();
+        assert_eq!(total, fr(in_range as u64));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// Random columns of every kind: a dense range, small values with
+        /// gaps and repeats, and field elements at large.
+        #[test]
+        fn counting_matches_sorting(
+            super_log in 0usize..7,
+            range in 1u64..300,
+            large_supers in 0usize..2,
+            sub_lens in proptest::collection::vec(0usize..200, 0..4),
+            seed in any::<u64>(),
+        ) {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let mut super_col: Vec<F> = (0..1usize << super_log)
+                .map(|_| fr(rng.gen_range(0..range)))
+                .collect();
+            for _ in 0..large_supers {
+                let row = rng.gen_range(0..super_col.len());
+                super_col[row] = F::rand(&mut rng);
+            }
+            let included: Vec<Vec<F>> = sub_lens
+                .iter()
+                .map(|len| {
+                    (0..*len)
+                        .map(|_| match rng.gen_range(0..10) {
+                            0 => F::rand(&mut rng),
+                            1 => super_col[rng.gen_range(0..super_col.len())],
+                            _ => fr(rng.gen_range(0..range + 20)),
+                        })
+                        .collect()
+                })
+                .collect();
+            let (_, counted) = both_ways(&included, &super_col);
+            prop_assert_eq!(counted, large_supers == 0);
+        }
     }
 
     /// Regression test for the multiplicity double-count bug that appeared
