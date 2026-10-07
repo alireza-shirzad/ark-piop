@@ -360,6 +360,20 @@ where
             .add_mv_sumcheck_claim(poly_id, claimed_sum)
     }
 
+    /// Add a multivariate sumcheck claim whose sum the verifier derives
+    /// itself; see [`ProverTracker::add_mv_sumcheck_claim_raw`].
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[instrument(level = "debug", skip(self))]
+    pub(crate) fn add_mv_sumcheck_claim_raw(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_sumcheck_claim_raw(poly_id, claimed_sum)
+    }
+
     /// Add a multivariate zerocheck claim to the proof
     #[instrument(level = "debug", skip(self), fields(virt_degree = tracing::field::Empty))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
@@ -406,7 +420,7 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+    pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
         let lookup_claims = {
             let mut tracker = self.tracker_rc.borrow_mut();
             let claims = tracker.take_lookup_claims();

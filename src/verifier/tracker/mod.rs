@@ -4,6 +4,8 @@ mod algebra;
 mod claims;
 mod core_impl;
 mod evaluation;
+#[cfg(test)]
+mod tests;
 mod tracking;
 mod verify;
 

@@ -327,6 +327,43 @@ mod tests {
         }
     }
 
+    /// The verifier reads a claim's raw flag after bucketing, so the claims
+    /// have to come out of the partition exactly as they went in.
+    #[test]
+    fn bucketing_moves_claims_with_their_raw_flag() {
+        type B = crate::DefaultSnarkBackend;
+        type F = <B as SnarkBackend>::F;
+        let id = crate::types::TrackerID::from_usize;
+        let low = vec![
+            TrackerSumcheckClaim::new(id(0), F::from(1u64)),
+            TrackerSumcheckClaim::new_raw(id(1), F::from(2u64)),
+        ];
+        let high = vec![
+            TrackerSumcheckClaim::new_raw(id(2), F::from(3u64)),
+            TrackerSumcheckClaim::new(id(3), F::from(4u64)),
+        ];
+
+        // Far apart, the two nvs get a bucket each; adjacent, they share one.
+        for (low_nv, high_nv, buckets) in [(2, 8, 2), (5, 6, 1)] {
+            let by_nv = BTreeMap::from([(low_nv, low.clone()), (high_nv, high.clone())]);
+            let plan = optimize_sumcheck_bucket_plans::<B>(
+                &[stats(low_nv, 4, 1), stats(high_nv, 4, 1)],
+                by_nv,
+                &model(),
+            );
+            assert_eq!(plan.len(), buckets);
+            let claims: Vec<_> = plan
+                .into_iter()
+                .flat_map(|bucket| bucket.sum_check_claims)
+                .collect();
+            assert_eq!(claims, [low.clone(), high.clone()].concat());
+            assert_eq!(
+                claims.iter().map(|c| c.is_raw()).collect::<Vec<_>>(),
+                [false, true, true, false]
+            );
+        }
+    }
+
     #[test]
     fn empty_input_returns_empty_plan() {
         assert!(pick_bucket_plan(&[], &model()).is_empty());

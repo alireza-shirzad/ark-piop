@@ -41,8 +41,8 @@ pub fn batch_z_check_claims<T: TrackerCore>(tracker: &mut T) -> SnarkResult<()> 
 }
 
 /// Batch all pending sumcheck claims into one via random linear combination.
-/// Returns the individual claims (id -> claimed sum); the prover embeds this
-/// map in the proof, the verifier can ignore it.
+/// Returns the individual non-raw claims (id -> claimed sum); the prover
+/// embeds this map in the proof, the verifier can ignore it.
 pub fn batch_s_check_claims<T: TrackerCore>(
     tracker: &mut T,
 ) -> SnarkResult<BTreeMap<TrackerID, T::F>> {
@@ -57,8 +57,13 @@ pub fn batch_s_check_claims<T: TrackerCore>(
     let mut sc_sum = T::F::zero();
 
     let claims = tracker.take_sumcheck_claims();
-    let individual: BTreeMap<TrackerID, T::F> =
-        claims.iter().map(|c| (c.id(), c.claim())).collect();
+    // The verifier computes a raw claim's sum itself and never looks it up,
+    // so sending it would only add unchecked bytes to the proof.
+    let individual: BTreeMap<TrackerID, T::F> = claims
+        .iter()
+        .filter(|c| !c.is_raw())
+        .map(|c| (c.id(), c.claim()))
+        .collect();
 
     for claim in claims {
         let ch = tracker.get_and_append_challenge(b"sumcheck challenge")?;

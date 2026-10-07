@@ -27,22 +27,59 @@ where
         claimed_sum: B::F,
     ) -> SnarkResult<()> {
         #[cfg(feature = "honest-prover")]
-        {
-            let evals = self.evaluations(poly_id);
-            let real_sum = cfg_iter!(evals).sum::<B::F>();
-            if real_sum != claimed_sum {
-                tracing::error!(
-                    "honest prover sumcheck mismatch: real_sum={:?} claimed_sum={:?}",
-                    real_sum,
-                    claimed_sum
-                );
-                return Err(ProverError(HonestProverError(FalseClaim)));
-            }
-        }
+        self.honest_sumcheck_claim_check(poly_id, claimed_sum)?;
         self.state
             .mv_pcs_substate
             .sum_check_claims
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
+        Ok(())
+    }
+
+    /// Adds a sumcheck claim whose sum the verifier derives from the protocol
+    /// instead of reading it from the proof. `claimed_sum` is over the
+    /// polynomial's own hypercube; the claim gets no entry in the proof's
+    /// claim map, and the verifier must add it with its own raw entry point.
+    pub(crate) fn add_mv_sumcheck_claim_raw(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        #[cfg(feature = "honest-prover")]
+        self.honest_sumcheck_claim_check(poly_id, claimed_sum)?;
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .push(TrackerSumcheckClaim::new_raw(poly_id, claimed_sum));
+        Ok(())
+    }
+
+    /// The pending sumcheck claims as `(id, claimed sum, raw)`, in order.
+    #[cfg(test)]
+    pub(crate) fn sumcheck_claims_snapshot(&self) -> Vec<(TrackerID, B::F, bool)> {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| (claim.id(), claim.claim(), claim.is_raw()))
+            .collect()
+    }
+
+    #[cfg(feature = "honest-prover")]
+    fn honest_sumcheck_claim_check(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        let evals = self.evaluations(poly_id);
+        let real_sum = cfg_iter!(evals).sum::<B::F>();
+        if real_sum != claimed_sum {
+            tracing::error!(
+                "honest prover sumcheck mismatch: real_sum={:?} claimed_sum={:?}",
+                real_sum,
+                claimed_sum
+            );
+            return Err(ProverError(HonestProverError(FalseClaim)));
+        }
         Ok(())
     }
 

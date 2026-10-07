@@ -127,6 +127,10 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .push(TrackerSumcheckClaim::new(id, claimed_sum));
     }
 
+    fn push_raw_sumcheck_claim(&mut self, id: TrackerID, claimed_sum: Self::F) -> SnarkResult<()> {
+        self.add_mv_sumcheck_claim_raw(id, claimed_sum)
+    }
+
     fn sumcheck_claims_len(&self) -> usize {
         self.state.mv_pcs_substate.sum_check_claims.len()
     }

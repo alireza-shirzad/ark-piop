@@ -41,6 +41,29 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
     }
 
+    /// Adds a sumcheck claim whose sum the verifier derived itself, over the
+    /// polynomial's own hypercube. The proof's claim map is not bound by the
+    /// transcript, so such a claim must never be compared against it: the
+    /// sum is lifted to the bucket by the verifier alone. The prover has to
+    /// add the same claim with its raw entry point.
+    pub(crate) fn add_mv_sumcheck_claim_raw(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .push(TrackerSumcheckClaim::new_raw(poly_id, claimed_sum));
+    }
+
+    /// The pending sumcheck claims as `(id, claimed sum, raw)`, in order.
+    #[cfg(test)]
+    pub(crate) fn sumcheck_claims_snapshot(&self) -> Vec<(TrackerID, B::F, bool)> {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| (claim.id(), claim.claim(), claim.is_raw()))
+            .collect()
+    }
+
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
         if let Some(terms) = self.state.virtual_polys.get(&poly_id) {
             trace!(?poly_id, ?terms, "add_mv_zerocheck_claim virtual");

@@ -212,7 +212,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // multi-bucket plan's round-0 `p(0)+p(1) != asserted_sum` check.
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
-            if let Some(proof_claims) = proof_claims.as_ref()
+            // The proof map is not bound by the transcript. A raw claim
+            // carries a sum the verifier derived, and letting an entry that
+            // happens to equal it choose the scaling would let the prover
+            // rescale the statement by a power of two; test the flag first.
+            if !claim.is_raw()
+                && let Some(proof_claims) = proof_claims.as_ref()
                 && let Some(proof_claim) = proof_claims.get(&claim.id())
                 && claim.claim() == *proof_claim
             {
@@ -223,9 +228,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 continue;
             }
 
-            // Gadget-added claim not present in the proof map (post-bucket
-            // additions from the second batching round). Mirror the
-            // prover's `equalize_mat_poly_nv_to(target_nv)` scaling.
+            // Raw claim, or a gadget-added claim not present in the proof map
+            // (post-bucket additions from the second batching round). Mirror
+            // the prover's `equalize_mat_poly_nv_to(target_nv)` scaling.
             let nv = poly_log_sizes
                 .get(&claim.id())
                 .copied()
@@ -676,7 +681,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let _reduce_guard = reduce_span.enter();
 
         let sum_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        for claim in sum_claims.into_iter() {
+        for mut claim in sum_claims.into_iter() {
             claims_reduced += 1;
             let new_id = reduce_poly(
                 self,
@@ -692,10 +697,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &mut expanded_oversized_terms,
                 target_nv,
             )?;
-            self.state
-                .mv_pcs_substate
-                .sum_check_claims
-                .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+            claim.set_id(new_id);
+            self.state.mv_pcs_substate.sum_check_claims.push(claim);
             if let Some(terms) = self.state.virtual_polys.get(&new_id) {
                 total_terms += terms.len();
             }

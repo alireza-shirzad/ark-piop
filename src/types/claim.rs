@@ -25,11 +25,26 @@ impl<F: PrimeField, PC: PCS<F>> TrackerEvalClaim<F, PC> {
 pub struct TrackerSumcheckClaim<F: PrimeField> {
     id: TrackerID,
     claim: F,
+    /// The claimed sum is over the polynomial's own hypercube and was fixed
+    /// by the protocol on both sides, so the verifier rescales it to the
+    /// bucket itself and never consults the proof's claim map for it.
+    raw: bool,
 }
 
 impl<F: PrimeField> TrackerSumcheckClaim<F> {
     pub(crate) fn new(id: TrackerID, claim: F) -> Self {
-        Self { id, claim }
+        Self {
+            id,
+            claim,
+            raw: false,
+        }
+    }
+    pub(crate) fn new_raw(id: TrackerID, claim: F) -> Self {
+        Self {
+            id,
+            claim,
+            raw: true,
+        }
     }
     pub(crate) fn claim(&self) -> F {
         self.claim
@@ -37,8 +52,14 @@ impl<F: PrimeField> TrackerSumcheckClaim<F> {
     pub(crate) fn id(&self) -> TrackerID {
         self.id
     }
+    pub(crate) fn is_raw(&self) -> bool {
+        self.raw
+    }
     pub(crate) fn set_claim(&mut self, claim: F) {
         self.claim = claim;
+    }
+    pub(crate) fn set_id(&mut self, id: TrackerID) {
+        self.id = id;
     }
 }
 

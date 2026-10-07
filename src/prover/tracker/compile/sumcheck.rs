@@ -447,7 +447,7 @@ where
         let _reduce_guard = reduce_span.enter();
 
         let sum_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        for claim in sum_claims.into_iter() {
+        for mut claim in sum_claims.into_iter() {
             claims_reduced += 1;
             let new_id = reduce_poly(
                 self,
@@ -464,10 +464,8 @@ where
                 &mut expanded_oversized_terms,
                 target_nv,
             )?;
-            self.state
-                .mv_pcs_substate
-                .sum_check_claims
-                .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+            claim.set_id(new_id);
+            self.state.mv_pcs_substate.sum_check_claims.push(claim);
             if let Some(vpoly) = self.virt_poly(new_id) {
                 total_terms += vpoly.len();
             }

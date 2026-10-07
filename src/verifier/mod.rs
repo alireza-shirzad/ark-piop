@@ -91,6 +91,13 @@ where
         Self::new_from_tracker(tracker)
     }
 
+    /// Shared handle to the tracker, for protocol code that prover and
+    /// verifier run through [`crate::tracker_core::TrackerCore`].
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
+        Rc::clone(&self.tracker_rc)
+    }
+
     /// Get the range tracked oracle given the label
     #[instrument(level = "debug", skip_all)]
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
@@ -263,6 +270,17 @@ where
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum);
     }
+
+    /// Add a sumcheck claim whose sum the verifier derived itself; see
+    /// [`VerifierTracker::add_mv_sumcheck_claim_raw`].
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[instrument(level = "debug", skip(self))]
+    pub(crate) fn add_mv_sumcheck_claim_raw(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_sumcheck_claim_raw(poly_id, claimed_sum);
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id);
@@ -370,7 +388,7 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+    pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
         let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
         if lookup_claims.is_empty() {
             return Ok(());
