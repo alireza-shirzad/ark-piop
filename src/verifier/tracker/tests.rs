@@ -490,3 +490,66 @@ fn malformed_bucket_sumcheck_is_an_error_not_a_panic() {
     bare.sc_subproof = None;
     assert_check_failed(verify(bare));
 }
+
+/// A claim on a polynomial whose every term has a zero coefficient: its
+/// terms are dropped on the way to the sumcheck, which must still run over
+/// the bucket's hypercube. `(zero claim nv, nv of an ordinary claim next
+/// to it)`: alone in the proof, the widest claim of a shared bucket, a
+/// narrower one, and with a bucket to itself.
+#[test]
+fn claim_on_a_zero_polynomial_gets_a_sumcheck_of_its_bucket_size() {
+    let plans: [(usize, Option<usize>, usize); 6] = [
+        (3, None, 1),
+        (1, None, 1),
+        (5, Some(4), 1),
+        (7, Some(8), 1),
+        (3, Some(8), 2),
+        (8, Some(3), 2),
+    ];
+    for (zero_nv, other_nv, buckets) in plans {
+        let run = |claimed: F| -> SnarkResult<()> {
+            let (mut prover, mut verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+            let committed = prover
+                .track_and_commit_mat_mv_poly(&mle(&column(zero_nv, 3)))
+                .unwrap();
+            let zero = committed.mul_scalar_poly(F::zero());
+            let mut ids = vec![committed.id()];
+            let other_sum = other_nv.map(|nv| {
+                let evals = column(nv, 5);
+                let other = prover.track_and_commit_mat_mv_poly(&mle(&evals)).unwrap();
+                prover
+                    .add_mv_sumcheck_claim(other.id(), sum(&evals))
+                    .unwrap();
+                ids.push(other.id());
+                sum(&evals)
+            });
+            if cfg!(feature = "honest-prover") && !claimed.is_zero() {
+                assert!(prover.add_mv_sumcheck_claim(zero.id(), claimed).is_err());
+                return Err(SnarkError::VerifierError(
+                    VerifierError::VerifierCheckFailed("refused by the honest prover".to_string()),
+                ));
+            }
+            prover.add_mv_sumcheck_claim(zero.id(), claimed).unwrap();
+            let proof = prover.build_proof()?;
+            let proof_buckets = proof.sc_subproof.as_ref().unwrap().buckets();
+            assert_eq!(proof_buckets.len(), buckets);
+            assert!(
+                proof_buckets
+                    .iter()
+                    .all(|bucket| bucket.sc_aux_info().max_degree >= 1)
+            );
+
+            verifier.set_proof(proof);
+            let committed = verifier.track_mv_com_by_id(ids[0])?;
+            let zero = committed.mul_scalar_oracle(F::zero());
+            if let Some(other_sum) = other_sum {
+                let other = verifier.track_mv_com_by_id(ids[1])?;
+                verifier.add_mv_sumcheck_claim(other.id(), other_sum);
+            }
+            verifier.add_mv_sumcheck_claim(zero.id(), claimed);
+            verifier.verify()
+        };
+        run(F::zero()).unwrap();
+        assert_check_failed(run(F::one()));
+    }
+}

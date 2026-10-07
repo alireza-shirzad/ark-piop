@@ -8,8 +8,15 @@ where
     B: SnarkBackend,
 {
     // TODO: Is this only used to be compatible with the hyperplonk code?
+    /// The polynomial `id` over `nv` variables, in the sumcheck's own form.
+    ///
+    /// `nv` is the size of the hypercube the claim on `id` is over, which
+    /// the caller knows and the polynomial does not: the claim was scaled
+    /// to it and every factor lifted to it, but the size registered for
+    /// `id` is the widest of its terms and falls below `nv` once the terms
+    /// that reach it have a zero coefficient and are dropped.
     #[instrument(level = "debug", skip_all)]
-    pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID) -> HPVirtualPolynomial<B::F> {
+    pub(crate) fn to_hp_virtual_poly(&self, id: TrackerID, nv: usize) -> HPVirtualPolynomial<B::F> {
         let mat_poly = self.state.mv_pcs_substate.materialized_polys.get(&id);
         if let Some(poly) = mat_poly {
             return HPVirtualPolynomial::new_from_mle(poly, B::F::one());
@@ -20,19 +27,20 @@ where
             panic!("Unknown poly id: {:?}", id);
         }
         let poly = poly.unwrap(); // Invariant: contains only material PolyIDs
-        if poly.is_empty() {
-            return HPVirtualPolynomial::new(1);
-        }
-        // Use the tracker's registered nv: a bare-constant term has an empty
-        // factor list (peeking would panic), and the registered value is what
-        // `equalize_mat_poly_nv_to` scaled the sumcheck claim to expect — a
-        // material nv bumped by an earlier bucket would no longer match.
-        let nv = self.poly_nv(id);
 
         // Optimize away linear combinations of committed polynomials by
         // materializing them into fresh MLEs (no new commitments). Identical
         // linear combos are deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
-        let (poly_terms, optimized_terms) = self.optimize_linear_terms(poly, nv);
+        let (poly_terms, mut optimized_terms) = self.optimize_linear_terms(poly, nv);
+        if poly_terms.is_empty() && optimized_terms.is_empty() {
+            // The zero polynomial still gets a sumcheck of `nv` rounds and
+            // degree 1, which is what the verifier expects of this bucket.
+            let zero = MLE::new(
+                ark_poly::DenseMultilinearExtension::from_evaluations_vec(0, vec![B::F::zero()]),
+                (nv > 0).then_some(nv),
+            );
+            optimized_terms.push((B::F::zero(), vec![Arc::new(zero)]));
+        }
 
         let mut arith_virt_poly: HPVirtualPolynomial<B::F> = HPVirtualPolynomial::new(nv);
         for (prod_coef, prod) in poly_terms.iter() {
