@@ -33,7 +33,11 @@ use crate::{
     },
     errors::{SnarkError, SnarkResult},
     pcs::PCS,
-    piop::{structs::SumcheckProof, sum_check::SumCheck},
+    piop::{
+        logup_gkr::{FractionInstance, GkrClaims, prove_batch},
+        structs::SumcheckProof,
+        sum_check::SumCheck,
+    },
     setup::{
         errors::SetupError::NoRangePoly,
         structs::{SNARKPk, SNARKVk},
@@ -511,6 +515,19 @@ where
     // Peek at the next TrackerID without incrementing the counter
     pub(crate) fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
+    }
+
+    /// Run one LogUp-GKR batch on the tracker's transcript and stash its
+    /// proof for `compile_proof`. Subproofs are positional, so the verifier
+    /// must run its batches in the same sequence. The returned claims still
+    /// have to be discharged by the caller.
+    pub(crate) fn prove_logup_gkr(
+        &mut self,
+        instances: Vec<FractionInstance<B::F>>,
+    ) -> SnarkResult<GkrClaims<B::F>> {
+        let (proof, claims) = prove_batch(instances, &mut self.state.transcript)?;
+        self.state.logup_gkr_subproofs.push(proof);
+        Ok(claims)
     }
 }
 

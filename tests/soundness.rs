@@ -150,6 +150,32 @@ fn proof_envelope_rejects_wrong_version() {
     }
 }
 
+/// Version 2 had no LogUp-GKR subproofs. With that field last, cutting the
+/// empty list off a current proof gives exactly its version-2 encoding,
+/// which must be refused by its tag, and must not decode under the current
+/// tag either.
+#[test]
+fn proof_envelope_rejects_version_2() {
+    let (mut prover, _verifier) = test_prelude::<B>().unwrap();
+    let nv = 3usize;
+    let evals: Vec<F> = (0..(1 << nv)).map(|i| F::from(i as u64)).collect();
+    let poly = MLE::from_evaluations_vec(nv, evals.clone());
+    let tracked = prover.track_and_commit_mat_mv_poly(&poly).unwrap();
+    let sum: F = evals.iter().copied().fold(F::zero(), |a, b| a + b);
+    prover.add_mv_sumcheck_claim(tracked.id(), sum).unwrap();
+    let proof = prover.build_proof().unwrap();
+    assert!(proof.logup_gkr_subproofs.is_empty());
+
+    let mut bytes = proof.to_bytes().unwrap();
+    let empty_list = bytes.split_off(bytes.len() - 8);
+    assert_eq!(empty_list, [0u8; 8]);
+    assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+
+    bytes[0] = 2;
+    let err = SNARKProof::<B>::from_bytes(&bytes).expect_err("version 2 must fail");
+    assert!(matches!(err, SnarkError::Artifact(_)), "got {err:?}");
+}
+
 /// An empty buffer must fail with a descriptive error, not a panic.
 #[test]
 fn proof_envelope_rejects_empty_buffer() {

@@ -14,7 +14,11 @@ use crate::{
     },
     errors::SnarkResult,
     pcs::PCS,
-    piop::{PIOP, lookup_check},
+    piop::{
+        PIOP,
+        logup_gkr::{FractionInstance, GkrClaims},
+        lookup_check,
+    },
     prover::structs::polynomial::TrackedPoly,
     setup::structs::SNARKPk,
     types::{CommitmentBinding, TrackerID},
@@ -406,6 +410,20 @@ where
             tracker.evaluations(super_id)
         );
         tracker.add_mv_lookup_claim(super_id, sub_id)
+    }
+
+    /// Run one LogUp-GKR batch; see [`ProverTracker::prove_logup_gkr`].
+    ///
+    /// The tracker stays mutably borrowed for the whole batch, which is why
+    /// the instances come in by value: reading a `TrackedPoly`'s evaluations
+    /// or id borrows the tracker too, so it has to happen before this call.
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) fn prove_logup_gkr(
+        &mut self,
+        instances: Vec<FractionInstance<B::F>>,
+    ) -> SnarkResult<GkrClaims<B::F>> {
+        self.tracker_rc.borrow_mut().prove_logup_gkr(instances)
     }
 
     /// Get the next TrackerID to be used

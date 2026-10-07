@@ -28,7 +28,8 @@
 //! polynomials the statement is about. For an instance declared with unit
 //! numerators the numerator claim is exactly 1 and needs no opening.
 
-// Nothing calls into the module until the tracker integration lands.
+// The trackers can run a batch, but nothing builds an instance or reads a
+// claim until the lookup path switches over.
 #![cfg_attr(not(test), expect(dead_code))]
 
 mod layer;
@@ -42,7 +43,6 @@ use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
 use crate::{errors::SnarkResult, transcript::Tr};
 
-#[cfg_attr(not(test), expect(unused_imports))]
 pub(crate) use {prover::prove_batch, verifier::verify_batch};
 
 /// Largest instance (in variables) the verifier accepts. Shapes come from

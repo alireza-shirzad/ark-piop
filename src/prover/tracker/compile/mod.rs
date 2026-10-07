@@ -106,6 +106,7 @@ where
             uv_pcs_subproof,
             miscellaneous_field_elements: take(&mut self.state.miscellaneous_field_elements),
             miscellaneous_field_vectors: take(&mut self.state.miscellaneous_field_vectors),
+            logup_gkr_subproofs: take(&mut self.state.logup_gkr_subproofs),
         })
     }
 }

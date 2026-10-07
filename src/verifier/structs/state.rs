@@ -1,5 +1,6 @@
 use crate::{
     SnarkBackend,
+    piop::logup_gkr::LogupGkrProof,
     prover::structs::proof::PCSSubproof,
     types::{PCSOpeningProof, claim::TrackerLookupClaim},
 };
@@ -43,6 +44,9 @@ where
     pub indexed_tracked_polys: BTreeMap<String, TrackedOracle<B>>,
     pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: VerifierPCSubstate<B::F, B::UvPCS>,
+    /// How many of the proof's LogUp-GKR subproofs have been verified. They
+    /// carry no labels: the n-th run of the protocol reads the n-th one.
+    pub logup_gkr_subproofs_consumed: usize,
 }
 
 #[derive(Derivative)]
@@ -76,6 +80,7 @@ where
     pub uv_pcs_subproof: ProcessedPCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
+    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
 }
 
 impl<B> ProcessedProof<B>
@@ -93,6 +98,7 @@ where
             uv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.uv_pcs_subproof),
             miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
             miscellaneous_field_vectors: proof.miscellaneous_field_vectors.clone(),
+            logup_gkr_subproofs: proof.logup_gkr_subproofs.clone(),
         }
     }
 }

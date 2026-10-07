@@ -951,7 +951,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&mut self) -> SnarkResult<()> {
         // Fail fast if the caller forgot to set a proof.
-        self.proof_or_err()?;
+        let proof = self.proof_or_err()?;
+        // A subproof nobody verified is either unaccounted-for bytes or a
+        // batch this verifier never ran while the prover did.
+        let consumed = self.state.logup_gkr_subproofs_consumed;
+        if consumed != proof.logup_gkr_subproofs.len() {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "proof carries {} LogUp-GKR subproofs, {consumed} were verified",
+                    proof.logup_gkr_subproofs.len()
+                )),
+            ));
+        }
         // Verify the sumcheck proofs
         self.verify_sc_proofs()?;
         // Verify the multivariate pcs proofs

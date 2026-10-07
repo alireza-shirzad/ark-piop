@@ -18,7 +18,11 @@ use crate::{
     arithmetic::mat_poly::mle::MLE,
     errors::SnarkResult,
     pcs::PolynomialCommitment,
-    piop::{PIOP, lookup_check},
+    piop::{
+        PIOP,
+        logup_gkr::{GkrClaims, GkrShape},
+        lookup_check,
+    },
     prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk,
     types::{CommitmentBinding, TrackerID},
@@ -302,6 +306,14 @@ where
         self.tracker_rc
             .borrow_mut()
             .add_mv_lookup_claim(super_id, sub_id)
+    }
+
+    /// Verify the proof's next LogUp-GKR subproof; see
+    /// [`VerifierTracker::verify_logup_gkr`].
+    #[cfg_attr(not(test), expect(dead_code))]
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) fn verify_logup_gkr(&mut self, shape: &[GkrShape]) -> SnarkResult<GkrClaims<B::F>> {
+        self.tracker_rc.borrow_mut().verify_logup_gkr(shape)
     }
 
     #[instrument(level = "debug", skip(self))]

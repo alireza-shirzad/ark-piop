@@ -13,9 +13,14 @@ use crate::{
 ///
 /// v2: `PCSSubproof.constant_num_vars` carries per-constant `num_vars` so the
 /// verifier mirrors `poly_log_sizes`; v1 hardcoded 0, causing gen_id drift.
-pub const PROOF_ENCODING_VERSION: u8 = 2;
+///
+/// v3: `SNARKProof.logup_gkr_subproofs` carries the LogUp-GKR runs. Their
+/// message shapes are part of the format: changing what a
+/// [`LogupGkrProof`] holds per round or per layer is another bump.
+pub const PROOF_ENCODING_VERSION: u8 = 3;
 use crate::{
     pcs::PCS,
+    piop::logup_gkr::LogupGkrProof,
     types::{CommitmentID, ConstantID, PointID, PointMap, SumcheckSubproof, TrackerID},
 };
 use ark_ff::PrimeField;
@@ -34,6 +39,10 @@ where
     pub uv_pcs_subproof: PCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
+    /// One proof per LogUp-GKR run, in the order the protocol ran them. Kept
+    /// last: wrappers that serialize a proof without the version tag then
+    /// fail to decode an older layout instead of misreading it.
+    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
 }
 
 /// The PCS subproof of a SNARK for the ZKSQL protocol.
@@ -171,6 +180,7 @@ where
         let miscellaneous_field_vectors = self
             .miscellaneous_field_vectors
             .serialized_size(Compress::Yes);
+        let logup_gkr_subproofs = self.logup_gkr_subproofs.serialized_size(Compress::Yes);
         // +1 for the version byte `to_bytes` prepends, matching on-disk size.
         let total = self.serialized_size(Compress::Yes) + 1;
 
@@ -209,6 +219,10 @@ where
                 (
                     "miscellaneous_field_vectors",
                     SizeBreakdown::leaf(miscellaneous_field_vectors),
+                ),
+                (
+                    "logup_gkr_subproofs",
+                    SizeBreakdown::leaf(logup_gkr_subproofs),
                 ),
             ],
         ))

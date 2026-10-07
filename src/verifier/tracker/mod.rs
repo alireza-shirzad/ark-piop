@@ -15,7 +15,11 @@ use crate::{
     arithmetic::{f_vec_short_str, mat_poly::mle::MLE},
     errors::{SnarkError, SnarkResult},
     pcs::{PCS, PolynomialCommitment},
-    piop::{errors::PolyIOPErrors, sum_check::SumCheck},
+    piop::{
+        errors::PolyIOPErrors,
+        logup_gkr::{GkrClaims, GkrShape, verify_batch},
+        sum_check::SumCheck,
+    },
     prover::structs::proof::SNARKProof,
     setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     types::{
@@ -121,6 +125,32 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     // Set the proof for the tracker from a borrowed proof
     pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(proof));
+        // The count belongs to the proof it was advanced on.
+        self.state.logup_gkr_subproofs_consumed = 0;
+    }
+
+    /// Verify the next LogUp-GKR subproof of the proof against `shape`, on
+    /// the tracker's transcript. Subproofs are consumed in order, so both
+    /// sides must run their batches in the same sequence. The returned
+    /// claims still have to be discharged by the caller.
+    pub(crate) fn verify_logup_gkr(&mut self, shape: &[GkrShape]) -> SnarkResult<GkrClaims<B::F>> {
+        let next = self.state.logup_gkr_subproofs_consumed;
+        // Direct field access so the borrow of self.proof doesn't conflict
+        // with the &mut borrow of self.state.transcript.
+        let subproof = self
+            .proof
+            .as_ref()
+            .ok_or(SnarkError::VerifierError(VerifierError::ProofNotReceived))?
+            .logup_gkr_subproofs
+            .get(next)
+            .ok_or_else(|| {
+                SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
+                    "proof has no LogUp-GKR subproof at index {next}"
+                )))
+            })?;
+        let claims = verify_batch(shape, subproof, &mut self.state.transcript)?;
+        self.state.logup_gkr_subproofs_consumed = next + 1;
+        Ok(claims)
     }
 
     /// Return the currently-set proof, or `VerifierError::ProofNotReceived`.
