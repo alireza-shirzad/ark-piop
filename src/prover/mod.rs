@@ -437,7 +437,16 @@ where
         self.tracker_rc.borrow_mut().peek_next_id()
     }
 
-    #[instrument(level = "debug", skip_all)]
+    /// Reduce the queued lookup claims to sumcheck claims. Runs before the
+    /// subproofs are compiled, outside every timed subproof span, so it gets
+    /// a `bench_stats` span of its own for subscribers to time. The span
+    /// covers the whole function: it opens even with nothing to reduce.
+    #[instrument(
+        target = "bench_stats",
+        level = "info",
+        name = "reduce_lookup_claims",
+        skip_all
+    )]
     pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
         let lookup_claims = {
             let mut tracker = self.tracker_rc.borrow_mut();

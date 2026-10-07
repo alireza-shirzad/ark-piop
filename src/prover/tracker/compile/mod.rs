@@ -214,6 +214,25 @@ mod tests {
         }
     }
 
+    /// The lookup reduction is timed by a span of its own, not by one of
+    /// the subproof or region spans. It has to open on a compile with no
+    /// lookup claims too, or a subscriber could not tell "nothing to reduce"
+    /// from a span that was renamed away.
+    #[test]
+    fn lookup_reduction_span_opens_on_every_compile() {
+        let name = "reduce_lookup_claims";
+        let capture = capture_empty_compile();
+        let seen = capture.spans.lock().unwrap();
+        let (_, target, level) = seen
+            .iter()
+            .find(|(span_name, _, _)| span_name == name)
+            .expect("the lookup reduction span never opened");
+        assert_eq!(target, SNARK_PROVER_SPAN_TARGET);
+        assert_eq!(*level, tracing::Level::INFO);
+        assert!(snark_prover_timing_key(name).is_none());
+        assert!(!is_sc_region_span(name));
+    }
+
     /// The phase strings are a wire contract with the dashboard, and an
     /// unrecognised phase silently degrades to a raw label. Also pins that
     /// snapshots fire on early-return paths — the `#[piop_stage]` macro
