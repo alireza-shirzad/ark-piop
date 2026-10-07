@@ -33,6 +33,7 @@ use crate::{
     },
     setup::KeyGenerator,
     test_utils::prelude_with_vars,
+    tracker_core::TrackerCore,
     types::{SharedArgConfig, SumcheckSubproof, TrackerID, artifact::Artifact},
     verifier::{
         ArgVerifier,
@@ -133,20 +134,44 @@ fn assert_false_statement_rejected<T>(res: SnarkResult<T>) {
     }
 }
 
-/// The two sides hold the same position in the id sequence, the same
-/// pending sumcheck claims and the same transcript. The transcript is probed
-/// on copies.
+/// The two sides hold the same position in the id sequence, polynomials of
+/// the same size under every id, the same pending sumcheck claims on
+/// polynomials of the same degree, and the same transcript. The transcript
+/// is probed on copies.
 fn assert_in_sync(prover: &ArgProver<B>, verifier: &ArgVerifier<B>) {
     let prover_tracker = prover.tracker().borrow().clone();
     let verifier = verifier.fork();
+    let claims = prover_tracker.sumcheck_claims_snapshot();
     assert_eq!(
-        prover_tracker.sumcheck_claims_snapshot(),
+        claims,
         verifier.tracker().borrow().sumcheck_claims_snapshot(),
         "prover and verifier hold different sumcheck claims"
     );
+    // The sumcheck buckets are planned from the sizes and degrees of the
+    // claimed polynomials, and products are ordered by the ids of their
+    // factors: equally many ids is not enough.
+    let next = TrackerCore::peek_next_id(&prover_tracker);
+    {
+        let verifier_tracker = verifier.tracker();
+        let verifier_tracker = verifier_tracker.borrow();
+        for (id, _, _) in &claims {
+            assert_eq!(
+                TrackerCore::virt_poly_degree(&prover_tracker, *id),
+                TrackerCore::virt_poly_degree(&*verifier_tracker, *id),
+                "prover and verifier give claimed polynomial {id} different degrees"
+            );
+        }
+        for id in (0..next.to_int()).map(TrackerID::from_usize) {
+            assert_eq!(
+                TrackerCore::poly_nv(&prover_tracker, id),
+                TrackerCore::poly_nv(&*verifier_tracker, id),
+                "prover and verifier hold polynomials of different sizes under {id}"
+            );
+        }
+    }
     let mut prover = ArgProver::new_from_tracker(prover_tracker);
     let mut verifier = verifier;
-    assert_eq!(prover.peek_next_id(), verifier.peek_next_id());
+    assert_eq!(next, verifier.peek_next_id());
     assert_eq!(
         prover.get_and_append_challenge(b"parity probe").unwrap(),
         verifier.get_and_append_challenge(b"parity probe").unwrap(),
@@ -994,6 +1019,80 @@ fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
     run((unsplit, usize::MAX)).unwrap();
 }
 
+/// The budget cuts the batch the lookup claims and the deferred keyed sums
+/// are reduced in like any other: a stack of two sub columns, a wider sub
+/// column, the table, and the two sides of a permutation, with weighted
+/// sizes 48, 96, 64, 96 and 96.
+#[test]
+fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
+    let table = fv(0..16);
+    let subs = [in_table(3, 16, 1), in_table(3, 16, 2), in_table(5, 16, 3)];
+    let p = fv((0..32).map(|i| i + 100));
+    let q = fv((0..32).map(|i| (i * 13 + 5) % 32 + 100));
+
+    let run = |budget: usize, subs: &[Vec<F>; 3], q: &[F]| -> SnarkResult<Vec<usize>> {
+        let (mut prover, mut verifier) = setup_with_budgets(budget, budget);
+        let mut columns = vec![&table[..]];
+        columns.extend(subs.iter().map(|sub| &sub[..]));
+        columns.extend([&p[..], q]);
+        let handles: Vec<TrackedPoly<B>> =
+            columns.iter().map(|col| commit(&mut prover, col)).collect();
+        for sub in &handles[1..4] {
+            prover.add_mv_lookup_claim(handles[0].id(), sub.id())?;
+        }
+        prover.add_mv_keyed_sum_claim(KeyedSumcheckProverInput {
+            fxs: vec![handles[4].clone()],
+            gxs: vec![handles[5].clone()],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        })?;
+        let mut reduced = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        reduced.reduce_lookup_claims()?;
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        let oracles = handles
+            .iter()
+            .map(|handle| verifier.track_mv_com_by_id(handle.id()))
+            .collect::<SnarkResult<Vec<_>>>()?;
+        for sub in &oracles[1..4] {
+            verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())?;
+        }
+        verifier.add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+            fxs: vec![oracles[4].clone()],
+            gxs: vec![oracles[5].clone()],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        })?;
+        verifier.reduce_lookup_claims()?;
+        assert_in_sync(&reduced, &verifier);
+        verifier.verify()?;
+        Ok(run_lengths(&proof))
+    };
+
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+    for (budget, runs) in [
+        (unsplit, vec![5]),
+        // The table fits beside one side of the permutation, exactly.
+        (160, vec![2, 2, 1]),
+        (150, vec![2, 1, 1, 1]),
+        (0, vec![1; 5]),
+    ] {
+        assert_eq!(run(budget, &subs, &q).unwrap(), runs, "budget {budget}");
+
+        // A value outside the table in the stack and in the wide column,
+        // whose table is one or two runs away, and a `q` that repeats a row.
+        for bad_sub in [1, 2] {
+            let mut subs = subs.clone();
+            subs[bad_sub][5] = F::from(16u64);
+            assert_false_statement_rejected(run(budget, &subs, &q));
+        }
+        let mut bad_q = q.clone();
+        bad_q[31] = bad_q[30];
+        assert_false_statement_rejected(run(budget, &subs, &bad_q));
+    }
+}
+
 // ─── Layout of the batch ─────────────────────────────────────────────────
 
 /// `add_mv_lookup_claim` for every sub against one committed table, with
@@ -1765,4 +1864,424 @@ fn stacked_instance_lays_its_entries_out_by_row_then_entry() {
         Numerator::One => panic!("the stack has multiplicities"),
     }
     assert_eq!(instances[1].den.len(), 4);
+}
+
+// ─── Claims of every kind of instance ────────────────────────────────────
+
+/// Weighted columns of one size share a stacked instance: one claim on the
+/// weighted sum of their columns and one on that of their multiplicities.
+/// A committed column or weight is off in either entry of the stack and the
+/// prover runs the GKR on what the table counts.
+#[test]
+fn gkr_on_fake_leaves_of_a_stacked_weighted_instance_is_rejected() {
+    let table = fv(0..8);
+    // Columns 2 and 4 with the weights 3 and 5.
+    let entries = [
+        in_table(3, 8, 1),
+        fv(1..9),
+        in_table(3, 8, 2),
+        fv((0..8).map(|i| 3 * i + 2)),
+    ];
+    let counts = tally(
+        &table,
+        &[
+            (&entries[0], Some(&entries[1])),
+            (&entries[2], Some(&entries[3])),
+        ],
+    );
+    let session = |entries: &[Vec<F>; 4]| {
+        let mut columns = vec![table.clone(), counts.clone()];
+        columns.extend_from_slice(entries);
+        let f = vec![(2, Some(3)), (4, Some(5))];
+        Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
+    };
+    let honest = session(&entries);
+    let stacked = &honest.plan()[0];
+    assert_eq!((stacked.claim_nv, stacked.stack_log), (3, 1));
+    assert!(stacked.mults.is_some());
+    honest.prove_and_verify().unwrap();
+
+    for fake_at in 0..4 {
+        let mut committed = entries.clone();
+        committed[fake_at][5] += F::from(8u64);
+        let cheater = session(&committed);
+        let evals = BTreeMap::from([(cheater.ids[2 + fake_at], entries[fake_at].clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    }
+}
+
+/// The table side is claimed like any other: the committed table lacks a
+/// value of the sub column and the prover runs the GKR on a table that has
+/// it, with the committed multiplicities counting that one.
+#[test]
+fn gkr_on_a_fake_table_with_true_column_claim_is_rejected() {
+    let table = fv(0..8);
+    let mut sub = in_table(3, 8, 1);
+    sub[4] = F::from(9u64);
+    let mut fake_table = table.clone();
+    fake_table[0] = F::from(9u64);
+
+    let columns = [table, tally(&fake_table, &[(&sub, None)]), sub];
+    let session = Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])]);
+    let evals = BTreeMap::from([(session.ids[0], fake_table)]);
+    assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+}
+
+/// A unit-numerator instance without variables has its root denominator as
+/// its only claim: the committed key is 6, the table counts 7 and the GKR
+/// runs on 7.
+#[test]
+fn tampered_root_of_an_nv0_unit_instance_is_rejected() {
+    let table = fv(0..8);
+    let session = |key: u64| {
+        let columns = [table.clone(), tally(&table, &[(&fv([7]), None)]), fv([key])];
+        Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])])
+    };
+    let honest = session(7);
+    assert_eq!(honest.plan()[0].n_vars(), 0);
+    assert!(honest.plan()[0].mults.is_none());
+    honest.prove_and_verify().unwrap();
+
+    let cheater = session(6);
+    let evals = BTreeMap::from([(cheater.ids[2], fv([7]))]);
+    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+}
+
+/// An entry with one constant operand still has a claim on the other one:
+/// a constant column with committed weights that are off, and a committed
+/// column that leaves the table under a constant weight. The prover runs
+/// the GKR on what the table counts.
+#[test]
+fn gkr_on_fake_leaves_beside_a_constant_operand_is_rejected() {
+    let table = fv(0..16);
+    let keys = in_table(3, 16, 1);
+    let weights = fv(1..9);
+    let counts = tally(
+        &table,
+        &[(&fv([7; 8]), Some(&weights)), (&keys, Some(&fv([4; 8])))],
+    );
+    let session = |keys: &[F], weights: &[F]| {
+        let columns = [
+            table.clone(),
+            counts.clone(),
+            keys.to_vec(),
+            weights.to_vec(),
+        ];
+        let mut session = Session::new(&columns, &[], &[]);
+        let constant = |v: u64| KeyedTerm::Constant {
+            value: F::from(v),
+            nv: 3,
+        };
+        session.relations = vec![KeyedSumRelation {
+            fxs: vec![constant(7), KeyedTerm::Poly(session.ids[2])],
+            mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), Some(constant(4))],
+            gxs: vec![KeyedTerm::Poly(session.ids[0])],
+            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+        }];
+        session
+    };
+    session(&keys, &weights).prove_and_verify().unwrap();
+
+    let mut bad_weights = weights.clone();
+    bad_weights[2] += F::one();
+    let cheater = session(&keys, &bad_weights);
+    let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
+    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+
+    let mut bad_keys = keys.clone();
+    bad_keys[2] = F::from(16u64);
+    let cheater = session(&bad_keys, &weights);
+    let evals = BTreeMap::from([(cheater.ids[2], keys.clone())]);
+    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+}
+
+/// An input claim is a sum over the hypercube the tracker holds for the
+/// claimed polynomial. Were the instance narrower than its column, the
+/// claim would bind another statement than the one the GKR ran on, so the
+/// schedule refuses it.
+#[test]
+fn input_claim_on_a_polynomial_of_another_size_than_its_instance_is_refused() {
+    use super::reduction::{VerifyingParty, push_input_claims};
+
+    let (mut prover, verifier) = setup();
+    let column = commit(&mut prover, &in_table(3, 8, 1)).id();
+    let proof = prover.build_proof().unwrap();
+    let instance = |nv: usize| InstancePlan {
+        relation: 0,
+        side: Side::F,
+        claim_nv: nv,
+        stack_log: 0,
+        cols: Operand::Polys {
+            ids: vec![column],
+            nv,
+        },
+        mults: None,
+    };
+    let claims = |nv: usize| GkrClaims {
+        point: fv(2..2 + nv as u64),
+        roots: vec![[F::one(), F::one()]],
+        inputs: vec![[F::one(), F::from(5u64)]],
+    };
+    let push = |nv: usize| {
+        let mut verifier = verifier.fork();
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(column).unwrap();
+        let tracker = verifier.tracker();
+        let mut tracker = tracker.borrow_mut();
+        let pushed = push_input_claims(
+            &mut *tracker,
+            &VerifyingParty,
+            &[instance(nv)],
+            F::from(7u64),
+            &claims(nv),
+        );
+        pushed.map(|()| tracker.sumcheck_claims_snapshot().len())
+    };
+    // The column has three variables.
+    assert_eq!(push(3).unwrap(), 1);
+    assert_verifier_error(push(2).unwrap_err());
+}
+
+/// The multiplicities of a lookup are in the transcript before `gamma` is
+/// drawn. A prover that sees `gamma` first balances any sub column against
+/// the table with one field-valued multiplicity, and everything it then
+/// proves about its commitments is true. This one is consistent with a
+/// verifier that would draw `gamma` before absorbing the multiplicities.
+#[test]
+fn multiplicities_chosen_after_gamma_are_rejected() {
+    use super::reduction::push_input_claims;
+    use ark_ff::Field;
+
+    let table = fv(0..8);
+    // The lookup reduced by hand: the multiplicities committed before or
+    // after `gamma`, then the one GKR run and its input claims.
+    let run = |sub: &[F], gamma_first: bool| -> SnarkResult<()> {
+        let (mut prover, mut verifier) = setup();
+        let table_id = commit(&mut prover, &table).id();
+        let sub_id = commit(&mut prover, sub).id();
+        let (gamma, counts_id) = if gamma_first {
+            let gamma = prover.get_and_append_challenge(b"gamma")?;
+            let sub_side: F = sub.iter().map(|v| (*v - gamma).inverse().unwrap()).sum();
+            let mut counts = vec![F::zero(); table.len()];
+            counts[0] = sub_side * (table[0] - gamma);
+            (gamma, commit(&mut prover, &counts).id())
+        } else {
+            let counts = commit(&mut prover, &tally(&table, &[(sub, None)])).id();
+            (prover.get_and_append_challenge(b"gamma")?, counts)
+        };
+        let relation = KeyedSumRelation {
+            fxs: vec![KeyedTerm::Poly(sub_id)],
+            mfxs: vec![None],
+            gxs: vec![KeyedTerm::Poly(table_id)],
+            mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
+        };
+        {
+            let tracker = prover.tracker();
+            let mut tracker = tracker.borrow_mut();
+            let plan = plan_instances(&*tracker, &[relation]).unwrap();
+            let mut party = ProvingParty {
+                evals: ColumnEvals::new(),
+            };
+            let claims = party.run(&mut *tracker, &plan, 0..plan.len(), gamma)?;
+            // The two sides balance under this `gamma`.
+            let ([p_f, q_f], [p_g, q_g]) = (claims.roots[0], claims.roots[1]);
+            assert_eq!(p_f * q_g, p_g * q_f);
+            push_input_claims(&mut *tracker, &party, &plan, gamma, &claims)?;
+        }
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(table_id)?;
+        verifier.track_mv_com_by_id(sub_id)?;
+        verifier.add_mv_lookup_claim(table_id, sub_id)?;
+        verifier.verify()
+    };
+
+    let inside = in_table(3, 8, 1);
+    let mut outside = inside.clone();
+    outside[2] = F::from(100u64);
+    assert_verifier_error(run(&outside, true).unwrap_err());
+    // Done by hand in the verifier's order, the reduction is the real one.
+    run(&inside, false).unwrap();
+}
+
+/// A stack counts towards the run budget with all its entries: four
+/// columns of 8 rows are one instance of 32 fractions, which does not fit
+/// in a run with its table.
+#[test]
+fn gkr_run_budget_counts_a_stack_at_its_full_height() {
+    let table = fv(0..8);
+    let subs: Vec<Vec<F>> = (0..4).map(|s| in_table(3, 8, s)).collect();
+    let counted: Vec<(&[F], Option<&[F]>)> = subs.iter().map(|sub| (&sub[..], None)).collect();
+    let mut columns = vec![table.clone(), tally(&table, &counted)];
+    columns.extend(subs.iter().cloned());
+    let f: Vec<Entry> = (2..6).map(|sub| (sub, None)).collect();
+    let relations = [(f, vec![(0, Some(1))])];
+
+    let mut session = Session::with_budgets((100, 100), &columns, &relations);
+    assert_eq!(session.plan()[0].stack_log, 2);
+    assert_eq!(weighted_sizes(&session.plan()), [96, 32]);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
+    let proof = session.prover.build_proof().unwrap();
+    assert_eq!(run_lengths(&proof), [1, 1]);
+    let verifier = session.verify_reduction(&proof).unwrap();
+    assert_in_sync(&after_reduction, &verifier);
+    verifier.verify().unwrap();
+}
+
+/// Three weighted columns of one size are a stack of two and a stack of
+/// one; each stack takes its own multiplicities, the single one included.
+#[test]
+fn every_stack_of_a_weighted_group_takes_its_own_multiplicities() {
+    let table = fv(0..16);
+    let fs: Vec<KeyedCol> = (0..3)
+        .map(|s| {
+            let weights = fv((0..8).map(|i| 10 * s + i + 1));
+            (in_table(3, 16, s), Some(weights))
+        })
+        .collect();
+    let g = table_side(&table, &fs);
+    let (plan, _) = keyed_e2e(&fs, &g).unwrap();
+    assert_eq!(
+        layout(&plan)[..2],
+        [
+            (Side::F, 3, 1, false, false, false),
+            (Side::F, 3, 0, false, false, false),
+        ]
+    );
+    for at in 0..3 {
+        let mut fs = fs.clone();
+        fs[at].1.as_mut().unwrap()[1] += F::one();
+        assert_false_statement_rejected(keyed_e2e(&fs, &g));
+    }
+}
+
+/// A constant multiplicity of 1 is still a multiplicity: its term runs over
+/// the constant's rows when it has more than the column, and the instance
+/// keeps numerators of its own.
+#[test]
+fn constant_one_multiplicity_wider_than_its_column_is_a_values_instance() {
+    let table = fv(0..8);
+    let col = fv([1, 3, 3, 6]);
+    // Eight rows of weight 1 over a column of four: every row counts twice.
+    let counts = tally(&table, &[(&col, Some(&fv([1; 8])))]);
+    let columns = [table, counts, col];
+    let mut session = Session::new(&columns, &[], &[]);
+    session.relations = vec![KeyedSumRelation {
+        fxs: vec![KeyedTerm::Poly(session.ids[2])],
+        mfxs: vec![Some(KeyedTerm::Constant {
+            value: F::one(),
+            nv: 3,
+        })],
+        gxs: vec![KeyedTerm::Poly(session.ids[0])],
+        mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+    }];
+    let plan = session.plan();
+    assert_eq!((plan[0].claim_nv, plan[0].stack_log), (3, 0));
+    assert!(!plan[0].shape().numerator_is_one);
+    session.prove_and_verify().unwrap();
+}
+
+/// An id neither side tracks is refused when the batch is laid out, before
+/// any tracker call that would panic on it.
+#[test]
+fn keyed_sum_naming_an_untracked_polynomial_is_refused() {
+    let columns = [fv(0..8), fv(0..8)];
+    let session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
+    let unknown = KeyedTerm::Poly(TrackerID::from_usize(900));
+    let relation = KeyedSumRelation {
+        fxs: vec![unknown],
+        mfxs: vec![None],
+        gxs: vec![KeyedTerm::Poly(session.ids[1])],
+        mgxs: vec![None],
+    };
+    assert!(plan_instances(&*session.prover.tracker().borrow(), &[relation]).is_err());
+}
+
+/// A weighted column that stands alone on the `f` side has a claim on the
+/// column and one on the weights, each over its own rows: weights of the
+/// column's size, a column narrower than its weights, and weights of a
+/// single row. `(column rows, weight rows)`; the committed column or the
+/// committed weights are off and the prover runs the GKR on what the table
+/// counts.
+#[test]
+fn gkr_on_fake_leaves_of_a_weighted_entry_is_rejected() {
+    let table = fv(0..8);
+    for (col_rows, weight_rows) in [(8, 8), (4, 8), (8, 1)] {
+        let col = fv((0..col_rows).map(|i| (i * 3 + 1) % 8));
+        let weights = fv((0..weight_rows).map(|i| i + 2));
+        let counts = tally(&table, &[(&col, Some(&weights))]);
+        let session = |col: &[F], weights: &[F]| {
+            let columns = [
+                table.clone(),
+                counts.clone(),
+                col.to_vec(),
+                weights.to_vec(),
+            ];
+            Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
+        };
+        session(&col, &weights).prove_and_verify().unwrap();
+
+        let mut bad_col = col.clone();
+        bad_col[0] += F::from(8u64);
+        let cheater = session(&bad_col, &weights);
+        let evals = BTreeMap::from([(cheater.ids[2], col.clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+
+        let mut bad_weights = weights.clone();
+        bad_weights[0] += F::one();
+        let cheater = session(&col, &bad_weights);
+        let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    }
+}
+
+/// Lookup groups are reduced in the order their tables were first claimed
+/// in, on both sides, also when a table committed later is claimed first.
+#[test]
+fn lookup_groups_are_reduced_in_the_order_of_their_first_claim() {
+    let tables = [fv(0..8), fv((0..8).map(|i| i + 100))];
+    let subs = [in_table(3, 8, 1), fv((0..16).map(|i| (i * 5) % 8 + 100))];
+    let (mut prover, mut verifier) = setup();
+    let ids = [&tables[0], &tables[1], &subs[0], &subs[1]].map(|col| commit(&mut prover, col).id());
+
+    prover.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
+    prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+    let proof = prover.build_proof().unwrap();
+
+    verifier.set_proof_ref(&proof);
+    for id in ids {
+        verifier.track_mv_com_by_id(id).unwrap();
+    }
+    verifier.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
+    verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+    verifier.verify().unwrap();
+    assert_in_sync(&prover, &verifier);
+}
+
+/// Both sides give the same id to the same polynomial, not only equally
+/// many ids: later stages order products by the ids of their factors. The
+/// `eq` polynomials of a run are the ids its claims do not reveal; with
+/// columns of several sizes there is one per size, and each has its size on
+/// both sides.
+#[test]
+fn both_sides_hold_polynomials_of_the_same_size_under_every_id() {
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+    for budget in [unsplit, 100] {
+        let mut session = MixedColumns::new().honest((budget, budget));
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let after_reduction =
+            ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
+        let proof = session.prover.build_proof().unwrap();
+        let verifier = session.verify_reduction(&proof).unwrap();
+        // More than one size, or the order of the `eq`s would not show.
+        let sizes: std::collections::BTreeSet<usize> = session
+            .plan()
+            .iter()
+            .map(|instance| instance.claim_nv)
+            .collect();
+        assert!(sizes.len() > 2);
+        assert_in_sync(&after_reduction, &verifier);
+    }
 }

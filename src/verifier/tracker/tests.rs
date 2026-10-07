@@ -350,6 +350,31 @@ fn setting_a_proof_resets_the_gkr_subproof_count() {
     assert_check_failed(verifier.verify());
 }
 
+/// Setting a proof puts the count of verified subproofs back to zero, by
+/// reference or by value, whatever else would make a second `verify` on a
+/// used verifier fail.
+#[test]
+fn setting_a_proof_puts_the_gkr_subproof_count_back_to_zero() {
+    let case = GkrCase::new();
+    let consumed = |verifier: &ArgVerifier<B>| {
+        verifier
+            .tracker()
+            .borrow()
+            .state
+            .logup_gkr_subproofs_consumed
+    };
+    for by_value in [false, true] {
+        let mut verifier = case.mirror(&case.proof, 2).unwrap();
+        assert_eq!(consumed(&verifier), 2);
+        if by_value {
+            verifier.set_proof(case.proof.clone());
+        } else {
+            verifier.set_proof_ref(&case.proof);
+        }
+        assert_eq!(consumed(&verifier), 0);
+    }
+}
+
 #[test]
 fn proof_with_gkr_subproofs_roundtrips_and_verifies() {
     let case = GkrCase::new();
