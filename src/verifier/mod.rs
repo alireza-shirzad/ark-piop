@@ -18,12 +18,9 @@ use crate::{
     arithmetic::mat_poly::mle::MLE,
     errors::SnarkResult,
     pcs::PolynomialCommitment,
-    piop::{
-        keyed_sumcheck::{
-            KeyedSumcheckVerifierInput,
-            reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
-        },
-        logup_gkr::{GkrClaims, GkrShape},
+    piop::keyed_sumcheck::{
+        KeyedSumcheckVerifierInput,
+        reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
     },
     prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk,
@@ -31,6 +28,8 @@ use crate::{
 };
 
 use crate::pcs::PCS;
+#[cfg(test)]
+use crate::piop::logup_gkr::{GkrClaims, GkrShape};
 use ark_ff::PrimeField;
 use derivative::Derivative;
 use errors::VerifierError;
@@ -279,7 +278,7 @@ where
 
     /// Add a sumcheck claim whose sum the verifier derived itself; see
     /// [`VerifierTracker::add_mv_sumcheck_claim_raw`].
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     #[instrument(level = "debug", skip(self))]
     pub(crate) fn add_mv_sumcheck_claim_raw(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
         self.tracker_rc
@@ -339,7 +338,7 @@ where
 
     /// Verify the proof's next LogUp-GKR subproof; see
     /// [`VerifierTracker::verify_logup_gkr`].
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn verify_logup_gkr(&mut self, shape: &[GkrShape]) -> SnarkResult<GkrClaims<B::F>> {
         self.tracker_rc.borrow_mut().verify_logup_gkr(shape)

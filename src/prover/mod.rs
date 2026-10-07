@@ -6,6 +6,8 @@
 pub mod errors;
 pub mod structs;
 pub mod tracker;
+#[cfg(test)]
+use crate::piop::logup_gkr::{FractionInstance, GkrClaims};
 use crate::{
     SnarkBackend,
     arithmetic::{
@@ -19,7 +21,6 @@ use crate::{
             KeyedSumcheckProverInput,
             reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
         },
-        logup_gkr::{FractionInstance, GkrClaims},
         lookup_check,
     },
     prover::{
@@ -372,7 +373,7 @@ where
 
     /// Add a multivariate sumcheck claim whose sum the verifier derives
     /// itself; see [`ProverTracker::add_mv_sumcheck_claim_raw`].
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     #[instrument(level = "debug", skip(self))]
     pub(crate) fn add_mv_sumcheck_claim_raw(
         &mut self,
@@ -457,7 +458,7 @@ where
     /// The tracker stays mutably borrowed for the whole batch, which is why
     /// the instances come in by value: reading a `TrackedPoly`'s evaluations
     /// or id borrows the tracker too, so it has to happen before this call.
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg(test)]
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn prove_logup_gkr(
         &mut self,

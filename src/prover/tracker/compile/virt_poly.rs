@@ -226,8 +226,8 @@ where
                 // storage (cyclic repetition happens on access), never
                 // materializing compressed polys to a full Vec<F>.
                 //
-                // `Arc::make_mut`, not `get_mut`: keyed_sumcheck lazy
-                // backings hold extra Arc refs to their source, on which
+                // `Arc::make_mut`, not `get_mut`: lazy inverse backings
+                // hold extra Arc refs to their source, on which
                 // `get_mut` would panic. When shared, the lazy backing keeps
                 // a pre-bump snapshot — fine, since lazy `lift(i)` cycles
                 // modulo inner_len and produces the same values.

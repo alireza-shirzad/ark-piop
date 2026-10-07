@@ -105,8 +105,10 @@ pub enum MLEStorage<F: Field> {
         inner_num_vars: usize,
     },
     /// Lazy inverse-shifted: `1/(source(x) - shift)` at every point, in O(1)
-    /// storage. Used for `keyed_sumcheck`'s `phat = 1/(p - γ)` after commit;
-    /// sumcheck streams non-`Field` storage via `storage().lift(i)`.
+    /// storage: the helper `1/(p - γ)` of a LogUp argument once it has been
+    /// committed. Nothing in this crate builds one since keyed sums moved to
+    /// LogUp-GKR. Sumcheck streams non-`Field` storage via
+    /// `storage().lift(i)`.
     ///
     /// Contract: `lift(i) = (source.lift(i) - shift).inverse().unwrap_or(0)`.
     /// Callers must ensure `source(x) - shift != 0` where they read — `shift`
@@ -118,7 +120,7 @@ pub enum MLEStorage<F: Field> {
         inner_num_vars: usize,
     },
     /// Lazy `1/(s1(x) - shift) + 1/(s2(x) - shift)`; same rationale as
-    /// [`Self::LazyInverseShifted`], for the paired keyed-sumcheck path.
+    /// [`Self::LazyInverseShifted`], for a helper shared by two columns.
     LazyInverseShiftedSum {
         s1: Arc<MLE<F>>,
         s2: Arc<MLE<F>>,
@@ -440,7 +442,7 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                 (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
             }
             // Lazy variants are internal-only and NEVER part of a serialized
-            // artifact (proofs carry the phat commitment, not the MLE);
+            // artifact (proofs carry the helper's commitment, not the MLE);
             // reaching this arm indicates a lazy poly leaked to a boundary.
             Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => {
                 return Err(ark_serialize::SerializationError::NotEnoughSpace);
@@ -1236,7 +1238,7 @@ impl<F: Field> MLEStorage<F> {
         match self {
             Self::Field(m) => m.evaluations.clone(),
             // Batch-inversion fast paths: per-element `lift` pays one field
-            // inversion per slot, which turns materializing a lazy phat into
+            // inversion per slot, which turns materializing a lazy helper into
             // 2^nv sequential inversions (the dominant cost of PCS-opening
             // one). Montgomery batching makes it one inversion + 3 muls per
             // slot. `batch_inversion` leaves zeros at zero, matching `lift`'s
@@ -1311,10 +1313,10 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Wrap `source` in a lazy `1/(source - shift)` backing (O(1) heap),
-    /// for the keyed-sumcheck post-commit re-registration flow. Mirrors
+    /// Wrap `source` in a lazy `1/(source - shift)` backing (O(1) heap), to
+    /// re-register a LogUp helper after it has been committed. Mirrors
     /// `source`'s outer `num_vars` including virtual padding — required so
-    /// downstream sumcheck term-nv comparisons match a dense phat — and
+    /// downstream sumcheck term-nv comparisons match a dense helper — and
     /// cycles `lift(i)` modulo the source's inner_len, like the source does.
     pub fn from_lazy_inverse_shifted(source: Arc<MLE<F>>, shift: F) -> Self {
         let inner_num_vars = source.inner_num_vars();
@@ -1329,8 +1331,8 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Lazy `1/(s1 - shift) + 1/(s2 - shift)` for the paired keyed-sumcheck
-    /// path. Both sources must share `num_vars()` (debug-asserted). See
+    /// Lazy `1/(s1 - shift) + 1/(s2 - shift)`, a helper shared by two
+    /// columns. Both sources must share `num_vars()` (debug-asserted). See
     /// [`Self::from_lazy_inverse_shifted`].
     pub fn from_lazy_inverse_shifted_sum(s1: Arc<MLE<F>>, s2: Arc<MLE<F>>, shift: F) -> Self {
         let inner_num_vars = s1.inner_num_vars();
