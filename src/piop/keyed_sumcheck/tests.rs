@@ -2,11 +2,12 @@
 //! staying consistent with the transcript, the layout of the GKR batch, and
 //! the two sides staying in step.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ark_ff::{One, Zero};
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalSerialize, Compress};
+use indexmap::IndexMap;
 
 use super::{
     KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput,
@@ -19,12 +20,14 @@ use crate::{
     DefaultSnarkBackend, SnarkBackend,
     arithmetic::mat_poly::mle::MLE,
     errors::{SnarkError, SnarkResult},
+    pcs::PCS,
     piop::{
         PIOP,
         logup_gkr::{
             GkrClaims,
             tests::{Deviation, Fault, naive_prove_batch},
         },
+        lookup_check::multiplicities_by_sorting,
     },
     prover::{
         ArgProver,
@@ -34,7 +37,7 @@ use crate::{
     setup::KeyGenerator,
     test_utils::prelude_with_vars,
     tracker_core::TrackerCore,
-    types::{SharedArgConfig, SumcheckSubproof, TrackerID, artifact::Artifact},
+    types::{CommitmentBinding, SharedArgConfig, SumcheckSubproof, TrackerID, artifact::Artifact},
     verifier::{
         ArgVerifier,
         structs::oracle::{Oracle, TrackedOracle},
@@ -1798,6 +1801,195 @@ fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
 
     verifier.reduce_lookup_claims().unwrap();
     assert_in_sync(&prover, &verifier);
+    verifier.verify().unwrap();
+}
+
+// ─── Fast paths of the prover ────────────────────────────────────────────
+
+/// The evaluations of `id` with every factor expanded to field elements
+/// first, whatever it is stored as.
+fn expanded_evaluations(tracker: &ProverTracker<B>, id: TrackerID) -> Vec<F> {
+    if let Some(column) = tracker.mat_mv_poly(id) {
+        return column.evaluations();
+    }
+    let mut evals = vec![F::zero(); 1 << tracker.poly_nv(id)];
+    for (coeff, product) in tracker.virt_poly(id).unwrap() {
+        let factors: Vec<Vec<F>> = product
+            .iter()
+            .map(|factor| tracker.mat_mv_poly(*factor).unwrap().evaluations())
+            .collect();
+        for (row, eval) in evals.iter_mut().enumerate() {
+            *eval += factors
+                .iter()
+                .fold(*coeff, |term, factor| term * factor[row % factor.len()]);
+        }
+    }
+    evals
+}
+
+/// What [`ArgProver::reduce_lookup_claims`] does, by the slow routes: every
+/// column expanded factor by factor and the multiplicities found by sorting.
+fn reduce_lookup_claims_the_slow_way(prover: &mut ArgProver<B>) {
+    let claims = prover.tracker().borrow_mut().take_lookup_claims();
+    let mut by_super: IndexMap<TrackerID, Vec<TrackerID>> = IndexMap::new();
+    for claim in claims {
+        by_super
+            .entry(claim.super_poly())
+            .or_default()
+            .push(claim.sub_poly());
+    }
+
+    let mut evals = ColumnEvals::new();
+    for id in by_super
+        .iter()
+        .flat_map(|(table, subs)| subs.iter().chain([table]))
+    {
+        let column = expanded_evaluations(&prover.tracker().borrow(), *id);
+        evals.insert(*id, column);
+    }
+
+    let mut relations = Vec::new();
+    for (table, subs) in by_super {
+        let included: Vec<&[F]> = subs.iter().map(|id| &evals[id][..]).collect();
+        let counts = multiplicities_by_sorting(&included, &evals[&table]);
+        let multiplicity = Arc::new(mle(&counts));
+        let commitment = <B as SnarkBackend>::MvPCS::commit(
+            prover.mv_pcs_prover_param().as_ref(),
+            &multiplicity,
+        )
+        .unwrap();
+        let multiplicity = prover
+            .tracker()
+            .borrow_mut()
+            .track_mat_mv_p_with_commitment(
+                &multiplicity,
+                commitment,
+                CommitmentBinding::ProofEmitted,
+                false,
+            )
+            .unwrap();
+        evals.insert(multiplicity, counts);
+        relations.push(KeyedSumRelation {
+            mfxs: vec![None; subs.len()],
+            fxs: subs.into_iter().map(KeyedTerm::Poly).collect(),
+            gxs: vec![KeyedTerm::Poly(table)],
+            mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+        });
+    }
+    prove_keyed_sums(prover, &relations, evals).unwrap();
+}
+
+/// The columns of [`fast_path_lookups`], in the order they are committed.
+fn fast_path_columns() -> Vec<Vec<F>> {
+    let rows = 1u64 << 8;
+    let below_20 = |nv: usize, seed: u64| in_table(nv, 20, seed);
+    vec![
+        // 0: small integers with gaps, 1: a table with repeats, 2: a table
+        // that is not small integers.
+        fv((0..rows).map(|i| i * 200)),
+        fv((0..32).map(|i| (i * 7) % 20)),
+        (0..16u64).map(|i| -F::from(i + 1)).collect(),
+        // 3, 4: activators.
+        fv((0..rows).map(|i| u64::from(i % 3 != 0))),
+        fv((0..rows).map(|i| u64::from(i % 5 < 2))),
+        // 5, 6: limbs out of the first table, 7: one out of the second.
+        fv((0..rows).map(|i| ((i * 37 + 11) % 256) * 200)),
+        fv((0..rows).map(|i| ((i * 101) % 256) * 200)),
+        below_20(8, 1),
+        // 8, 9: wider and narrower than the second table.
+        below_20(7, 3),
+        below_20(3, 4),
+        // 10: out of the third table.
+        (0..64u64).map(|i| -F::from((i * 5) % 16 + 1)).collect(),
+    ]
+}
+
+/// A batch of lookups over the columns `ids` in which the prover takes
+/// every shortcut it has: columns that are products of small integers and
+/// activators, sums of scaled activators, plain columns of every width,
+/// tables it can count into and one it has to sort. Returns the claims as
+/// `(table, sub)`.
+fn fast_path_lookups<T: TrackerCore<F = F>>(
+    tracker: &mut T,
+    ids: &[TrackerID],
+) -> Vec<(TrackerID, TrackerID)> {
+    let (gaps, repeats, large) = (ids[0], ids[1], ids[2]);
+    let (act, other_act) = (ids[3], ids[4]);
+    let mut lookups = Vec::new();
+    for limb in [ids[5], ids[6]] {
+        lookups.push((gaps, tracker.mul_polys(limb, act)));
+    }
+    lookups.push((repeats, tracker.mul_polys(ids[7], other_act)));
+    // 200·act + 400·other_act, and a limb where one activator is on and
+    // the other off.
+    let scaled = tracker.mul_scalar(act, F::from(200u64));
+    let other_scaled = tracker.mul_scalar(other_act, F::from(400u64));
+    lookups.push((gaps, tracker.add_polys(scaled, other_scaled)));
+    let gated = tracker.mul_polys(ids[5], act);
+    let both = tracker.mul_polys(gated, other_act);
+    lookups.push((gaps, tracker.sub_polys(gated, both)));
+    for plain in [ids[8], ids[9], ids[7]] {
+        lookups.push((repeats, plain));
+    }
+    lookups.push((large, ids[10]));
+    lookups
+}
+
+/// The shortcuts the prover takes to its columns and multiplicities leave
+/// no trace: the proof is, byte for byte, the one it gets by the slow
+/// routes.
+#[test]
+fn proof_by_the_fast_paths_is_the_proof_by_the_slow_ones() {
+    let columns = fast_path_columns();
+    let state = |reduce: fn(&mut ArgProver<B>)| {
+        let (mut prover, verifier) = setup();
+        let ids: Vec<TrackerID> = columns
+            .iter()
+            .map(|column| commit(&mut prover, column).id())
+            .collect();
+        let lookups = fast_path_lookups(&mut *prover.tracker().borrow_mut(), &ids);
+        for (table, sub) in lookups {
+            prover.add_mv_lookup_claim(table, sub).unwrap();
+        }
+        reduce(&mut prover);
+        let proof = prover.tracker().borrow_mut().compile_proof().unwrap();
+        (proof, ids, prover, verifier)
+    };
+    let (proof, ids, prover, mut verifier) = state(|prover| prover.reduce_lookup_claims().unwrap());
+    let (slow_proof, ..) = state(reduce_lookup_claims_the_slow_way);
+
+    // The statement is one the shortcuts apply to.
+    let tags: Vec<&str> = ids
+        .iter()
+        .map(|id| {
+            let tracker = prover.tracker();
+            let tracker = tracker.borrow();
+            tracker.mat_mv_poly(*id).unwrap().storage().kind_tag()
+        })
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            "u32", "u8", "field", "bit", "bit", "u32", "u32", "u8", "u8", "u8", "field"
+        ]
+    );
+    assert_eq!(proof.logup_gkr_subproofs.len(), 1);
+
+    let bytes = |proof: &SNARKProof<B>| {
+        let mut bytes = Vec::new();
+        proof.serialize_with_mode(&mut bytes, Compress::No).unwrap();
+        bytes
+    };
+    assert_eq!(bytes(&proof), bytes(&slow_proof));
+
+    verifier.set_proof_ref(&proof);
+    for id in &ids {
+        verifier.track_mv_com_by_id(*id).unwrap();
+    }
+    let lookups = fast_path_lookups(&mut *verifier.tracker().borrow_mut(), &ids);
+    for (table, sub) in lookups {
+        verifier.add_mv_lookup_claim(table, sub).unwrap();
+    }
     verifier.verify().unwrap();
 }
 

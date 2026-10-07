@@ -132,7 +132,7 @@ fn multiplicities_by_counting<F: PrimeField>(
 }
 
 /// Multiplicities for any super column, by sorting both sides.
-fn multiplicities_by_sorting<F: PrimeField>(
+pub(crate) fn multiplicities_by_sorting<F: PrimeField>(
     included_col_evals: &[&[F]],
     super_col_evals: &[F],
 ) -> Vec<F> {
