@@ -937,6 +937,96 @@ fn lookup_sub_derived_constant() {
     }
 }
 
+/// A scalar times a constant column folds to a constant with the column's
+/// rows on both sides, whichever factor comes first: its size decides how
+/// often its value is looked up, or counted in a keyed sum.
+#[test]
+fn scalar_times_constant_column_keeps_the_rows_of_the_column() {
+    let lookup = |scalar_first: bool, scalar: u64| {
+        prove_and_verify(
+            |prover| {
+                let table = commit(prover, &fv(0..16))?;
+                let column = commit(prover, &fv([3; 8]))?;
+                assert!(column.is_constant());
+                let scalar = prover.track_mat_mv_cnst_poly(0, F::from(scalar));
+                let sub = if scalar_first {
+                    &scalar * &column
+                } else {
+                    &column * &scalar
+                };
+                assert!(sub.is_constant());
+                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                Ok([table.id(), column.id()])
+            },
+            |verifier, ids| {
+                let oracles = track_all(verifier, &ids)?;
+                let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(scalar));
+                let sub = if scalar_first {
+                    &scalar * &oracles[1]
+                } else {
+                    &oracles[1] * &scalar
+                };
+                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+            },
+        )
+    };
+    // The same product as a column of a keyed sum, where it stays a
+    // constant handle: 8 rows of 6 against a table that counts `count`.
+    let keyed = |scalar_first: bool, count: u64| {
+        let mut counts = vec![F::zero(); 16];
+        counts[6] = F::from(count);
+        prove_and_verify(
+            |prover| {
+                let table = commit(prover, &fv(0..16))?;
+                let counts = commit(prover, &counts)?;
+                let column = commit(prover, &fv([3; 8]))?;
+                let scalar = prover.track_mat_mv_cnst_poly(0, F::from(2u64));
+                let product = if scalar_first {
+                    &scalar * &column
+                } else {
+                    &column * &scalar
+                };
+                let ids = [table.id(), counts.id(), column.id()];
+                KeyedSumcheck::<B>::prove(
+                    prover,
+                    KeyedSumcheckProverInput {
+                        fxs: vec![product],
+                        mfxs: vec![None],
+                        gxs: vec![table],
+                        mgxs: vec![Some(counts)],
+                    },
+                )?;
+                Ok(ids)
+            },
+            |verifier, ids| {
+                let oracles = track_all(verifier, &ids)?;
+                let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(2u64));
+                let product = if scalar_first {
+                    &scalar * &oracles[2]
+                } else {
+                    &oracles[2] * &scalar
+                };
+                KeyedSumcheck::<B>::verify(
+                    verifier,
+                    KeyedSumcheckVerifierInput {
+                        fxs: vec![product],
+                        mfxs: vec![None],
+                        gxs: vec![oracles[0].clone()],
+                        mgxs: vec![Some(oracles[1].clone())],
+                    },
+                )
+            },
+        )
+    };
+    for scalar_first in [true, false] {
+        assert_accepted(lookup(scalar_first, 2));
+        assert_rejected(lookup(scalar_first, 7));
+        assert_accepted(keyed(scalar_first, 8));
+        // One row of 6 is what a product of the scalar's size would be.
+        assert_rejected(keyed(scalar_first, 1));
+    }
+}
+
 /// The constant sub is the largest column of the whole proof: the table and
 /// its multiplicity have 16 rows and nothing else is committed.
 #[test]
