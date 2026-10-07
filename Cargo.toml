@@ -74,6 +74,11 @@ name = "pipeline"
 path = "tests/pipeline.rs"
 required-features = ["test-utils"]
 
+[[test]]
+name = "lookup"
+path = "tests/lookup.rs"
+required-features = ["test-utils"]
+
 [features]
 default = ["std", "parallel"]
 std = ["ark-ff/std", "ark-poly/std", "ark-std/std", "ark-serialize/std"]
