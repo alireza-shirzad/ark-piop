@@ -15,11 +15,17 @@ use crate::{
     errors::SnarkResult,
     pcs::PCS,
     piop::{
-        keyed_sumcheck::reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
+        keyed_sumcheck::{
+            KeyedSumcheckProverInput,
+            reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
+        },
         logup_gkr::{FractionInstance, GkrClaims},
         lookup_check,
     },
-    prover::structs::polynomial::TrackedPoly,
+    prover::{
+        errors::{HonestProverError::WrongInputShape, ProverError},
+        structs::polynomial::TrackedPoly,
+    },
     setup::structs::SNARKPk,
     types::{CommitmentBinding, TrackerID},
 };
@@ -412,6 +418,40 @@ where
         tracker.add_mv_lookup_claim(super_id, sub_id)
     }
 
+    /// Claim the keyed sum `input` states;
+    /// [`KeyedSumcheck`](crate::piop::keyed_sumcheck::KeyedSumcheck) has the
+    /// relation.
+    ///
+    /// The claim is only recorded here. [`Self::build_proof`] discharges it
+    /// in the LogUp-GKR batch of the lookup claims and under their challenge,
+    /// after them and in the order of these calls, where proving the PIOP on
+    /// the spot spends a batch and a challenge per relation. The verifier
+    /// has to make the same calls in the same order.
+    ///
+    /// All columns and multiplicities must already be tracked by this
+    /// prover: the claim keeps their ids, not the handles, and tracks nothing
+    /// itself. A commitment among them that this proof does not emit has to
+    /// be bound to the statement by the caller.
+    ///
+    /// A side without columns or without a multiplicity slot per column is
+    /// refused, and under `honest-prover` so is a relation that does not
+    /// hold.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim(
+        &mut self,
+        input: KeyedSumcheckProverInput<B>,
+    ) -> SnarkResult<()> {
+        input
+            .check_shape()
+            .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
+        #[cfg(feature = "honest-prover")]
+        crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(&input)?;
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_keyed_sum_claim(input.relation());
+        Ok(())
+    }
+
     /// Run one LogUp-GKR batch; see [`ProverTracker::prove_logup_gkr`].
     ///
     /// The tracker stays mutably borrowed for the whole batch, which is why
@@ -437,10 +477,11 @@ where
         self.tracker_rc.borrow_mut().peek_next_id()
     }
 
-    /// Reduce the queued lookup claims to sumcheck claims. Runs before the
-    /// subproofs are compiled, outside every timed subproof span, so it gets
-    /// a `bench_stats` span of its own for subscribers to time. The span
-    /// covers the whole function: it opens even with nothing to reduce.
+    /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
+    /// one batch. Runs before the subproofs are compiled, outside every
+    /// timed subproof span, so it gets a `bench_stats` span of its own for
+    /// subscribers to time. The span covers the whole function: it opens
+    /// even with nothing to reduce.
     #[instrument(
         target = "bench_stats",
         level = "info",
@@ -448,11 +489,11 @@ where
         skip_all
     )]
     pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
-        let lookup_claims = {
+        let (lookup_claims, keyed_sum_claims) = {
             let mut tracker = self.tracker_rc.borrow_mut();
             let claims = tracker.take_lookup_claims();
             tracker.state.bench_lookup_claims_pre_reduction = claims.len();
-            claims
+            (claims, tracker.take_keyed_sum_claims())
         };
         let lookup_claims_count = lookup_claims.len();
 
@@ -478,7 +519,7 @@ where
             "lookup_claims_pre_reduction"
         );
 
-        if by_super.is_empty() {
+        if by_super.is_empty() && keyed_sum_claims.is_empty() {
             return Ok(());
         }
         info!("reducing {} lookup claims", by_super.len());
@@ -524,8 +565,8 @@ where
             .collect::<SnarkResult<Vec<_>>>()?;
 
         // All multiplicities go into the transcript before the reduction
-        // draws its one gamma, which every group then shares.
-        let mut relations = Vec::with_capacity(by_super.len());
+        // draws its one gamma, which every relation then shares.
+        let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
         for ((super_id, sub_ids), (m_mle, m_commitment, m_evals)) in
             by_super.into_iter().zip(multiplicities)
         {
@@ -546,6 +587,8 @@ where
                 mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
             });
         }
+
+        relations.extend(keyed_sum_claims);
 
         prove_keyed_sums(self, &relations, evals)
     }

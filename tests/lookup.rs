@@ -96,14 +96,22 @@ fn prove_and_verify<S>(
     prove: impl FnOnce(&mut ArgProver<B>) -> SnarkResult<S>,
     verify: impl FnOnce(&mut ArgVerifier<B>, S) -> SnarkResult<()>,
 ) -> SnarkResult<()> {
+    proof_of_accepted(prove, verify).map(drop)
+}
+
+/// [`prove_and_verify`], handing back the proof that was accepted.
+fn proof_of_accepted<S>(
+    prove: impl FnOnce(&mut ArgProver<B>) -> SnarkResult<S>,
+    verify: impl FnOnce(&mut ArgVerifier<B>, S) -> SnarkResult<()>,
+) -> SnarkResult<SNARKProof<B>> {
     let (mut prover, mut verifier) = setup();
     let statement = prove(&mut prover)?;
     let proof = prover.build_proof()?;
-    verifier.set_proof(proof);
+    verifier.set_proof_ref(&proof);
     verify(&mut verifier, statement)?;
     verifier.verify()?;
     assert_prover_verifier_in_sync(&prover, &verifier);
-    Ok(())
+    Ok(proof)
 }
 
 fn assert_accepted(res: SnarkResult<()>) {
@@ -316,6 +324,81 @@ fn keyed_e2e(fs: &[KeyedCol], gs: &[KeyedCol]) -> SnarkResult<()> {
             Ok(())
         },
     )
+}
+
+/// One keyed-sum relation: its `f` side and its `g` side.
+type KeyedRelation<'a> = (&'a [KeyedCol], &'a [KeyedCol]);
+/// The ids of one side's columns and multiplicities.
+type KeyedSideIds = Vec<(TrackerID, Option<TrackerID>)>;
+
+/// Keyed sums claimed with `add_mv_keyed_sum_claim` and discharged when the
+/// proof is built. All `relations` are committed; the prover claims those at
+/// `claimed`, in that order, and the verifier those at `mirrored`. Making
+/// the claims moves neither side.
+fn deferred_keyed_e2e_mirroring(
+    relations: &[KeyedRelation],
+    claimed: &[usize],
+    mirrored: &[usize],
+) -> SnarkResult<SNARKProof<B>> {
+    proof_of_accepted(
+        |prover| {
+            let mut ids: Vec<(KeyedSideIds, KeyedSideIds)> = Vec::new();
+            let mut inputs = Vec::new();
+            for (fs, gs) in relations {
+                let (fxs, mfxs) = commit_keyed_side(prover, fs)?;
+                let (gxs, mgxs) = commit_keyed_side(prover, gs)?;
+                ids.push((keyed_side_ids(&fxs, &mfxs), keyed_side_ids(&gxs, &mgxs)));
+                inputs.push(Some(KeyedSumcheckProverInput {
+                    fxs,
+                    gxs,
+                    mfxs,
+                    mgxs,
+                }));
+            }
+            let position = |prover: &ArgProver<B>| {
+                let mut copy = prover.deep_copy();
+                let challenge = copy.get_and_append_challenge(b"parity probe").unwrap();
+                (copy.peek_next_id(), challenge)
+            };
+            let before_claims = position(prover);
+            for relation in claimed {
+                let input = inputs[*relation]
+                    .take()
+                    .expect("a relation is claimed once");
+                prover.add_mv_keyed_sum_claim(input)?;
+            }
+            assert_eq!(position(prover), before_claims);
+            Ok((ids, prover.deep_copy()))
+        },
+        |verifier, (ids, prover_after_claims)| {
+            let mut inputs = Vec::new();
+            for (f_ids, g_ids) in &ids {
+                let (fxs, mfxs) = track_keyed_side(verifier, f_ids)?;
+                let (gxs, mgxs) = track_keyed_side(verifier, g_ids)?;
+                inputs.push(Some(KeyedSumcheckVerifierInput {
+                    fxs,
+                    gxs,
+                    mfxs,
+                    mgxs,
+                }));
+            }
+            for relation in mirrored {
+                let input = inputs[*relation]
+                    .take()
+                    .expect("a relation is mirrored once");
+                verifier.add_mv_keyed_sum_claim(input)?;
+            }
+            assert_prover_verifier_in_sync(&prover_after_claims, verifier);
+            Ok(())
+        },
+    )
+}
+
+/// [`deferred_keyed_e2e_mirroring`] with every relation claimed and a
+/// verifier that mirrors the prover.
+fn deferred_keyed_e2e(relations: &[KeyedRelation]) -> SnarkResult<()> {
+    let all: Vec<usize> = (0..relations.len()).collect();
+    deferred_keyed_e2e_mirroring(relations, &all, &all).map(drop)
 }
 
 /// Prover side of a transparent range table `0..2^nv`: tracked, never
@@ -1482,9 +1565,9 @@ fn size_breakdown_parts_sum_to_total() {
 
 /// A keyed sum whose numerator is `multiplicity · activator`, or the bare
 /// activator: rows the activator switches off contribute nothing, whatever
-/// their key is.
-#[test]
-fn keyed_sum_activator_numerator_semantics() {
+/// their key is. `deferred` claims the sum for the proof's batch instead of
+/// proving it on the spot.
+fn activator_numerator_semantics(deferred: bool) {
     let activator = prefix_activator(5, 21);
     // Active rows cycle through the keys 100..107. Inactive rows alternate
     // between keys the other side does not have at all and real keys.
@@ -1517,15 +1600,17 @@ fn keyed_sum_activator_numerator_semantics() {
                 } else {
                     activator
                 };
-                KeyedSumcheck::<B>::prove(
-                    prover,
-                    KeyedSumcheckProverInput {
-                        fxs: vec![keys],
-                        gxs: vec![g],
-                        mfxs: vec![Some(numerator)],
-                        mgxs: vec![Some(totals)],
-                    },
-                )?;
+                let input = KeyedSumcheckProverInput {
+                    fxs: vec![keys],
+                    gxs: vec![g],
+                    mfxs: vec![Some(numerator)],
+                    mgxs: vec![Some(totals)],
+                };
+                if deferred {
+                    prover.add_mv_keyed_sum_claim(input)?;
+                } else {
+                    KeyedSumcheck::<B>::prove(prover, input)?;
+                }
                 Ok((ids, prover.deep_copy()))
             },
             |verifier, (ids, prover_after_piop)| {
@@ -1536,15 +1621,17 @@ fn keyed_sum_activator_numerator_semantics() {
                 } else {
                     activator
                 };
-                KeyedSumcheck::<B>::verify(
-                    verifier,
-                    KeyedSumcheckVerifierInput {
-                        fxs: vec![keys],
-                        gxs: vec![g],
-                        mfxs: vec![Some(numerator)],
-                        mgxs: vec![Some(totals)],
-                    },
-                )?;
+                let input = KeyedSumcheckVerifierInput {
+                    fxs: vec![keys],
+                    gxs: vec![g],
+                    mfxs: vec![Some(numerator)],
+                    mgxs: vec![Some(totals)],
+                };
+                if deferred {
+                    verifier.add_mv_keyed_sum_claim(input)?;
+                } else {
+                    KeyedSumcheck::<B>::verify(verifier, input)?;
+                }
                 assert_prover_verifier_in_sync(&prover_after_piop, verifier);
                 Ok(())
             },
@@ -1555,4 +1642,297 @@ fn keyed_sum_activator_numerator_semantics() {
         // Row 21 is inactive and holds a real key; it must not count.
         assert_rejected(run(&totals(22, weighted), weighted));
     }
+}
+
+#[test]
+fn keyed_sum_activator_numerator_semantics() {
+    activator_numerator_semantics(false);
+}
+
+#[test]
+fn deferred_keyed_sum_activator_numerator_semantics() {
+    activator_numerator_semantics(true);
+}
+
+// ─── Keyed sums claimed for the proof's batch ────────────────────────────
+
+/// Two lookup groups and two keyed sums, interleaved with each other and
+/// with an ordinary claim. Claimed for later, the keyed sums join the lookups
+/// in one LogUp-GKR batch; proved on the spot, each is a batch of its own.
+#[test]
+fn deferred_keyed_sum_claims_share_one_gkr() {
+    let summed = fv((0..16).map(|i| i * i));
+    let table_a = fv(0..16);
+    let table_b = fv((0..8).map(|i| i * 9));
+    let sub_a1 = fv((0..16).map(|i| (i * 3) % 16));
+    let sub_a2 = fv((0..64).map(|i| i % 11));
+    let sub_b = fv((0..8).map(|i| ((i * 3) % 8) * 9));
+    let perm_f = fv(0..32);
+    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+    let weighted_f = fv((0..8).map(|i| i + 100));
+    let weighted_mf = fv((0..8).map(|i| i + 1));
+    let weighted_g = fv((0..32).map(|i| (i % 8) + 100));
+    let weighted_mg = fv((0..32).map(|i| if i < 8 { i + 1 } else { 0 }));
+    let cols = [
+        &summed,
+        &table_a,
+        &table_b,
+        &sub_a1,
+        &sub_a2,
+        &sub_b,
+        &perm_f,
+        &perm_g,
+        &weighted_f,
+        &weighted_mf,
+        &weighted_g,
+        &weighted_mg,
+    ];
+
+    let run = |deferred: bool| {
+        proof_of_accepted(
+            |prover| {
+                let handles = cols
+                    .iter()
+                    .map(|evals| commit(prover, evals))
+                    .collect::<SnarkResult<Vec<_>>>()?;
+                let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
+                let [
+                    summed_p,
+                    table_a,
+                    table_b,
+                    sub_a1,
+                    sub_a2,
+                    sub_b,
+                    perm_f,
+                    perm_g,
+                    weighted_f,
+                    weighted_mf,
+                    weighted_g,
+                    weighted_mg,
+                ]: [TrackedPoly<B>; 12] = handles.try_into().unwrap();
+                let keyed_sum = |prover: &mut ArgProver<B>, input| {
+                    if deferred {
+                        prover.add_mv_keyed_sum_claim(input)
+                    } else {
+                        KeyedSumcheck::<B>::prove(prover, input)
+                    }
+                };
+                prover.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                keyed_sum(
+                    prover,
+                    KeyedSumcheckProverInput {
+                        fxs: vec![perm_f],
+                        gxs: vec![perm_g],
+                        mfxs: vec![None],
+                        mgxs: vec![None],
+                    },
+                )?;
+                prover.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
+                prover.add_mv_sumcheck_claim(summed_p.id(), sum(&summed))?;
+                keyed_sum(
+                    prover,
+                    KeyedSumcheckProverInput {
+                        fxs: vec![weighted_f],
+                        gxs: vec![weighted_g],
+                        mfxs: vec![Some(weighted_mf)],
+                        mgxs: vec![Some(weighted_mg)],
+                    },
+                )?;
+                prover.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
+                Ok(ids)
+            },
+            |verifier, ids| {
+                let [
+                    summed_v,
+                    table_a,
+                    table_b,
+                    sub_a1,
+                    sub_a2,
+                    sub_b,
+                    perm_f,
+                    perm_g,
+                    weighted_f,
+                    weighted_mf,
+                    weighted_g,
+                    weighted_mg,
+                ]: [TrackedOracle<B>; 12] = track_all(verifier, &ids)?.try_into().unwrap();
+                let keyed_sum = |verifier: &mut ArgVerifier<B>, input| {
+                    if deferred {
+                        verifier.add_mv_keyed_sum_claim(input)
+                    } else {
+                        KeyedSumcheck::<B>::verify(verifier, input)
+                    }
+                };
+                verifier.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                keyed_sum(
+                    verifier,
+                    KeyedSumcheckVerifierInput {
+                        fxs: vec![perm_f],
+                        gxs: vec![perm_g],
+                        mfxs: vec![None],
+                        mgxs: vec![None],
+                    },
+                )?;
+                verifier.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
+                verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
+                keyed_sum(
+                    verifier,
+                    KeyedSumcheckVerifierInput {
+                        fxs: vec![weighted_f],
+                        gxs: vec![weighted_g],
+                        mfxs: vec![Some(weighted_mf)],
+                        mgxs: vec![Some(weighted_mg)],
+                    },
+                )?;
+                verifier.add_mv_lookup_claim(table_a.id(), sub_a2.id())
+            },
+        )
+    };
+    let proof = run(true).expect("a true statement must be accepted");
+    assert_eq!(proof.logup_gkr_subproofs.len(), 1);
+    let on_the_spot = run(false).expect("a true statement must be accepted");
+    assert_eq!(on_the_spot.logup_gkr_subproofs.len(), 3);
+}
+
+/// Keyed sums claimed for later with nothing else in the proof: true ones
+/// are accepted and a false one is rejected, alone and among true ones.
+#[test]
+fn deferred_false_keyed_sum_is_rejected() {
+    let f = fv(0..32);
+    let g = fv((0..32).map(|i| (i * 5 + 3) % 32));
+    let mut not_a_permutation = g.clone();
+    not_a_permutation[9] = F::from(99u64);
+    let keys = fv((0..8).map(|i| i + 100));
+    let weights = fv((0..8).map(|i| i + 1));
+    let mut wrong_weights = weights.clone();
+    wrong_weights[3] += F::one();
+
+    let permutation = [(f.clone(), None)];
+    let permuted = [(g, None)];
+    let broken = [(not_a_permutation, None)];
+    let weighted = [(keys.clone(), Some(weights))];
+    let misweighted = [(keys, Some(wrong_weights))];
+
+    assert_accepted(deferred_keyed_e2e(&[(&permutation, &permuted)]));
+    assert_accepted(deferred_keyed_e2e(&[
+        (&permutation, &permuted),
+        (&weighted, &weighted),
+        (&permuted, &permutation),
+    ]));
+
+    assert_rejected(deferred_keyed_e2e(&[(&permutation, &broken)]));
+    assert_rejected(deferred_keyed_e2e(&[(&weighted, &misweighted)]));
+    for at in 0..3 {
+        let mut relations: Vec<KeyedRelation> = vec![
+            (&permutation, &permuted),
+            (&weighted, &weighted),
+            (&permuted, &permutation),
+        ];
+        relations[at] = (&weighted, &misweighted);
+        assert_rejected(deferred_keyed_e2e(&relations));
+    }
+}
+
+/// Two keyed sums claimed for later, each false, whose four sides balance
+/// when added up. Each relation has to balance on its own.
+#[test]
+fn deferred_keyed_sums_with_cancelling_errors_are_rejected() {
+    let a = [(fv(0..8), None)];
+    let b = [(fv(100..108), None)];
+    let both = [a[0].clone(), b[0].clone()];
+    let both_swapped = [b[0].clone(), a[0].clone()];
+
+    assert_accepted(deferred_keyed_e2e(&[(&both, &both_swapped)]));
+    assert_rejected(deferred_keyed_e2e(&[(&a, &b), (&b, &a)]));
+
+    // The same with weights: each relation credits the other's key.
+    let key = |k: u64| fv([k; 4]);
+    let weights = |w: u64| Some(fv((0..4).map(|i| w + i)));
+    let x = [(key(7), weights(1)), (fv(0..4), None)];
+    let x_other = [(key(9), weights(1)), (fv(0..4), None)];
+    assert_accepted(deferred_keyed_e2e(&[(&x, &x), (&x_other, &x_other)]));
+    assert_rejected(deferred_keyed_e2e(&[(&x, &x_other), (&x_other, &x)]));
+}
+
+/// Three true keyed sums of one shape; the prover claims the first two.
+fn mirrored_deferred_claims_e2e(mirrored: &[usize]) -> SnarkResult<()> {
+    let column = |seed: u64| [(fv((0..16).map(|i| i * seed + 1)), None)];
+    let permuted = |seed: u64| [(fv((0..16).map(|i| ((i * 5 + 3) % 16) * seed + 1)), None)];
+    let (f0, g0) = (column(3), permuted(3));
+    let (f1, g1) = (column(7), permuted(7));
+    let (f2, g2) = (column(11), permuted(11));
+    let relations: [KeyedRelation; 3] = [(&f0, &g0), (&f1, &g1), (&f2, &g2)];
+    deferred_keyed_e2e_mirroring(&relations, &[0, 1], mirrored).map(drop)
+}
+
+/// A verifier that mirrors fewer keyed sums than the prover claimed is
+/// checking a different statement, even though what it does check is true.
+#[test]
+fn verifier_missing_deferred_keyed_sum_is_rejected() {
+    assert_accepted(mirrored_deferred_claims_e2e(&[0, 1]));
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0]));
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1]));
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[]));
+}
+
+/// The extra keyed sum is true, but the prover never proved it.
+#[test]
+fn verifier_extra_deferred_keyed_sum_is_rejected() {
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 1, 2]));
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 2]));
+}
+
+/// Both keyed sums are true and of one shape, so the batch looks the same in
+/// either order; its claims are still tied to the columns in the prover's.
+#[test]
+fn verifier_reordering_deferred_keyed_sums_is_rejected() {
+    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1, 0]));
+}
+
+/// A keyed sum is checked for its shape when it is claimed, on both sides,
+/// and a refused claim leaves nothing behind.
+#[test]
+fn deferred_keyed_sum_claim_checks_its_shape() {
+    let f = fv(0..16);
+    let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
+    // `(fxs, mfxs, gxs, mgxs)` lengths.
+    let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
+
+    assert_accepted(prove_and_verify(
+        |prover| {
+            let f = commit(prover, &f)?;
+            let g = commit(prover, &g)?;
+            let ids = [f.id(), g.id()];
+            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
+                fxs: vec![f.clone(); fxs],
+                mfxs: vec![None; mfxs],
+                gxs: vec![g.clone(); gxs],
+                mgxs: vec![None; mgxs],
+            };
+            for shape in malformed {
+                let err = prover
+                    .add_mv_keyed_sum_claim(input(shape))
+                    .expect_err("a malformed keyed sum must be refused");
+                assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
+            }
+            prover.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))?;
+            Ok(ids)
+        },
+        |verifier, ids| {
+            let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
+            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
+                fxs: vec![f.clone(); fxs],
+                mfxs: vec![None; mfxs],
+                gxs: vec![g.clone(); gxs],
+                mgxs: vec![None; mgxs],
+            };
+            for shape in malformed {
+                let err = verifier
+                    .add_mv_keyed_sum_claim(input(shape))
+                    .expect_err("a malformed keyed sum must be refused");
+                assert_verifier_error(err);
+            }
+            verifier.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))
+        },
+    ));
 }

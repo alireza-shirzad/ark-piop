@@ -19,7 +19,10 @@ use crate::{
     errors::SnarkResult,
     pcs::PolynomialCommitment,
     piop::{
-        keyed_sumcheck::reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
+        keyed_sumcheck::{
+            KeyedSumcheckVerifierInput,
+            reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
+        },
         logup_gkr::{GkrClaims, GkrShape},
     },
     prover::structs::proof::SNARKProof,
@@ -30,6 +33,7 @@ use crate::{
 use crate::pcs::PCS;
 use ark_ff::PrimeField;
 use derivative::Derivative;
+use errors::VerifierError;
 
 use tracker::VerifierTracker;
 
@@ -306,6 +310,33 @@ where
             .add_mv_lookup_claim(super_id, sub_id)
     }
 
+    /// Claim the keyed sum `input` states, mirroring
+    /// [`ArgProver::add_mv_keyed_sum_claim`](crate::prover::ArgProver::add_mv_keyed_sum_claim).
+    ///
+    /// The claim is only recorded here. [`Self::verify`] checks it in the
+    /// LogUp-GKR batch of the lookup claims, after them and in the order of
+    /// these calls, which has to be the prover's.
+    ///
+    /// All columns and multiplicities must already be tracked by this
+    /// verifier: the claim keeps their ids, not the handles, and tracks
+    /// nothing itself.
+    ///
+    /// A side without columns or without a multiplicity slot per column is
+    /// refused.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim(
+        &mut self,
+        input: KeyedSumcheckVerifierInput<B>,
+    ) -> SnarkResult<()> {
+        input
+            .check_shape()
+            .map_err(VerifierError::VerifierInputShapeError)?;
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_keyed_sum_claim(input.relation());
+        Ok(())
+    }
+
     /// Verify the proof's next LogUp-GKR subproof; see
     /// [`VerifierTracker::verify_logup_gkr`].
     #[cfg_attr(not(test), expect(dead_code))]
@@ -397,10 +428,18 @@ where
         }
     }
 
+    /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
+    /// one batch, as the prover did before it compiled the proof.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
-        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
-        if lookup_claims.is_empty() {
+        let (lookup_claims, keyed_sum_claims) = {
+            let mut tracker = self.tracker_rc.borrow_mut();
+            (
+                tracker.take_lookup_claims(),
+                tracker.take_keyed_sum_claims(),
+            )
+        };
+        if lookup_claims.is_empty() && keyed_sum_claims.is_empty() {
             return Ok(());
         }
 
@@ -414,7 +453,7 @@ where
 
         // Mirrors the prover: every multiplicity commitment is absorbed
         // before the reduction draws its one gamma.
-        let mut relations = Vec::with_capacity(by_super.len());
+        let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
         for (super_id, sub_ids) in by_super {
             self.tracked_oracle_from_id(super_id)?;
             for sub_id in &sub_ids {
@@ -428,6 +467,8 @@ where
                 mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
             });
         }
+
+        relations.extend(keyed_sum_claims);
 
         verify_keyed_sums(self, &relations)
     }

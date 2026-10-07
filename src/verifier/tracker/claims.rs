@@ -1,6 +1,7 @@
 //! Claim registration and indexed oracles for the verifier.
 
 use super::*;
+use crate::piop::keyed_sumcheck::reduction::KeyedSumRelation;
 
 impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
@@ -103,6 +104,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     pub(crate) fn take_lookup_claims(&mut self) -> Vec<TrackerLookupClaim> {
         take(&mut self.state.mv_pcs_substate.lookup_claims)
+    }
+
+    /// Queue a keyed sum for the reduction that runs before the proof is
+    /// verified. The caller has checked its shape.
+    pub(crate) fn add_mv_keyed_sum_claim(&mut self, relation: KeyedSumRelation<B::F>) {
+        self.state.keyed_sum_claims.push(relation);
+    }
+
+    pub(crate) fn take_keyed_sum_claims(&mut self) -> Vec<KeyedSumRelation<B::F>> {
+        take(&mut self.state.keyed_sum_claims)
     }
 
     #[instrument(level = "debug", skip(self))]

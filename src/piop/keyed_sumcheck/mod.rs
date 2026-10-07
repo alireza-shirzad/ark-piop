@@ -5,6 +5,11 @@
 //! The sums of fractions are proved with LogUp-GKR, which needs no helper
 //! commitment. A column and its multiplicity need not have the same size:
 //! their term runs over the larger hypercube, the smaller one repeating.
+//!
+//! Proving the PIOP reduces its relation on the spot, in a GKR batch of its
+//! own. [`ArgProver::add_mv_keyed_sum_claim`] and its verifier counterpart
+//! take the same inputs and leave the relation to the one batch the proof
+//! reduces its lookup claims in.
 
 mod honest_prover;
 pub(crate) mod reduction;
@@ -13,7 +18,7 @@ mod tests;
 use crate::{
     SnarkBackend,
     errors::{
-        InputShapeError::{EmptyInput, InputLengthMismatch},
+        InputShapeError::{self, EmptyInput, InputLengthMismatch},
         SnarkError, SnarkResult,
     },
     piop::PIOP,
@@ -62,55 +67,76 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
-        let relation = KeyedSumRelation {
-            fxs: input.fxs.iter().map(KeyedTerm::from).collect(),
-            mfxs: input.mfxs.iter().map(optional_term).collect(),
-            gxs: input.gxs.iter().map(KeyedTerm::from).collect(),
-            mgxs: input.mgxs.iter().map(optional_term).collect(),
-        };
-        prove_keyed_sums(prover, &[relation], ColumnEvals::new())
+        prove_keyed_sums(prover, &[input.relation()], ColumnEvals::new())
     }
 
     fn verify_inner(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
-        // check input shapes are correct
-        if input.fxs.is_empty() {
-            return Err(SnarkError::VerifierError(VerifierInputShapeError(
-                EmptyInput,
-            )));
-        }
-        if input.fxs.len() != input.mfxs.len() {
-            return Err(SnarkError::VerifierError(VerifierInputShapeError(
-                InputLengthMismatch {
-                    expected: input.fxs.len(),
-                    actual: input.mfxs.len(),
-                },
-            )));
-        }
-        if input.gxs.is_empty() {
-            return Err(SnarkError::VerifierError(VerifierInputShapeError(
-                EmptyInput,
-            )));
-        }
+        input
+            .check_shape()
+            .map_err(|shape| SnarkError::VerifierError(VerifierInputShapeError(shape)))?;
+        verify_keyed_sums(verifier, &[input.relation()])
+    }
+}
 
-        if input.gxs.len() != input.mgxs.len() {
-            return Err(SnarkError::VerifierError(VerifierInputShapeError(
-                InputLengthMismatch {
-                    expected: input.gxs.len(),
-                    actual: input.mgxs.len(),
-                },
-            )));
+/// Each side of a keyed sum needs a column, and a multiplicity slot per
+/// column. The lengths are those of `fxs`, `mfxs`, `gxs` and `mgxs`.
+fn check_shape([fxs, mfxs, gxs, mgxs]: [usize; 4]) -> Result<(), InputShapeError> {
+    for (cols, mults) in [(fxs, mfxs), (gxs, mgxs)] {
+        if cols == 0 {
+            return Err(EmptyInput);
         }
+        if cols != mults {
+            return Err(InputLengthMismatch {
+                expected: cols,
+                actual: mults,
+            });
+        }
+    }
+    Ok(())
+}
 
-        let relation = KeyedSumRelation {
-            fxs: input.fxs.iter().map(KeyedTerm::from).collect(),
-            mfxs: input.mfxs.iter().map(optional_term).collect(),
-            gxs: input.gxs.iter().map(KeyedTerm::from).collect(),
-            mgxs: input.mgxs.iter().map(optional_term).collect(),
-        };
-        verify_keyed_sums(verifier, &[relation])
+impl<B: SnarkBackend> KeyedSumcheckProverInput<B> {
+    pub(crate) fn check_shape(&self) -> Result<(), InputShapeError> {
+        check_shape([
+            self.fxs.len(),
+            self.mfxs.len(),
+            self.gxs.len(),
+            self.mgxs.len(),
+        ])
+    }
+
+    /// The relation the input states, by tracker id.
+    pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
+        KeyedSumRelation {
+            fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
+            mfxs: self.mfxs.iter().map(optional_term).collect(),
+            gxs: self.gxs.iter().map(KeyedTerm::from).collect(),
+            mgxs: self.mgxs.iter().map(optional_term).collect(),
+        }
+    }
+}
+
+impl<B: SnarkBackend> KeyedSumcheckVerifierInput<B> {
+    pub(crate) fn check_shape(&self) -> Result<(), InputShapeError> {
+        check_shape([
+            self.fxs.len(),
+            self.mfxs.len(),
+            self.gxs.len(),
+            self.mgxs.len(),
+        ])
+    }
+
+    /// The relation the input states, by tracker id.
+    pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
+        KeyedSumRelation {
+            fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
+            mfxs: self.mfxs.iter().map(optional_term).collect(),
+            gxs: self.gxs.iter().map(KeyedTerm::from).collect(),
+            mgxs: self.mgxs.iter().map(optional_term).collect(),
+        }
     }
 }
 

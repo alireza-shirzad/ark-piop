@@ -1613,6 +1613,95 @@ fn both_sides_are_in_step_after_reducing_their_lookup_claims() {
     verifier.verify().unwrap();
 }
 
+/// Keyed sums claimed for later, between lookup claims. Claiming them moves
+/// neither side; the reduction then takes them after the lookup groups, in
+/// the order they were claimed, and leaves both sides with the same ids,
+/// claims and transcript.
+#[test]
+fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
+    let table = fv(0..16);
+    let subs = [in_table(4, 16, 1), in_table(6, 16, 2)];
+    let perm_f = fv(0..32);
+    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+    let keys = fv((0..8).map(|i| i + 100));
+    let weights = fv(1..9);
+
+    let (mut prover, mut verifier) = setup();
+    let cols = [
+        &table, &subs[0], &subs[1], &perm_f, &perm_g, &keys, &weights,
+    ];
+    let handles: Vec<TrackedPoly<B>> = cols.iter().map(|col| commit(&mut prover, col)).collect();
+    let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
+    let permutation = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
+        fxs: vec![h[3].clone()],
+        gxs: vec![h[4].clone()],
+        mfxs: vec![None],
+        mgxs: vec![None],
+    };
+    let weighted = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
+        fxs: vec![h[5].clone()],
+        gxs: vec![h[5].clone()],
+        mfxs: vec![Some(h[6].clone())],
+        mgxs: vec![Some(h[6].clone())],
+    };
+
+    let before_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+    prover
+        .add_mv_keyed_sum_claim(permutation(&handles))
+        .unwrap();
+    prover.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
+    prover.add_mv_keyed_sum_claim(weighted(&handles)).unwrap();
+    prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+    let after_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+
+    let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
+        .build_proof()
+        .unwrap();
+    prover.reduce_lookup_claims().unwrap();
+    assert_eq!(run_lengths(&proof), [3 + 2 + 2]);
+    // The last masks come in instance order, two values where the
+    // numerators are 1 and four otherwise: the two subs and their table,
+    // then the permutation, then the weighted keys.
+    let last_masks: Vec<usize> = proof.logup_gkr_subproofs[0]
+        .masks
+        .last()
+        .unwrap()
+        .iter()
+        .map(Vec::len)
+        .collect();
+    assert_eq!(last_masks, [2, 2, 4, 2, 2, 4, 4]);
+
+    verifier.set_proof_ref(&proof);
+    let oracles: Vec<TrackedOracle<B>> = ids
+        .iter()
+        .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
+        .collect();
+    assert_in_sync(&before_claims, &verifier);
+    verifier
+        .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+            fxs: vec![oracles[3].clone()],
+            gxs: vec![oracles[4].clone()],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        })
+        .unwrap();
+    verifier.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
+    verifier
+        .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+            fxs: vec![oracles[5].clone()],
+            gxs: vec![oracles[5].clone()],
+            mfxs: vec![Some(oracles[6].clone())],
+            mgxs: vec![Some(oracles[6].clone())],
+        })
+        .unwrap();
+    verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+    assert_in_sync(&after_claims, &verifier);
+
+    verifier.reduce_lookup_claims().unwrap();
+    assert_in_sync(&prover, &verifier);
+    verifier.verify().unwrap();
+}
+
 // ─── Proof plumbing ──────────────────────────────────────────────────────
 
 #[test]

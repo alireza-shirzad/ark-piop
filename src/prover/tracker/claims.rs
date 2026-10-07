@@ -1,7 +1,7 @@
 //! Claim registration — adding sumcheck, zerocheck, nozerocheck, lookup, and eval claims.
 
 use super::*;
-use crate::piop::errors::PolyIOPErrors;
+use crate::piop::{errors::PolyIOPErrors, keyed_sumcheck::reduction::KeyedSumRelation};
 
 impl<B> ProverTracker<B>
 where
@@ -189,6 +189,16 @@ where
 
     pub(crate) fn take_lookup_claims(&mut self) -> Vec<TrackerLookupClaim> {
         take(&mut self.state.mv_pcs_substate.lookup_claims)
+    }
+
+    /// Queue a keyed sum for the reduction that runs before the proof is
+    /// compiled. The caller has checked its shape.
+    pub(crate) fn add_mv_keyed_sum_claim(&mut self, relation: KeyedSumRelation<B::F>) {
+        self.state.keyed_sum_claims.push(relation);
+    }
+
+    pub(crate) fn take_keyed_sum_claims(&mut self) -> Vec<KeyedSumRelation<B::F>> {
+        take(&mut self.state.keyed_sum_claims)
     }
 
     /// Adds an evaluation claim to the list of the zerocheck claims of the
