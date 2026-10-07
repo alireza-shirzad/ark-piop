@@ -8,13 +8,14 @@
 //!
 //! Several relations are reduced together under one `gamma`:
 //! 1. the entries are laid out as GKR instances ([`plan_instances`]);
-//! 2. the instances are proved in one or more GKR runs, each of which ends
-//!    in an evaluation point and, per instance, the values of its numerator
-//!    and denominator MLEs there;
+//! 2. the instances are proved in one or more GKR runs ([`gkr_runs`]), each
+//!    of which ends in an evaluation point and, per instance, the values of
+//!    its numerator and denominator MLEs there;
 //! 3. every such value is turned into a sumcheck claim on the polynomials
 //!    the statement names ([`push_input_claims`]), which is what ties the
 //!    GKR to them;
-//! 4. the verifier compares the two sides of every relation on the roots.
+//! 4. after the last run, the verifier compares the two sides of every
+//!    relation on the roots, wherever in the runs its instances fell.
 //!
 //! Everything that consumes a tracker id, touches the transcript or pushes
 //! a claim is written once, over [`TrackerCore`]; the two sides differ only
@@ -128,6 +129,17 @@ impl<F> InstancePlan<F> {
             n_vars: self.n_vars(),
             numerator_is_one: self.mults.is_none(),
         }
+    }
+
+    /// What a GKR run holds for this instance, in the unit of
+    /// [`crate::types::SharedArgConfig::logup_gkr_run_budget`]. Saturates,
+    /// which only happens far above the sizes either side accepts.
+    fn weighted_size(&self) -> u128 {
+        let per_fraction: u128 = if self.mults.is_none() { 3 } else { 4 };
+        u32::try_from(self.n_vars())
+            .ok()
+            .and_then(|n_vars| 1u128.checked_shl(n_vars))
+            .map_or(u128::MAX, |rows| rows.saturating_mul(per_fraction))
     }
 
     fn poly_ids(&self) -> impl Iterator<Item = TrackerID> + '_ {
@@ -304,11 +316,33 @@ pub(super) fn plan_instances<T: TrackerCore>(
     Ok(plan)
 }
 
-/// How a batch is cut into consecutive GKR runs. Each run is one subproof
-/// with its own point, and the schedule below is per run already, so a bound
-/// on a run's size only has to change this function.
-fn gkr_runs<F>(plan: &[InstancePlan<F>]) -> Vec<Range<usize>> {
-    std::iter::once(0..plan.len()).collect()
+/// Cuts a batch into consecutive GKR runs of at most `budget` each, so that
+/// the prover never holds more than one run's layers. Instances are taken in
+/// order and a run is closed when the next instance would not fit; an
+/// instance above the budget is a run of its own.
+///
+/// The cut depends on the plan and the shared configuration only, so both
+/// sides arrive at the same one. Should they not, the first run that differs
+/// has a different number of instances on the two sides, which the GKR
+/// verifier rejects.
+fn gkr_runs<F>(plan: &[InstancePlan<F>], budget: usize) -> Vec<Range<usize>> {
+    let budget = budget as u128;
+    let mut runs = Vec::new();
+    let mut start = 0;
+    let mut size = 0u128;
+    for (index, instance) in plan.iter().enumerate() {
+        let instance_size = instance.weighted_size();
+        if index > start && size.saturating_add(instance_size) > budget {
+            runs.push(start..index);
+            start = index;
+            size = 0;
+        }
+        size = size.saturating_add(instance_size);
+    }
+    if start < plan.len() {
+        runs.push(start..plan.len());
+    }
+    runs
 }
 
 /// `eq(point, i)` for every `i`, variable 0 being the lowest bit of `i`.
@@ -441,7 +475,8 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
         return Ok(Reduction { plan, roots });
     }
     let gamma = tracker.get_and_append_challenge(b"gamma")?;
-    for run in gkr_runs(&plan) {
+    let budget = tracker.config().logup_gkr_run_budget;
+    for run in gkr_runs(&plan, budget) {
         let claims = party.run(tracker, &plan, run.clone(), gamma)?;
         if claims.roots.len() != run.len() {
             return Err(party.reject("LogUp-GKR roots do not match their instances".to_string()));

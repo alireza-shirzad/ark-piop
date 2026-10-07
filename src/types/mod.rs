@@ -19,6 +19,12 @@ pub struct SharedArgConfig {
     /// Chunk size for batching no-zero-check claims. Larger values reduce
     /// the number of committed chunks but increase the degree of each chunk.
     pub nozero_chunk_size: usize,
+    /// Size limit of one LogUp-GKR run, in field elements of prover memory:
+    /// an input fraction costs 3 when its numerator is the constant 1 and 4
+    /// otherwise. A batch over the limit is cut into consecutive runs, each
+    /// a subproof of its own, which bounds the prover's peak at the price of
+    /// a longer proof. The cut is part of the proof's shape.
+    pub logup_gkr_run_budget: usize,
 }
 
 impl Default for SharedArgConfig {
@@ -26,6 +32,7 @@ impl Default for SharedArgConfig {
         Self {
             sumcheck_term_degree_limit: 6,
             nozero_chunk_size: 1,
+            logup_gkr_run_budget: 1 << 28,
         }
     }
 }

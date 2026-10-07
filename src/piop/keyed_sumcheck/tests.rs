@@ -31,11 +31,13 @@ use crate::{
         structs::{polynomial::TrackedPoly, proof::SNARKProof},
         tracker::ProverTracker,
     },
+    setup::KeyGenerator,
     test_utils::prelude_with_vars,
-    types::{SumcheckSubproof, TrackerID, artifact::Artifact},
+    types::{SharedArgConfig, SumcheckSubproof, TrackerID, artifact::Artifact},
     verifier::{
         ArgVerifier,
         structs::oracle::{Oracle, TrackedOracle},
+        tracker::VerifierTracker,
     },
 };
 
@@ -47,6 +49,25 @@ const SRS_NV: usize = 10;
 
 fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
     prelude_with_vars::<B>(SRS_NV).unwrap()
+}
+
+/// [`setup`] with the GKR runs of each side limited to its own budget. An
+/// honest pair is given the same one.
+fn setup_with_budgets(prover: usize, verifier: usize) -> (ArgProver<B>, ArgVerifier<B>) {
+    let config = |logup_gkr_run_budget| SharedArgConfig {
+        logup_gkr_run_budget,
+        ..SharedArgConfig::default()
+    };
+    let (pk, vk) = KeyGenerator::<B>::new()
+        .with_num_mv_vars(SRS_NV)
+        .gen_keys()
+        .unwrap();
+    let prover = ProverTracker::new_from_pk_with_config(pk, config(prover));
+    let verifier = VerifierTracker::new_from_vk_with_config(vk, config(verifier));
+    (
+        ArgProver::new_from_tracker(prover),
+        ArgVerifier::new_from_tracker(verifier),
+    )
 }
 
 fn fv(vals: impl IntoIterator<Item = u64>) -> Vec<F> {
@@ -162,7 +183,25 @@ struct Session {
 
 impl Session {
     fn new(columns: &[Vec<F>], summed: &[&[usize]], relations: &[Sides]) -> Self {
-        let (mut prover, verifier) = setup();
+        Self::on(setup(), columns, summed, relations)
+    }
+
+    /// A session whose sides cut their GKR batches by the given budgets.
+    fn with_budgets(
+        (prover, verifier): (usize, usize),
+        columns: &[Vec<F>],
+        relations: &[Sides],
+    ) -> Self {
+        let parties = setup_with_budgets(prover, verifier);
+        Self::on(parties, columns, &[], relations)
+    }
+
+    fn on(
+        (mut prover, verifier): (ArgProver<B>, ArgVerifier<B>),
+        columns: &[Vec<F>],
+        summed: &[&[usize]],
+        relations: &[Sides],
+    ) -> Self {
         let handles: Vec<TrackedPoly<B>> = columns
             .iter()
             .map(|evals| commit(&mut prover, evals))
@@ -262,26 +301,29 @@ impl Session {
         plan_instances(&*self.prover.tracker().borrow(), &self.relations).unwrap()
     }
 
-    /// Verifies `proof` on a copy of the verifier, so that several proofs
-    /// can be put to the same statement.
-    fn verify(&self, proof: &SNARKProof<B>) -> Result<(), Rejected> {
+    /// Mirrors the statement and the reduction of `proof` on a copy of the
+    /// verifier, so that several proofs can be put to the same statement.
+    /// Returns the copy as the reduction left it.
+    fn verify_reduction(&self, proof: &SNARKProof<B>) -> SnarkResult<ArgVerifier<B>> {
         let mut verifier = self.verifier.fork();
         verifier.set_proof_ref(proof);
-        let reduction = || -> SnarkResult<()> {
-            for id in &self.ids {
-                verifier.track_mv_com_by_id(*id)?;
+        for id in &self.ids {
+            verifier.track_mv_com_by_id(*id)?;
+        }
+        let oracle = |verifier: &mut ArgVerifier<B>, id| verifier.track_mv_com_by_id(id);
+        for (factors, sum) in &self.summed {
+            let mut poly = oracle(&mut verifier, factors[0])?;
+            for factor in &factors[1..] {
+                poly = &poly * &oracle(&mut verifier, *factor)?;
             }
-            let oracle = |verifier: &mut ArgVerifier<B>, id| verifier.track_mv_com_by_id(id);
-            for (factors, sum) in &self.summed {
-                let mut poly = oracle(&mut verifier, factors[0])?;
-                for factor in &factors[1..] {
-                    poly = &poly * &oracle(&mut verifier, *factor)?;
-                }
-                verifier.add_mv_sumcheck_claim(poly.id(), *sum);
-            }
-            verify_keyed_sums(&mut verifier, &self.relations)
-        }();
-        reduction.map_err(Rejected::Reduction)?;
+            verifier.add_mv_sumcheck_claim(poly.id(), *sum);
+        }
+        verify_keyed_sums(&mut verifier, &self.relations)?;
+        Ok(verifier)
+    }
+
+    fn verify(&self, proof: &SNARKProof<B>) -> Result<(), Rejected> {
+        let verifier = self.verify_reduction(proof).map_err(Rejected::Reduction)?;
         verifier.verify().map_err(Rejected::Claims)
     }
 
@@ -656,6 +698,300 @@ fn relations_whose_errors_cancel_over_the_batch_are_rejected() {
         Err(Rejected::Reduction(err)) => assert_verifier_error(err),
         other => panic!("expected the roots to differ, got {other:?}"),
     }
+}
+
+// ─── Runs of bounded size ────────────────────────────────────────────────
+
+/// What the run budget counts for an instance: 3 field elements per
+/// fraction when the numerators are 1, 4 otherwise.
+fn weighted_sizes(plan: &[InstancePlan<F>]) -> Vec<usize> {
+    plan.iter()
+        .map(|instance| (if instance.mults.is_none() { 3 } else { 4 }) << instance.n_vars())
+        .collect()
+}
+
+/// How many instances each GKR subproof of `proof` covers.
+fn run_lengths(proof: &SNARKProof<B>) -> Vec<usize> {
+    proof
+        .logup_gkr_subproofs
+        .iter()
+        .map(|subproof| subproof.roots.len())
+        .collect()
+}
+
+fn assert_rejected_in_the_reduction(res: Result<(), Rejected>) {
+    match res {
+        Err(Rejected::Reduction(err)) => assert_verifier_error(err),
+        other => panic!("expected the reduction to fail, got {other:?}"),
+    }
+}
+
+/// The columns of [`mixed_relations`], whose keyed sums all hold.
+struct MixedColumns {
+    table: Vec<F>,
+    a: Vec<F>,
+    b: Vec<F>,
+    c: Vec<F>,
+    c_weights: Vec<F>,
+    d: Vec<F>,
+    p: Vec<F>,
+    q: Vec<F>,
+}
+
+impl MixedColumns {
+    fn new() -> Self {
+        Self {
+            table: fv(0..16),
+            a: in_table(3, 16, 1),
+            b: in_table(5, 16, 2),
+            c: in_table(3, 16, 3),
+            c_weights: fv((0..8).map(|i| 2 * i + 1)),
+            d: in_table(2, 16, 4),
+            p: fv((0..32).map(|i| i + 100)),
+            q: fv((0..32).map(|i| (i * 13 + 5) % 32 + 100)),
+        }
+    }
+
+    /// Three relations of mixed sizes and kinds: `a`, `b` and the weighted
+    /// `c` looked up in the table, `d` looked up in the table, and `q` a
+    /// permutation of `p`. `counts_abc` and `counts_d` are what the table
+    /// side of the first two counts.
+    ///
+    /// Their instances, in order, with their weighted sizes: `a` 24, `b`
+    /// 96, `c` 32, the table 64, `d` 12, the table 64, `p` 96, `q` 96.
+    fn session(&self, budgets: (usize, usize), counts_abc: &[F], counts_d: &[F]) -> Session {
+        let columns = [
+            self.table.clone(),
+            counts_abc.to_vec(),
+            self.a.clone(),
+            self.b.clone(),
+            self.c.clone(),
+            self.c_weights.clone(),
+            counts_d.to_vec(),
+            self.d.clone(),
+            self.p.clone(),
+            self.q.clone(),
+        ];
+        let relations = [
+            (vec![(2, None), (3, None), (4, Some(5))], vec![(0, Some(1))]),
+            (vec![(7, None)], vec![(0, Some(6))]),
+            (vec![(8, None)], vec![(9, None)]),
+        ];
+        Session::with_budgets(budgets, &columns, &relations)
+    }
+
+    fn counts_abc(&self) -> Vec<F> {
+        let entries: [(&[F], Option<&[F]>); 3] = [
+            (&self.a, None),
+            (&self.b, None),
+            (&self.c, Some(&self.c_weights)),
+        ];
+        tally(&self.table, &entries)
+    }
+
+    fn counts_d(&self) -> Vec<F> {
+        tally(&self.table, &[(&self.d, None)])
+    }
+
+    /// The session of an honest prover on these columns.
+    fn honest(&self, budgets: (usize, usize)) -> Session {
+        self.session(budgets, &self.counts_abc(), &self.counts_d())
+    }
+}
+
+/// A batch above the budget is proved in several GKR runs, each a subproof
+/// with a point of its own: instances fill a run in order until the next
+/// one would not fit. The relations are still compared as wholes, and every
+/// run's claims are tied to the columns.
+#[test]
+fn gkr_batch_split_small_budget() {
+    let columns = MixedColumns::new();
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+
+    let mut session = columns.honest((100, 100));
+    assert_eq!(
+        weighted_sizes(&session.plan()),
+        [24, 96, 32, 64, 12, 64, 96, 96]
+    );
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
+    let proof = session.prover.build_proof().unwrap();
+    // `c` and the first table fill a run exactly; `d` shares one with the
+    // second table.
+    assert_eq!(run_lengths(&proof), [1, 1, 2, 2, 1, 1]);
+    let verifier = session.verify_reduction(&proof).unwrap();
+    assert_in_sync(&after_reduction, &verifier);
+    verifier.verify().unwrap();
+
+    // One element less and `c` no longer fits beside its table, which then
+    // takes `d` in.
+    for (budget, runs) in [
+        (unsplit, vec![8]),
+        (96, vec![1, 1, 2, 2, 1, 1]),
+        (95, vec![1, 1, 1, 2, 1, 1, 1]),
+    ] {
+        let mut session = columns.honest((budget, budget));
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert_eq!(run_lengths(&proof), runs);
+        session.verify(&proof).unwrap();
+    }
+
+    // A value outside the table in the first run, whose relation is closed
+    // by the table two runs later.
+    let mut bad = MixedColumns::new();
+    bad.a[5] = F::from(16u64);
+    let session = bad.session((100, 100), &columns.counts_abc(), &columns.counts_d());
+    assert_rejected_in_the_reduction(session.prove_and_verify());
+
+    // A miscounted table in the run it shares with `d`.
+    let mut counts_d = columns.counts_d();
+    counts_d[3] += F::one();
+    let session = columns.session((100, 100), &columns.counts_abc(), &counts_d);
+    assert_rejected_in_the_reduction(session.prove_and_verify());
+
+    // The last instance of the last run is not a permutation of `p`, which
+    // sits in the run before.
+    let mut bad = MixedColumns::new();
+    bad.q[31] = bad.q[30];
+    assert_rejected_in_the_reduction(bad.honest((100, 100)).prove_and_verify());
+}
+
+/// The input claims of every run are pushed, each at its run's point. A
+/// committed column is not what the table counts and the prover runs the
+/// GKR on one that is: a column alone in the first run, and a column and a
+/// multiplicity of the fourth.
+#[test]
+fn gkr_on_fake_leaves_in_any_run_is_rejected() {
+    let columns = MixedColumns::new();
+    for column in [2, 7, 6] {
+        let mut committed = MixedColumns::new();
+        let mut counts_d = columns.counts_d();
+        let fake = match column {
+            2 => {
+                committed.a[1] = F::from(16u64);
+                columns.a.clone()
+            }
+            7 => {
+                committed.d[1] = F::from(16u64);
+                columns.d.clone()
+            }
+            _ => {
+                counts_d[3] += F::one();
+                columns.counts_d()
+            }
+        };
+        let session = committed.session((100, 100), &columns.counts_abc(), &counts_d);
+        let evals = BTreeMap::from([(session.ids[column], fake)]);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+    }
+}
+
+/// Two relations, each false and each side a run of its own, whose errors
+/// cancel over the batch.
+#[test]
+fn relations_whose_errors_cancel_across_runs_are_rejected() {
+    let columns = [fv(0..32), fv((0..32).map(|i| i + 100))];
+    let entry = |column: usize| vec![(column, None)];
+    let budgets = (100, 100);
+
+    let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
+    let mut session = Session::with_budgets(budgets, &columns, &[together]);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    assert_eq!(run_lengths(&proof), [1, 1]);
+    session.verify(&proof).unwrap();
+
+    let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
+    let mut session = Session::with_budgets(budgets, &columns, &apart);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    assert_eq!(run_lengths(&proof), [1, 1, 1, 1]);
+    assert_rejected_in_the_reduction(session.verify(&proof));
+}
+
+/// An instance above the budget is proved in a run of its own, between the
+/// runs its neighbours are packed into, down to a budget nothing fits in.
+#[test]
+fn gkr_single_instance_over_budget() {
+    let table = fv(0..8);
+    let small = fv([3, 1, 4, 1]);
+    let small_permuted = fv([1, 1, 3, 4]);
+    let session = |budget: usize, big: &[F]| {
+        let columns = [
+            small.clone(),
+            small_permuted.clone(),
+            big.to_vec(),
+            table.clone(),
+            tally(&table, &[(&in_table(5, 8, 1), None)]),
+        ];
+        let relations = [
+            (vec![(0, None)], vec![(1, None)]),
+            (vec![(2, None)], vec![(3, Some(4))]),
+            (vec![(1, None)], vec![(0, None)]),
+        ];
+        Session::with_budgets((budget, budget), &columns, &relations)
+    };
+    let big = in_table(5, 8, 1);
+    let mut outside = big.clone();
+    outside[17] = F::from(8u64);
+
+    assert_eq!(
+        weighted_sizes(&session(40, &big).plan()),
+        [12, 12, 96, 32, 12, 12]
+    );
+    for (budget, runs) in [
+        (40, vec![2, 1, 1, 2]),
+        // The table's run has room for one more instance, which parts the
+        // two sides of the last relation.
+        (44, vec![2, 1, 2, 1]),
+        (95, vec![2, 1, 3]),
+        // Every instance is above the budget.
+        (11, vec![1; 6]),
+        (0, vec![1; 6]),
+        (usize::MAX, vec![6]),
+    ] {
+        let mut honest = session(budget, &big);
+        honest.prove_with(ColumnEvals::new()).unwrap();
+        let after_reduction = ArgProver::new_from_tracker(honest.prover.tracker().borrow().clone());
+        let proof = honest.prover.build_proof().unwrap();
+        assert_eq!(run_lengths(&proof), runs, "budget {budget}");
+        let verifier = honest.verify_reduction(&proof).unwrap();
+        assert_in_sync(&after_reduction, &verifier);
+        verifier.verify().unwrap();
+
+        assert_rejected_in_the_reduction(session(budget, &outside).prove_and_verify());
+    }
+}
+
+/// The cut into runs is part of the statement the verifier checks: a proof
+/// cut by another budget than the verifier's is rejected at the first run
+/// that differs, whichever side has the finer cut. Budgets that give the
+/// same cut are the same statement.
+#[test]
+fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
+    let columns = MixedColumns::new();
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+    let run = |budgets: (usize, usize)| {
+        let mut session = columns.honest(budgets);
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        session.verify(&proof)
+    };
+
+    for budgets in [
+        (100, unsplit),
+        (unsplit, 100),
+        // The first two runs are the same on both sides.
+        (100, 95),
+        (95, 100),
+        (0, 100),
+        (100, 0),
+    ] {
+        assert_rejected_in_the_reduction(run(budgets));
+    }
+    run((100, 96)).unwrap();
+    run((unsplit, usize::MAX)).unwrap();
 }
 
 // ─── Layout of the batch ─────────────────────────────────────────────────
