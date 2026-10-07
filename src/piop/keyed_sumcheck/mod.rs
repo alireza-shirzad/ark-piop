@@ -22,7 +22,11 @@ use crate::{
         SnarkError, SnarkResult,
     },
     piop::PIOP,
-    prover::{ArgProver, structs::polynomial::TrackedPoly},
+    prover::{
+        ArgProver,
+        errors::{HonestProverError::WrongInputShape, ProverError},
+        structs::polynomial::TrackedPoly,
+    },
     verifier::{
         ArgVerifier, errors::VerifierError::VerifierInputShapeError, structs::oracle::TrackedOracle,
     },
@@ -67,6 +71,11 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput> {
+        // The verifier refuses these shapes before it reads the proof, and
+        // so does the deferred claim: nothing is written for them here.
+        input
+            .check_shape()
+            .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
         prove_keyed_sums(prover, &[input.relation()], ColumnEvals::new())
     }
 

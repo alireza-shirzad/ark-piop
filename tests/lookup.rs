@@ -2081,3 +2081,49 @@ fn deferred_keyed_sum_claim_checks_its_shape() {
         },
     ));
 }
+
+/// Proving the PIOP on the spot refuses the same shapes on both sides, and
+/// writes nothing for them: the well-formed relation that follows verifies.
+#[test]
+fn keyed_sumcheck_checks_its_shape_on_both_sides() {
+    let f = fv(0..16);
+    let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
+    // `(fxs, mfxs, gxs, mgxs)` lengths.
+    let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
+
+    assert_accepted(prove_and_verify(
+        |prover| {
+            let f = commit(prover, &f)?;
+            let g = commit(prover, &g)?;
+            let ids = [f.id(), g.id()];
+            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
+                fxs: vec![f.clone(); fxs],
+                mfxs: vec![None; mfxs],
+                gxs: vec![g.clone(); gxs],
+                mgxs: vec![None; mgxs],
+            };
+            for shape in malformed {
+                let err = KeyedSumcheck::<B>::prove(prover, input(shape))
+                    .expect_err("a malformed keyed sum must be refused");
+                assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
+            }
+            KeyedSumcheck::<B>::prove(prover, input((1, 1, 1, 1)))?;
+            Ok(ids)
+        },
+        |verifier, ids| {
+            let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
+            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
+                fxs: vec![f.clone(); fxs],
+                mfxs: vec![None; mfxs],
+                gxs: vec![g.clone(); gxs],
+                mgxs: vec![None; mgxs],
+            };
+            for shape in malformed {
+                let err = KeyedSumcheck::<B>::verify(verifier, input(shape))
+                    .expect_err("a malformed keyed sum must be refused");
+                assert_verifier_error(err);
+            }
+            KeyedSumcheck::<B>::verify(verifier, input((1, 1, 1, 1)))
+        },
+    ));
+}
