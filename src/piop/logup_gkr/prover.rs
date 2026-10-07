@@ -77,8 +77,9 @@ struct Active<'a, F> {
     /// polynomial while it is live.
     weight: F,
     /// Running claim of the instance's own sumcheck, without batching
-    /// weight. The batched protocol does not need it per instance; it is
-    /// kept so that eq factoring can derive round values from it later.
+    /// weight. It is part of the proof, not a cross-check: once the instance
+    /// has bound its last variable, this is its constant term in the later
+    /// rounds of the iteration (`done` below).
     claim: F,
 }
 
@@ -324,7 +325,8 @@ pub(crate) fn prove_batch<F: PrimeField>(
     let roots: Vec<[F; 2]> = states.iter().map(|state| state.claim).collect();
     tr.append_serializable_element(ROOTS_LABEL, &roots)?;
 
-    let cubic = CubicInterpolator::new()?;
+    let cubic = CubicInterpolator::new()
+        .ok_or_else(|| invalid("LogUp-GKR needs a field of characteristic above 3"))?;
     let pow2 = powers_of_two::<F>(n_max);
     let mut point: Vec<F> = Vec::with_capacity(n_max);
     let mut round_polys = Vec::with_capacity(n_max);

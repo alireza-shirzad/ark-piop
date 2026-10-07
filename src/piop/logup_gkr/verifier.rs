@@ -92,10 +92,15 @@ pub(crate) fn verify_batch<F: PrimeField>(
         return reject("LogUp-GKR root with a zero denominator");
     }
 
+    // Not something a proof can cause, but reported like every other
+    // refusal, and before the transcript is touched.
+    let Some(cubic) = CubicInterpolator::new() else {
+        return reject("LogUp-GKR needs a field of characteristic above 3");
+    };
+
     absorb_shape(shape, tr)?;
     tr.append_serializable_element(ROOTS_LABEL, &proof.roots)?;
 
-    let cubic = CubicInterpolator::new()?;
     let pow2 = powers_of_two::<F>(n_max);
     let mut claims = proof.roots.clone();
     let mut point: Vec<F> = Vec::with_capacity(n_max);

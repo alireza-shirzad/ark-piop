@@ -40,11 +40,7 @@ mod verifier;
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 
-use crate::{
-    errors::{SnarkError, SnarkResult},
-    piop::errors::PolyIOPErrors,
-    transcript::Tr,
-};
+use crate::{errors::SnarkResult, transcript::Tr};
 
 #[cfg_attr(not(test), expect(unused_imports))]
 pub(crate) use {prover::prove_batch, verifier::verify_batch};
@@ -146,13 +142,11 @@ struct CubicInterpolator<F> {
 }
 
 impl<F: PrimeField> CubicInterpolator<F> {
-    fn new() -> SnarkResult<Self> {
-        let inv6 = F::from(6u64).inverse().ok_or_else(|| {
-            SnarkError::from(PolyIOPErrors::InvalidParameters(
-                "LogUp-GKR needs a field of characteristic above 3".to_string(),
-            ))
-        })?;
-        Ok(Self {
+    /// `None` in characteristic 2 or 3, where the four nodes are not
+    /// distinct.
+    fn new() -> Option<Self> {
+        let inv6 = F::from(6u64).inverse()?;
+        Some(Self {
             inv2: inv6 * F::from(3u64),
             inv6,
         })
