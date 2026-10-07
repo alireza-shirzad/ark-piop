@@ -2286,6 +2286,34 @@ fn both_sides_hold_polynomials_of_the_same_size_under_every_id() {
     }
 }
 
+/// A window activator over every row, or over none, is a constant. The
+/// claims it ends up in have the degree on both sides that a constant
+/// factor gives them, like those under a window that is neither.
+#[test]
+fn claims_under_a_constant_window_activator_have_one_degree_on_both_sides() {
+    for active in [0, 8, 5] {
+        let (mut prover, mut verifier) = setup();
+        let table = commit(&mut prover, &fv(0..8));
+        let data = commit(&mut prover, &in_table(3, 8, 1));
+        let activator = prover.get_or_build_contig_one_poly(3, active).unwrap();
+        let sub = &data * &activator;
+        prover.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
+        let mut reduced = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        reduced.reduce_lookup_claims().unwrap();
+        let proof = prover.build_proof().unwrap();
+
+        verifier.set_proof_ref(&proof);
+        let table = verifier.track_mv_com_by_id(table.id()).unwrap();
+        let data = verifier.track_mv_com_by_id(data.id()).unwrap();
+        let activator = verifier.get_or_build_contig_one_poly(3, active).unwrap();
+        let sub = &data * &activator;
+        verifier.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
+        verifier.reduce_lookup_claims().unwrap();
+        assert_in_sync(&reduced, &verifier);
+        verifier.verify().unwrap();
+    }
+}
+
 // ─── A verdict that stays ────────────────────────────────────────────────
 
 /// A false lookup by a prover that is honest about everything else: the GKR

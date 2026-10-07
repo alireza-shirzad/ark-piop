@@ -291,7 +291,14 @@ where
         // The [0…0, 1…1, 0…0] window stores as a 2-3 run RLE (O(1) memory)
         // instead of a full 2^nv Field Vec (512 MiB at nv 24).
         let mle = MLE::from_window_activator(s, n, nv);
-        let poly_id = self.track_mat_mv_poly(mle);
+        // An empty or full window is a constant, which the verifier tracks
+        // as a constant oracle. The sumcheck buckets are planned from the
+        // degrees of the claims, so it has to have degree 0 here as well.
+        let poly_id = if n == 0 || n == total {
+            self.track_derived_mv_constant(mle)
+        } else {
+            self.track_mat_mv_poly(mle)
+        };
 
         let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {
             poly.tracker()

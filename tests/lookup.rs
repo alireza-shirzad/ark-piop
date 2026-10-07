@@ -822,6 +822,61 @@ fn lookup_sub_zero_constant_times_activator_far_wider_than_the_table() {
     assert_rejected(run(4));
 }
 
+/// A window activator that covers every row, or none, is a constant: the
+/// output of a filter that kept everything or nothing. Both sides have to
+/// count it as one when they plan the sumchecks, or they split the claims
+/// differently. The two plain claims put the plan where one degree more or
+/// less on the sub decides it.
+#[test]
+fn lookup_sub_under_a_window_activator_that_is_constant() {
+    let run = |active: usize, data_modulus: u64| {
+        prove_and_verify(
+            |prover| {
+                let table = commit(prover, &fv(0..8))?;
+                let data = commit(prover, &fv((0..8).map(|i| (i * 3 + 1) % data_modulus)))?;
+                let activator = prover.get_or_build_contig_one_poly(3, active)?;
+                let sub = &data * &activator;
+                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+
+                let narrow = fv(0..8);
+                let narrow_poly = commit(prover, &narrow)?;
+                prover.add_mv_sumcheck_claim(narrow_poly.id(), sum(&narrow))?;
+
+                let wide = fv((0..16).map(|i| i + 2));
+                let wide_poly = commit(prover, &wide)?;
+                let square = &wide_poly * &wide_poly;
+                let square_sum = sum(&wide.iter().map(|v| *v * v).collect::<Vec<F>>());
+                prover.add_mv_sumcheck_claim(square.id(), square_sum)?;
+
+                let ids = [table.id(), data.id(), narrow_poly.id(), wide_poly.id()];
+                Ok((ids, sum(&narrow), square_sum))
+            },
+            |verifier, (ids, narrow_sum, square_sum)| {
+                // In the prover's order: the activator and the product take
+                // their ids between the commitments.
+                let lookup = track_all(verifier, &ids[..2])?;
+                let activator = verifier.get_or_build_contig_one_poly(3, active)?;
+                let sub = &lookup[1] * &activator;
+                verifier.add_mv_lookup_claim(lookup[0].id(), sub.id())?;
+
+                let narrow = verifier.track_mv_com_by_id(ids[2])?;
+                verifier.add_mv_sumcheck_claim(narrow.id(), narrow_sum);
+                let wide = verifier.track_mv_com_by_id(ids[3])?;
+                let square = &wide * &wide;
+                verifier.add_mv_sumcheck_claim(square.id(), square_sum);
+                Ok(())
+            },
+        )
+    };
+    for active in [0, 8, 5] {
+        assert_accepted(run(active, 8));
+    }
+    // Rows 1 and 4 leave the table; an empty window hides them.
+    assert_accepted(run(0, 11));
+    assert_rejected(run(8, 11));
+    assert_rejected(run(5, 11));
+}
+
 /// `sub ⊆ 0..16` for a sub with `rows` copies of `chunk`, committed as a
 /// constant. `derived` multiplies it by an all-ones activator, itself a
 /// committed constant, so the sub is a folded constant that only gets a
