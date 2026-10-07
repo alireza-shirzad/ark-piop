@@ -2,7 +2,7 @@
 //! hyperplonk interface, linear-term dedup, and nv equalization.
 
 use super::super::*;
-use crate::arithmetic::mat_poly::mle::MLEStorage;
+use crate::arithmetic::mat_poly::{mle::MLEStorage, rows::add_scaled_product};
 use std::collections::BinaryHeap;
 
 impl<B> ProverTracker<B>
@@ -185,19 +185,7 @@ where
                     let mut evals = vec![B::F::zero(); 1 << nv];
                     for (id, coeff) in &signature {
                         let mle = self.mat_mv_poly(*id).unwrap();
-                        // Fix 6b: skip the 2^nv Vec allocation when the
-                        // factor is Constant-backed — the added contribution
-                        // is a uniform `coeff * value` per slot, so we just
-                        // add that scalar across the accumulator without
-                        // materialising a same-valued eval vector.
-                        if let MLEStorage::Constant { value, .. } = mle.storage() {
-                            let cv = *coeff * *value;
-                            cfg_iter_mut!(evals).for_each(|acc| *acc += cv);
-                        } else {
-                            cfg_iter_mut!(evals)
-                                .zip(mle.evaluations())
-                                .for_each(|(acc, v)| *acc += *coeff * v);
-                        }
+                        add_scaled_product(&mut evals, *coeff, &[mle]);
                     }
                     let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
                     linear_cache.push((signature.clone(), mle.clone()));
