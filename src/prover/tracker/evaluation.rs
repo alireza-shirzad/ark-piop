@@ -1,52 +1,28 @@
 //! Polynomial evaluation — materializing virtual polynomials and evaluating at points.
 
 use super::*;
+use crate::arithmetic::mat_poly::rows::add_scaled_product;
 
 impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    pub(super) fn materialize_poly(&mut self, id: TrackerID) -> Arc<MLE<B::F>> {
-        match self.mat_mv_poly(id) {
-            Some(mat_poly) => mat_poly.clone(), // already materialized
-            None => {
-                let virt_poly = self.state.virtual_polys[&id].clone();
-                // Invariant: contains only material PolyIDs
-                assert!(
-                    virt_poly
-                        .iter()
-                        .all(|(_, ids)| ids.iter().all(|id| self.mat_mv_poly(*id).is_some()))
-                );
-                let nv = self.poly_nv(id);
-
-                let evals = virt_poly.iter().fold(
-                    vec![B::F::ZERO; 1 << nv],
-                    |mut acc, (coeff, products)| {
-                        let t = products.iter().fold(vec![*coeff; 1 << nv], |mut acc, id| {
-                            let mle = self.mat_mv_poly(*id).unwrap();
-                            // Constant-backed factor: one scalar multiply per
-                            // slot, skipping an O(2^nv) Vec allocation.
-                            if let crate::arithmetic::mat_poly::mle::MLEStorage::Constant {
-                                value,
-                                ..
-                            } = mle.storage()
-                            {
-                                let v = *value;
-                                cfg_iter_mut!(acc).for_each(|a| *a *= v);
-                            } else {
-                                cfg_iter_mut!(acc)
-                                    .zip(mle.evaluations())
-                                    .for_each(|(a, b)| *a *= b);
-                            }
-                            acc
-                        });
-                        cfg_iter_mut!(acc).zip(t).for_each(|(a, b)| *a += b);
-                        acc
-                    },
-                );
-                Arc::new(MLE::from_evaluations_vec(nv, evals))
-            }
+    /// The evaluations of the virtual polynomial `id` on the hypercube of
+    /// its size, a factor of fewer variables repeating along the others as
+    /// it does in the sumcheck.
+    fn virtual_evaluations(&self, id: TrackerID) -> Vec<B::F> {
+        let mut evals = vec![B::F::ZERO; 1 << self.poly_nv(id)];
+        for (coeff, product) in &self.state.virtual_polys[&id] {
+            let factors: Vec<&MLE<B::F>> = product
+                .iter()
+                .map(|factor| {
+                    let mle = self.mat_mv_poly(*factor);
+                    &**mle.expect("a virtual polynomial names material polynomials only")
+                })
+                .collect();
+            add_scaled_product(&mut evals, *coeff, &factors);
         }
+        evals
     }
 
     pub fn evaluate_uv(&self, id: TrackerID, pt: &B::F) -> Option<B::F> {
@@ -187,9 +163,9 @@ where
 
     /// Returns the evaluations of a polynomial on the boolean hypercube
     pub fn evaluations(&mut self, id: TrackerID) -> Vec<B::F> {
-        // Ensure the polynomial is materialized before getting evaluations
-        let mat_poly = self.materialize_poly(id);
-
-        mat_poly.evaluations()
+        match self.mat_mv_poly(id) {
+            Some(mat_poly) => mat_poly.evaluations(),
+            None => self.virtual_evaluations(id),
+        }
     }
 }
