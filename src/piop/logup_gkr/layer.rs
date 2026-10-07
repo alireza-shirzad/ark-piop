@@ -16,6 +16,14 @@ pub(super) const SERIAL_BELOW: usize = 1 << 12;
 #[cfg(feature = "parallel")]
 const MIN_SPLIT: usize = 1 << 10;
 
+/// Threads the parallel loops of this module are spread over.
+pub(super) fn pool_threads() -> usize {
+    #[cfg(feature = "parallel")]
+    return rayon::current_num_threads();
+    #[cfg(not(feature = "parallel"))]
+    1
+}
+
 /// Maps `f` over `jobs` in order, on the thread pool if `parallel` is set
 /// (and the feature is on). The caller builds ONE flat list per step and
 /// decides `parallel` from its total work, so parallel loops never nest.
@@ -79,7 +87,8 @@ impl<F: PrimeField> Layer<F> {
         } else {
             unzip_indexed(len, parallel, |j| {
                 let (a, b) = (q[2 * j], q[2 * j + 1]);
-                (p[2 * j] * b + p[2 * j + 1] * a, a * b)
+                let numerator = F::sum_of_products(&[p[2 * j], p[2 * j + 1]], &[b, a]);
+                (numerator, a * b)
             })
         };
         Self { p, q }

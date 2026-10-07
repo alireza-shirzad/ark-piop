@@ -1,13 +1,12 @@
 //! Prover side of batched LogUp-GKR: a degree-3 sumcheck specialised to the
 //! fraction-addition gate, run over all instances of a batch at once.
 
-use ark_ff::PrimeField;
+use ark_ff::{PrimeField, batch_inversion};
 
 use super::{
-    ALPHA_LABEL, CubicInterpolator, FractionInstance, GkrClaims, GkrShape, LAMBDA_LABEL,
-    LogupGkrProof, MASKS_LABEL, MAX_GKR_VARS, MU_LABEL, Numerator, RHO_LABEL, ROOTS_LABEL,
-    ROUND_LABEL, absorb_shape,
-    layer::{Layer, SERIAL_BELOW, build_layer_stacks, eq_table, map_jobs},
+    ALPHA_LABEL, FractionInstance, GkrClaims, GkrShape, LAMBDA_LABEL, LogupGkrProof, MASKS_LABEL,
+    MAX_GKR_VARS, MU_LABEL, Numerator, RHO_LABEL, ROOTS_LABEL, ROUND_LABEL, absorb_shape,
+    layer::{Layer, build_layer_stacks, eq_table, map_jobs, pool_threads},
     powers_of_two,
 };
 use crate::{
@@ -16,8 +15,27 @@ use crate::{
     transcript::Tr,
 };
 
-/// Gate pairs per item of a round's work list.
+/// Largest number of gate pairs in one item of a round's work list.
 const CHUNK_PAIRS: usize = 1 << 11;
+
+/// Smallest number of gate pairs worth an item of their own.
+const MIN_CHUNK_PAIRS: usize = 1 << 6;
+
+/// Below this many gate pairs over all instances a round runs serially:
+/// a few tens of microseconds of work, about what waking the pool costs.
+const SERIAL_BELOW_PAIRS: usize = 1 << 8;
+
+/// Gate pairs per work item for a round of `total_pairs`: a few items per
+/// thread, so that a round a little above the serial threshold still uses
+/// the whole pool.
+fn chunk_pairs(total_pairs: usize) -> usize {
+    (total_pairs / (4 * pool_threads())).clamp(MIN_CHUNK_PAIRS, CHUNK_PAIRS)
+}
+
+fn live_pairs<F>(active: &[Active<'_, F>], round: usize) -> usize {
+    let live = active.iter().filter(|a| a.k > round);
+    live.map(|a| 1usize << (a.k - round - 1)).sum()
+}
 
 fn invalid(reason: &str) -> SnarkError {
     PolyIOPErrors::InvalidParameters(reason.to_string()).into()
@@ -76,17 +94,24 @@ struct Active<'a, F> {
     /// `alpha^idx · 2^(t-k)`, the weight of the instance's own round
     /// polynomial while it is live.
     weight: F,
-    /// Running claim of the instance's own sumcheck, without batching
-    /// weight. It is part of the proof, not a cross-check: once the instance
-    /// has bound its last variable, this is its constant term in the later
-    /// rounds of the iteration (`done` below).
+    /// Running claim of the instance's own sumcheck, without batching weight
+    /// and without the eq factor of the variables bound so far (which is the
+    /// same for every live instance). It is part of the proof, not a
+    /// cross-check: a round gets its polynomial at 1 from it, which is what
+    /// lets the round be computed from two sums instead of three, and once
+    /// the instance has bound its last variable it is the instance's
+    /// constant term in the later rounds of the iteration (`done` below).
     claim: F,
 }
 
-/// The eq table of the instances of one size.
+/// The eq table of the instances of one size. The eq factor of the round
+/// variable is taken out of the round sums, so in round `j` the table is
+/// over the variables after `j` only: half the size of the gate tables, and
+/// binding a variable is summing it out.
 struct EqTables<F> {
     n_vars: usize,
-    /// Variables of the table in the current iteration, if the size is active.
+    /// Variables of the claimed layer in the current iteration, if the size
+    /// is active.
     k: Option<usize>,
     /// Round `j` folds `bufs[j % 2]` into the other; `bufs[1]` starts as the
     /// table of the previous iteration, which has the size the first fold
@@ -115,7 +140,7 @@ fn fold_bufs<T>(bufs: &mut [T; 3], round: usize) -> (&T, &mut T) {
 
 /// A chunk of one instance's gates in one round. With `x` the round
 /// variable, a pair of gates is four consecutive entries of `p` and of `q`
-/// (children 0 and 1 at `x = 0`, then at `x = 1`) and two of `eq`.
+/// (children 0 and 1 at `x = 0`, then at `x = 1`) and one of `eq`.
 struct SumJob<'a, F> {
     slot: usize,
     /// Empty for a numerator-free layer.
@@ -125,45 +150,61 @@ struct SumJob<'a, F> {
 }
 
 impl<F: PrimeField> SumJob<'_, F> {
-    /// Sum over the chunk of `eq·(p0·q1 + p1·q0 + lambda·q0·q1)` at
-    /// `x = 0, 2, 3`, where `p0, q0` are the even and `p1, q1` the odd
-    /// children. All three products of the gate are evaluated in one pass
-    /// as `eq·((p0 + lambda·q0)·q1 + p1·q0)`.
-    fn sums(&self, lambda: F) -> [F; 3] {
-        let mut acc = [F::zero(); 3];
+    /// Sum over the chunk of `eq·h(x)` at `x = 0` and its coefficient of
+    /// `x^2`, for the gate `h = p0·q1 + p1·q0 + lambda·q0·q1` with `p0, q0`
+    /// the even and `p1, q1` the odd children. The gate is evaluated as
+    /// `(p0 + lambda·q0)·q1 + p1·q0`; its leading coefficient is the same
+    /// expression on the differences along `x`.
+    fn sums(&self, lambda: F) -> [F; 2] {
         if self.p.is_empty() {
-            for (q, e) in self.q.chunks_exact(4).zip(self.eq.chunks_exact(2)) {
-                // With unit numerators the gate is (1 + lambda·q0)·q1 + q0.
-                let a0 = F::one() + lambda * q[0];
-                let a1 = F::one() + lambda * q[2];
-                let (da, dq0, dq1, de) = (a1 - a0, q[2] - q[0], q[3] - q[1], e[1] - e[0]);
-                acc[0] += e[0] * (a0 * q[1] + q[0]);
-                let (a, q0, q1, eq) = (a1 + da, q[2] + dq0, q[3] + dq1, e[1] + de);
-                acc[1] += eq * (a * q1 + q0);
-                let (a, q0, q1, eq) = (a + da, q0 + dq0, q1 + dq1, eq + de);
-                acc[2] += eq * (a * q1 + q0);
-            }
+            // With unit numerators the gate is q0 + q1 + lambda·q0·q1, and
+            // lambda is applied once to the whole chunk.
+            let [linear, h0, c] = weighted_sums(self.eq, |i| {
+                let q = &self.q[4 * i..4 * i + 4];
+                [q[0] + q[1], q[0] * q[1], (q[2] - q[0]) * (q[3] - q[1])]
+            });
+            [linear + lambda * h0, lambda * c]
         } else {
-            let gates = self.p.chunks_exact(4).zip(self.q.chunks_exact(4));
-            for ((p, q), e) in gates.zip(self.eq.chunks_exact(2)) {
+            weighted_sums(self.eq, |i| {
+                let (p, q) = (&self.p[4 * i..4 * i + 4], &self.q[4 * i..4 * i + 4]);
                 let a0 = p[0] + lambda * q[0];
                 let a1 = p[2] + lambda * q[2];
-                let (da, dp1, dq0, dq1, de) =
-                    (a1 - a0, p[3] - p[1], q[2] - q[0], q[3] - q[1], e[1] - e[0]);
-                acc[0] += e[0] * (a0 * q[1] + p[1] * q[0]);
-                let (a, p1, q0, q1, eq) = (a1 + da, p[3] + dp1, q[2] + dq0, q[3] + dq1, e[1] + de);
-                acc[1] += eq * (a * q1 + p1 * q0);
-                let (a, p1, q0, q1, eq) = (a + da, p1 + dp1, q0 + dq0, q1 + dq1, eq + de);
-                acc[2] += eq * (a * q1 + p1 * q0);
-            }
+                [
+                    F::sum_of_products(&[a0, p[1]], &[q[1], q[0]]),
+                    F::sum_of_products(&[a1 - a0, p[3] - p[1]], &[q[3] - q[1], q[2] - q[0]]),
+                ]
+            })
         }
-        acc
     }
 }
 
-/// Binds the round variable of a chunk of one table to `r`, writing the
-/// half-size result to `dst`. `stride` is 2 for an interleaved layer table
-/// (the two children keep their slots) and 1 for an eq table.
+/// `sum_i weights[i] · terms(i)`, componentwise. The products are taken two
+/// at a time: a sum of two products costs one reduction, not two.
+pub(super) fn weighted_sums<F: PrimeField, const T: usize>(
+    weights: &[F],
+    terms: impl Fn(usize) -> [F; T],
+) -> [F; T] {
+    let mut acc = [F::zero(); T];
+    let pairs = weights.chunks_exact(2);
+    if let [w] = pairs.remainder() {
+        let last = terms(weights.len() - 1);
+        for (sum, term) in acc.iter_mut().zip(last) {
+            *sum += *w * term;
+        }
+    }
+    for (i, w) in pairs.enumerate() {
+        let (even, odd) = (terms(2 * i), terms(2 * i + 1));
+        for ((sum, even), odd) in acc.iter_mut().zip(even).zip(odd) {
+            *sum += F::sum_of_products(&[w[0], w[1]], &[even, odd]);
+        }
+    }
+    acc
+}
+
+/// Binds the round variable of a chunk of one table, writing the half-size
+/// result to `dst`. A layer table is interleaved and bound to `r`, the two
+/// children keeping their slots; an eq table (`stride` 1) no longer has the
+/// round variable and loses the next one by summing over it.
 struct FoldJob<'a, F> {
     src: &'a [F],
     dst: &'a mut [F],
@@ -172,12 +213,15 @@ struct FoldJob<'a, F> {
 
 impl<F: PrimeField> FoldJob<'_, F> {
     fn run(self, r: F) {
-        let stride = self.stride;
-        let pairs = self.src.chunks_exact(2 * stride);
-        for (dst, src) in self.dst.chunks_exact_mut(stride).zip(pairs) {
-            for (b, d) in dst.iter_mut().enumerate() {
-                *d = src[b] + r * (src[stride + b] - src[b]);
+        if self.stride == 1 {
+            for (d, src) in self.dst.iter_mut().zip(self.src.chunks_exact(2)) {
+                *d = src[0] + src[1];
             }
+            return;
+        }
+        for (dst, src) in self.dst.chunks_exact_mut(2).zip(self.src.chunks_exact(4)) {
+            dst[0] = src[0] + r * (src[2] - src[0]);
+            dst[1] = src[1] + r * (src[3] - src[1]);
         }
     }
 }
@@ -191,9 +235,10 @@ fn push_fold_jobs<'a, F>(
     src: &'a [F],
     dst: &'a mut [F],
     stride: usize,
+    chunk: usize,
 ) {
-    let src_chunks = src.chunks(2 * stride * CHUNK_PAIRS);
-    let dst_chunks = dst.chunks_mut(stride * CHUNK_PAIRS);
+    let src_chunks = src.chunks(2 * stride * chunk);
+    let dst_chunks = dst.chunks_mut(stride * chunk);
     jobs.extend(
         src_chunks
             .zip(dst_chunks)
@@ -201,23 +246,24 @@ fn push_fold_jobs<'a, F>(
     );
 }
 
-/// Per active instance, its own round polynomial at 0, 2 and 3 (zero for an
-/// instance that ran out of variables).
+/// Per active instance, its own round polynomial without the eq factor of
+/// the round variable: the value at 0 and the leading coefficient (zero for
+/// an instance that ran out of variables).
 fn sum_round<F: PrimeField>(
     active: &[Active<'_, F>],
     eqs: &[EqTables<F>],
     round: usize,
     lambda: F,
-) -> Vec<[F; 3]> {
+) -> Vec<[F; 2]> {
     let mut jobs = Vec::new();
-    let mut total_pairs = 0;
+    let total_pairs = live_pairs(active, round);
+    let chunk = chunk_pairs(total_pairs);
     for (slot, a) in active.iter().enumerate().filter(|(_, a)| a.k > round) {
         let pairs = 1usize << (a.k - round - 1);
-        total_pairs += pairs;
         let tables = &a.state.bufs[src_buf(round)];
         let eq = &eqs[a.state.eq].bufs[round % 2];
-        for start in (0..pairs).step_by(CHUNK_PAIRS) {
-            let end = (start + CHUNK_PAIRS).min(pairs);
+        for start in (0..pairs).step_by(chunk) {
+            let end = (start + chunk).min(pairs);
             let p: &[F] = if a.singles {
                 &[]
             } else {
@@ -227,14 +273,14 @@ fn sum_round<F: PrimeField>(
                 slot,
                 p,
                 q: &tables.q[4 * start..4 * end],
-                eq: &eq[2 * start..2 * end],
+                eq: &eq[start..end],
             });
         }
     }
-    let parts = map_jobs(jobs, total_pairs >= SERIAL_BELOW, |job| {
+    let parts = map_jobs(jobs, total_pairs >= SERIAL_BELOW_PAIRS, |job| {
         (job.slot, job.sums(lambda))
     });
-    let mut sums = vec![[F::zero(); 3]; active.len()];
+    let mut sums = vec![[F::zero(); 2]; active.len()];
     for (slot, part) in parts {
         for (sum, value) in sums[slot].iter_mut().zip(part) {
             *sum += value;
@@ -251,30 +297,43 @@ fn fold_round<F: PrimeField>(
     r: F,
 ) {
     let mut jobs = Vec::new();
-    let mut total_pairs = 0;
+    let total_pairs = live_pairs(active, round);
+    let chunk = chunk_pairs(total_pairs);
     for a in active.iter_mut().filter(|a| a.k > round) {
         let pairs = 1usize << (a.k - round - 1);
-        total_pairs += pairs;
         let (src, dst) = fold_bufs(&mut a.state.bufs, round);
-        push_fold_jobs(&mut jobs, &src.q[..4 * pairs], &mut dst.q[..2 * pairs], 2);
+        push_fold_jobs(
+            &mut jobs,
+            &src.q[..4 * pairs],
+            &mut dst.q[..2 * pairs],
+            2,
+            chunk,
+        );
         if !a.singles {
-            push_fold_jobs(&mut jobs, &src.p[..4 * pairs], &mut dst.p[..2 * pairs], 2);
+            push_fold_jobs(
+                &mut jobs,
+                &src.p[..4 * pairs],
+                &mut dst.p[..2 * pairs],
+                2,
+                chunk,
+            );
         }
     }
     for eq in eqs.iter_mut() {
-        let Some(k) = eq.k.filter(|k| *k > round) else {
+        // Nothing to prepare after the size's last round.
+        let Some(k) = eq.k.filter(|k| *k > round + 1) else {
             continue;
         };
-        let pairs = 1usize << (k - round - 1);
+        let pairs = 1usize << (k - round - 2);
         let [a, b] = &mut eq.bufs;
         let (src, dst) = if round.is_multiple_of(2) {
             (&*a, b)
         } else {
             (&*b, a)
         };
-        push_fold_jobs(&mut jobs, &src[..2 * pairs], &mut dst[..pairs], 1);
+        push_fold_jobs(&mut jobs, &src[..2 * pairs], &mut dst[..pairs], 1, chunk);
     }
-    map_jobs(jobs, total_pairs >= SERIAL_BELOW, |job| job.run(r));
+    map_jobs(jobs, total_pairs >= SERIAL_BELOW_PAIRS, |job| job.run(r));
 }
 
 /// Proves a batch of instances and returns the proof with the claims the
@@ -325,8 +384,6 @@ pub(crate) fn prove_batch<F: PrimeField>(
     let roots: Vec<[F; 2]> = states.iter().map(|state| state.claim).collect();
     tr.append_serializable_element(ROOTS_LABEL, &roots)?;
 
-    let cubic = CubicInterpolator::new()
-        .ok_or_else(|| invalid("LogUp-GKR needs a field of characteristic above 3"))?;
     let pow2 = powers_of_two::<F>(n_max);
     let mut point: Vec<F> = Vec::with_capacity(n_max);
     let mut round_polys = Vec::with_capacity(n_max);
@@ -336,11 +393,15 @@ pub(crate) fn prove_batch<F: PrimeField>(
         let lambda = tr.get_and_append_challenge(LAMBDA_LABEL)?;
         let alpha = tr.get_and_append_challenge(ALPHA_LABEL)?;
 
-        for eq in eqs.iter_mut() {
-            eq.k = (eq.n_vars + t).checked_sub(n_max);
-            if let Some(k) = eq.k {
-                eq.bufs[0] = eq_table(&point[..k]);
-            }
+        // A round derives its polynomial at 1 from the running claim, which
+        // takes a division by the round's coordinate of the point. A zero
+        // coordinate has probability 1/|F| per challenge and depends on
+        // nothing the caller chose, so the prover gives up on it instead of
+        // keeping a three-sum path that no test could reach.
+        let mut point_inv = point.clone();
+        batch_inversion(&mut point_inv);
+        if point_inv.iter().any(|z| z.is_zero()) {
+            return Err(invalid("LogUp-GKR challenge is zero"));
         }
         let mut active = Vec::new();
         let mut alpha_pow = F::one();
@@ -351,6 +412,11 @@ pub(crate) fn prove_batch<F: PrimeField>(
                 };
                 let singles = layer.p.is_empty();
                 state.bufs[0] = layer;
+                if singles {
+                    // The scratch numerators stay idle from here on.
+                    state.bufs[1].p = Vec::new();
+                    state.bufs[2].p = Vec::new();
+                }
                 active.push(Active {
                     k,
                     singles,
@@ -363,6 +429,16 @@ pub(crate) fn prove_batch<F: PrimeField>(
             alpha_pow *= alpha;
         }
 
+        // Built only now, and after releasing the table it replaces: the
+        // iteration's peak is then below what the layers took at the start.
+        for eq in eqs.iter_mut() {
+            eq.k = (eq.n_vars + t).checked_sub(n_max);
+            if let Some(k) = eq.k.filter(|k| *k > 0) {
+                eq.bufs[0] = Vec::new();
+                eq.bufs[0] = eq_table(&point[1..k]);
+            }
+        }
+
         // Sum of alpha^idx · claim over the instances that have no variable
         // left; in round j each of the t-1-j later variables doubles it.
         let mut done: F = active
@@ -372,21 +448,48 @@ pub(crate) fn prove_batch<F: PrimeField>(
             .sum();
         let mut rho = Vec::with_capacity(t);
         let mut rounds = Vec::with_capacity(t);
+        // eq of the point and the challenges over the variables bound so
+        // far: the same for every instance that is still live.
+        let mut bound = F::one();
         for round in 0..t {
             let sums = sum_round(&active, &eqs, round, lambda);
-            let mut evals = [pow2[t - 1 - round] * done; 3];
-            for (a, sum) in active.iter().zip(&sums).filter(|(a, _)| a.k > round) {
-                for (eval, value) in evals.iter_mut().zip(sum) {
-                    *eval += a.weight * value;
+            // A live instance's round polynomial is
+            // `bound · eq(z, x) · h(x)` with `z = point[round]` and `h`
+            // quadratic. The sums give `h(0)` and its leading coefficient
+            // `c`; `h(1)` follows from `(1-z)·h(0) + z·h(1) = claim`.
+            let z = point[round];
+            let not_z = F::one() - z;
+            let slope = z - not_z;
+            let mut inner = [F::zero(); 3];
+            // Per instance, the coefficients of `h`.
+            let mut polys = vec![[F::zero(); 3]; active.len()];
+            let live = active.iter().zip(&sums).zip(&mut polys);
+            for ((a, sum), poly) in live.filter(|((a, _), _)| a.k > round) {
+                let [h0, c] = *sum;
+                let h1 = (a.claim - not_z * h0) * point_inv[round];
+                let h2 = h1.double() - h0 + c.double();
+                let h3 = h2.double() - h1 + c.double();
+                *poly = [h0, h1 - h0 - c, c];
+                for (sum, h) in inner.iter_mut().zip([h0, h2, h3]) {
+                    *sum += a.weight * h;
                 }
+            }
+            // eq(z, x) at 0, 2 and 3.
+            let eq2 = z + slope;
+            let lines = [not_z, eq2, eq2 + slope];
+            let mut evals = [pow2[t - 1 - round] * done; 3];
+            for ((eval, line), sum) in evals.iter_mut().zip(lines).zip(inner) {
+                *eval += bound * line * sum;
             }
             tr.append_serializable_element(ROUND_LABEL, &evals)?;
             let r = tr.get_and_append_challenge(RHO_LABEL)?;
 
-            for (a, sum) in active.iter_mut().zip(&sums).filter(|(a, _)| a.k > round) {
-                a.claim = cubic.evaluate([sum[0], a.claim - sum[0], sum[1], sum[2]], r);
+            bound *= not_z + r * slope;
+            for (a, poly) in active.iter_mut().zip(&polys).filter(|(a, _)| a.k > round) {
+                let [h0, b, c] = *poly;
+                a.claim = h0 + r * (b + r * c);
                 if a.k == round + 1 {
-                    done += a.alpha_pow * a.claim;
+                    done += a.alpha_pow * bound * a.claim;
                 }
             }
             fold_round(&mut active, &mut eqs, round, r);
@@ -409,10 +512,7 @@ pub(crate) fn prove_batch<F: PrimeField>(
                 // The verifier's layer check, per instance and on the
                 // prover's own values: it holds for any input, true
                 // statement or not.
-                debug_assert_eq!(
-                    a.claim,
-                    eqs[a.state.eq].bufs[a.k % 2][0] * (p0 * q1 + p1 * q0 + lambda * q0 * q1)
-                );
+                debug_assert_eq!(a.claim, p0 * q1 + p1 * q0 + lambda * q0 * q1);
                 [p0, p1, q0, q1]
             })
             .collect();

@@ -563,8 +563,9 @@ fn small_instances_listed_before_large_ones_keep_their_position() {
     );
 }
 
-/// At 2^15 fractions no table is split into more than four work items of
-/// the largest size, so a fault in a later one would not show.
+/// A work item never holds more than 2^11 gate pairs, and on a small pool it
+/// holds exactly that. At 2^15 fractions a table is then split into at most
+/// four of them, so a fault in a later one would not show.
 #[test]
 fn rounds_split_into_more_than_four_work_items() {
     let batch = [(16, false), (16, true)];
@@ -577,6 +578,29 @@ fn rounds_split_into_more_than_four_work_items() {
         claims.inputs,
         direct_inputs(&instances, &shape, &claims.point)
     );
+}
+
+/// The pairwise path, its one-element remainder, and both together.
+#[test]
+fn weighted_sums_match_the_plain_sum() {
+    let mut rng = StdRng::seed_from_u64(53);
+    for len in 0..=9 {
+        let weights: Vec<Fr> = (0..len).map(|_| Fr::rand(&mut rng)).collect();
+        let terms: Vec<[Fr; 3]> = (0..len)
+            .map(|_| [Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng)])
+            .collect();
+        let mut expected = [Fr::zero(); 3];
+        for (weight, term) in weights.iter().zip(&terms) {
+            for (sum, value) in expected.iter_mut().zip(term) {
+                *sum += *weight * value;
+            }
+        }
+        assert_eq!(
+            prover::weighted_sums(&weights, |i| terms[i]),
+            expected,
+            "length {len}"
+        );
+    }
 }
 
 #[test]
@@ -1548,6 +1572,12 @@ proptest! {
 /// one general instance of 2^18 fractions each. Run with
 /// `cargo test --features test-utils logup_gkr_timing -- --ignored --nocapture`
 /// (the test profile is optimised), under `RAYON_NUM_THREADS` as needed.
+///
+/// The test profile keeps debug assertions, and `sum_of_products` in ark-ff
+/// has one that recomputes every product: the prover then runs about 1.4
+/// times slower than in a release build. For release figures add
+/// `CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false` and
+/// `CARGO_PROFILE_TEST_OVERFLOW_CHECKS=false` to the environment.
 #[test]
 #[ignore = "timing only, asserts nothing about time"]
 fn logup_gkr_timing_n18() {
