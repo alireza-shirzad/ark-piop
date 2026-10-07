@@ -34,9 +34,18 @@ where
                                 let v = *value;
                                 cfg_iter_mut!(acc).for_each(|a| *a *= v);
                             } else {
-                                cfg_iter_mut!(acc)
-                                    .zip(mle.evaluations())
-                                    .for_each(|(a, b)| *a *= b);
+                                let factor = mle.evaluations();
+                                if factor.len() >= acc.len() {
+                                    cfg_iter_mut!(acc).zip(factor).for_each(|(a, b)| *a *= b);
+                                } else {
+                                    // A factor with fewer variables repeats
+                                    // along the others, as it does in the
+                                    // sumcheck.
+                                    let mask = factor.len() - 1;
+                                    cfg_iter_mut!(acc)
+                                        .enumerate()
+                                        .for_each(|(i, a)| *a *= factor[i & mask]);
+                                }
                             }
                             acc
                         });

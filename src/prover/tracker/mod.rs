@@ -613,6 +613,25 @@ mod tests {
         assert_eq!(eval_prod, eval_a * eval_b);
     }
 
+    /// A factor with fewer variables than the product repeats along the
+    /// others, whatever its storage and wherever it sits in the product.
+    #[test]
+    fn mul_polys_repeats_a_narrower_factor() {
+        let wide: Vec<F> = (0..8).map(|i| F::from(i as u64 + 2)).collect();
+        for narrow in [vec![F::from(7)], vec![F::from(3), F::from(5)]] {
+            let mut tracker = make_tracker();
+            let id_wide = tracker.track_mat_mv_poly(MLE::from_evaluations_vec(3, wide.clone()));
+            let narrow_nv = narrow.len().trailing_zeros() as usize;
+            let id_narrow =
+                tracker.track_mat_mv_poly(MLE::from_evaluations_vec(narrow_nv, narrow.clone()));
+            let expected: Vec<F> = (0..8).map(|i| wide[i] * narrow[i % narrow.len()]).collect();
+            for (lhs, rhs) in [(id_narrow, id_wide), (id_wide, id_narrow)] {
+                let id_prod = tracker.mul_polys(lhs, rhs);
+                assert_eq!(tracker.evaluations(id_prod), expected);
+            }
+        }
+    }
+
     // ── Scalar operations ──────────────────────────────────────────
 
     #[test]
