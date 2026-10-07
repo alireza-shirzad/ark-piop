@@ -60,6 +60,10 @@ required-features = ["test-utils"]
 name = "calibrate_msm"
 required-features = ["test-utils"]
 
+[[example]]
+name = "bench_lookup"
+required-features = ["test-utils"]
+
 [patch.crates-io]
 ark-std = { git = "https://github.com/arkworks-rs/std" }
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
