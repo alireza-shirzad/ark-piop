@@ -1,19 +1,26 @@
-//! What the verifier accepts and rejects around the proof-wide plumbing,
-//! with an honest prover on the other side of every test.
+//! What the verifier accepts and rejects around the proof-wide plumbing:
+//! raw sumcheck claims, LogUp-GKR subproofs and the shape of the bucket
+//! sumchecks.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use ark_ff::{Field, One, Zero};
 use ark_serialize::{CanonicalSerialize, Compress};
 
 use crate::{
     DefaultSnarkBackend, SnarkBackend,
-    arithmetic::mat_poly::mle::MLE,
+    arithmetic::{mat_poly::mle::MLE, virt_poly::hp_interface::VPAuxInfo},
     errors::{SnarkError, SnarkResult},
-    piop::logup_gkr::{FractionInstance, GkrClaims, GkrShape, Numerator},
+    pcs::PCS,
+    piop::{
+        logup_gkr::{FractionInstance, GkrClaims, GkrShape, Numerator},
+        structs::SumcheckProof,
+    },
     prover::structs::proof::{PROOF_ENCODING_VERSION, SNARKProof},
     test_utils::prelude_with_vars,
-    types::{SumcheckSubproof, TrackerID, artifact::Artifact},
+    types::{
+        CommitmentBinding, SumcheckBucketProof, SumcheckSubproof, TrackerID, artifact::Artifact,
+    },
     verifier::{ArgVerifier, errors::VerifierError},
 };
 
@@ -369,4 +376,117 @@ fn size_breakdown_accounts_for_the_gkr_subproofs() {
     // The one byte left over is the version tag.
     let parts: usize = breakdown.parts.values().map(|part| part.size).sum();
     assert_eq!(parts + 1, breakdown.size);
+}
+
+/// A prover that runs the bucket sumcheck over fewer variables than the
+/// claimed column has. It holds only the half of the column where the top
+/// variable is 0, under the commitment to the whole column, and proves that
+/// half's sum, which the verifier is told is the sum of the column. Every
+/// message is consistent with the transcript; only the round count is off.
+#[test]
+fn sumcheck_over_a_subcube_is_rejected() {
+    let (mut prover, mut verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+    let nv = 4;
+    let evals = column(nv, 3);
+    let half = &evals[..1 << (nv - 1)];
+    assert_ne!(sum(half), sum(&evals));
+
+    let commitment = <B as SnarkBackend>::MvPCS::commit(
+        prover.mv_pcs_prover_param().as_ref(),
+        &Arc::new(mle(&evals)),
+    )
+    .unwrap();
+    let column = prover
+        .track_mat_mv_poly_with_commitment(&mle(half), commitment, CommitmentBinding::ProofEmitted)
+        .unwrap()
+        .id();
+    prover.add_mv_sumcheck_claim(column, sum(half)).unwrap();
+    let proof = prover.build_proof().unwrap();
+    let buckets = proof.sc_subproof.as_ref().unwrap().buckets();
+    assert_eq!(buckets[0].num_vars(), nv - 1);
+    assert_eq!(buckets[0].sc_proof().proofs.len(), nv - 1);
+
+    verifier.set_proof(proof);
+    verifier.track_mv_com_by_id(column).unwrap();
+    verifier.add_mv_sumcheck_claim(column, sum(half));
+    assert_check_failed(verifier.verify());
+}
+
+/// A bucket's sumcheck as the proof carries it.
+type Bucket = (SumcheckProof<F>, VPAuxInfo<F>);
+
+/// `proof` with its sumcheck buckets rewritten by `edit`.
+fn with_buckets(proof: &SNARKProof<B>, edit: impl FnOnce(&mut Vec<Bucket>)) -> SNARKProof<B> {
+    let mut proof = proof.clone();
+    let subproof = proof.sc_subproof.as_ref().unwrap();
+    let mut buckets: Vec<Bucket> = subproof
+        .buckets()
+        .iter()
+        .map(|bucket| (bucket.sc_proof().clone(), bucket.sc_aux_info().clone()))
+        .collect();
+    edit(&mut buckets);
+    let buckets = buckets
+        .into_iter()
+        .map(|(sc_proof, aux_info)| SumcheckBucketProof::new(sc_proof, aux_info))
+        .collect();
+    proof.sc_subproof = Some(SumcheckSubproof::new(
+        buckets,
+        subproof.sumcheck_claims().clone(),
+    ));
+    proof
+}
+
+/// A proof whose bucket sumchecks do not have the verifier's shape is
+/// refused with an error, whichever part of the shape is off.
+#[test]
+fn malformed_bucket_sumcheck_is_an_error_not_a_panic() {
+    let case = RawClaimCase::new(2, 8, Narrow::Committed);
+    let verify = |proof| case.verify(proof, case.narrow_sum);
+    let reject = |edit: &dyn Fn(&mut Vec<Bucket>)| {
+        assert_check_failed(verify(with_buckets(&case.proof, edit)));
+    };
+    verify(with_buckets(&case.proof, |_| {})).unwrap();
+
+    for bucket in [0, 1] {
+        // A round short: in the messages, in the declared count, in both.
+        reject(&|buckets| {
+            buckets[bucket].0.proofs.pop();
+        });
+        reject(&|buckets| buckets[bucket].1.num_variables -= 1);
+        reject(&|buckets| {
+            buckets[bucket].0.proofs.pop();
+            buckets[bucket].0.point.pop();
+            buckets[bucket].1.num_variables -= 1;
+        });
+        // A round more declared than sent, and sent than declared.
+        reject(&|buckets| buckets[bucket].1.num_variables += 1);
+        reject(&|buckets| {
+            let last = buckets[bucket].0.proofs.last().unwrap().clone();
+            buckets[bucket].0.proofs.push(last);
+        });
+        // Round messages too short for the reads at 0 and 1, and for the
+        // declared degree.
+        reject(&|buckets| {
+            buckets[bucket].1.max_degree = 0;
+            for msg in &mut buckets[bucket].0.proofs {
+                msg.evaluations.truncate(1);
+            }
+        });
+        reject(&|buckets| {
+            buckets[bucket].0.proofs[0].evaluations.pop();
+        });
+    }
+
+    // A bucket missing, a bucket too many, none at all.
+    reject(&|buckets| {
+        buckets.pop();
+    });
+    reject(&|buckets| {
+        buckets.remove(0);
+    });
+    reject(&|buckets| buckets.push(buckets[1].clone()));
+    reject(&|buckets| buckets.clear());
+    let mut bare = case.proof.clone();
+    bare.sc_subproof = None;
+    assert_check_failed(verify(bare));
 }

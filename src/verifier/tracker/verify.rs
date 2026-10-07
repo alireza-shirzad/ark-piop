@@ -109,7 +109,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn perform_single_sumcheck(&mut self, bucket_index: usize) -> SnarkResult<()> {
+    fn perform_single_sumcheck(
+        &mut self,
+        bucket_index: usize,
+        target_nv: usize,
+    ) -> SnarkResult<()> {
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to verify in bucket {bucket_index}");
             return Ok(());
@@ -118,24 +122,57 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
 
-        let subproof = self
+        // Direct field access so the borrow of self.proof doesn't conflict
+        // with the &mut borrow of self.state.transcript.
+        let bucket = self
             .proof
             .as_ref()
-            .unwrap()
+            .ok_or(SnarkError::VerifierError(VerifierError::ProofNotReceived))?
             .sc_subproof
             .as_ref()
-            .expect("No sumcheck subproof in the proof");
-        let bucket = subproof.buckets().get(bucket_index).unwrap_or_else(|| {
-            panic!(
-                "SumcheckSubproof does not have bucket at index {bucket_index} \
-                     (has {} bucket(s))",
-                subproof.buckets().len()
-            )
-        });
+            .and_then(|subproof| subproof.buckets().get(bucket_index))
+            .ok_or_else(|| {
+                SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
+                    "proof has no sumcheck for bucket {bucket_index}"
+                )))
+            })?;
+        // The sumcheck verifier runs as many rounds as the proof's aux info
+        // says. With fewer than the bucket has variables it would bind the
+        // aggregated claim on a subcube only, so the count has to be the
+        // verifier's own.
+        let (sc_proof, sc_aux_info) = (bucket.sc_proof(), bucket.sc_aux_info());
+        if sc_aux_info.num_variables != target_nv || sc_proof.proofs.len() != target_nv {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "sumcheck of bucket {bucket_index} has {} rounds declared as {} variables, \
+                     the bucket has {target_nv}",
+                    sc_proof.proofs.len(),
+                    sc_aux_info.num_variables
+                )),
+            ));
+        }
+        // The sumcheck verifier indexes every round message at 0 and 1 and
+        // expects `max_degree + 1` evaluations in it; a degree of zero would
+        // send it out of bounds.
+        let evals_per_round = sc_aux_info.max_degree.checked_add(1);
+        if sc_aux_info.max_degree == 0
+            || sc_proof
+                .proofs
+                .iter()
+                .any(|msg| Some(msg.evaluations.len()) != evals_per_round)
+        {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "sumcheck of bucket {bucket_index} has round messages that do not match \
+                     its declared degree {}",
+                    sc_aux_info.max_degree
+                )),
+            ));
+        }
         let sc_subclaim = SumCheck::verify(
             sumcheck_aggr_claim.claim(),
-            bucket.sc_proof(),
-            bucket.sc_aux_info(),
+            sc_proof,
+            sc_aux_info,
             &mut self.state.transcript,
         )?;
         self.add_mv_eval_claim(
@@ -266,7 +303,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.batch_z_check_claims(target_nv)?;
         self.z_check_claim_to_s_check_claim(target_nv)?;
         self.batch_s_check_claims(target_nv)?;
-        self.perform_single_sumcheck(bucket_index)?;
+        self.perform_single_sumcheck(bucket_index, target_nv)?;
         // Match prover-side cleanup: clear the aggregated sumcheck claim so
         // the next bucket starts from an empty slate.
         self.state.mv_pcs_substate.sum_check_claims.clear();
@@ -334,6 +371,23 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.batch_nozero_check_claims_by_nv()?;
         crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
         let buckets = self.create_buckets();
+        // Evaluation points are resized to the nv of the proof's last
+        // bucket, also by queries made before any bucket is checked. Each
+        // bucket's nv is checked when it runs, so the proof must hold
+        // exactly the buckets that run.
+        let proof_buckets = self
+            .proof_or_err()?
+            .sc_subproof
+            .as_ref()
+            .map_or(0, |subproof| subproof.buckets().len());
+        if proof_buckets != buckets.len() {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "proof has {proof_buckets} sumcheck buckets, the claims need {}",
+                    buckets.len()
+                )),
+            ));
+        }
         if !buckets.is_empty() {
             // Frozen before any bucket runs — see `global_max_nv`.
             let global_max_nv = self.global_max_nv();
