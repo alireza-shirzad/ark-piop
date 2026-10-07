@@ -24,6 +24,13 @@ pub struct SharedArgConfig {
     /// otherwise. A batch over the limit is cut into consecutive runs, each
     /// a subproof of its own, which bounds the prover's peak at the price of
     /// a longer proof. The cut is part of the proof's shape.
+    ///
+    /// The cut falls between instances only. Columns of one size on one side
+    /// of a relation are stacked into one instance a power of two of them at
+    /// a time, and a stack above the limit is not split but proved in a run
+    /// of its own: `2^s` unit-numerator columns of `2^n` rows hold
+    /// `3 * 2^(n + s)` whatever the limit, which is above the default from
+    /// `n + s = 27` on.
     pub logup_gkr_run_budget: usize,
 }
 
