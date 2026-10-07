@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// `2^exponent` in the field. The exponents here are differences of sizes
+/// the proof declares, so they may exceed any machine word's width.
+fn two_to_the<F: PrimeField>(exponent: usize) -> F {
+    F::from(2u64).pow([exponent as u64])
+}
+
 impl<B: SnarkBackend> VerifierTracker<B> {
     /// Batch all zerocheck claims into one via random linear combination.
     /// Delegates to the generic pipeline.
@@ -226,7 +232,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     #[instrument(level = "debug", skip_all)]
-    fn equalize_sumcheck_claims(
+    pub(super) fn equalize_sumcheck_claims(
         &mut self,
         target_nv: usize,
         global_max_nv: usize,
@@ -259,7 +265,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 && claim.claim() == *proof_claim
             {
                 if global_max_nv > target_nv {
-                    let factor = B::F::from(1u64 << (global_max_nv - target_nv));
+                    let factor = two_to_the::<B::F>(global_max_nv - target_nv);
                     claim.set_claim(claim.claim() / factor);
                 }
                 continue;
@@ -273,7 +279,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .copied()
                 .unwrap_or(target_nv);
             if nv < target_nv {
-                claim.set_claim(claim.claim() * B::F::from(1u64 << (target_nv - nv)));
+                claim.set_claim(claim.claim() * two_to_the::<B::F>(target_nv - nv));
             }
         }
         Ok(())

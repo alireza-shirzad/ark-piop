@@ -20,8 +20,9 @@ use crate::{
     test_utils::prelude_with_vars,
     types::{
         CommitmentBinding, SumcheckBucketProof, SumcheckSubproof, TrackerID, artifact::Artifact,
+        claim::TrackerSumcheckClaim,
     },
-    verifier::{ArgVerifier, errors::VerifierError},
+    verifier::{ArgVerifier, errors::VerifierError, structs::oracle::Oracle},
 };
 
 type B = DefaultSnarkBackend;
@@ -620,4 +621,48 @@ fn tracker_verify_refuses_claims_that_were_not_reduced() {
         })
         .unwrap();
     assert_check_failed(tracker_verify(with_keyed_sum));
+}
+
+/// A raw claim is lifted to its bucket by `2^(bucket nv - own nv)`, and the
+/// sizes behind that exponent are the proof's to declare. The factor is
+/// exact however large the exponent.
+#[test]
+fn raw_claim_is_lifted_by_an_exact_power_of_two() {
+    let (_, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+    let tracker = verifier.tracker();
+    let mut tracker = tracker.borrow_mut();
+    let id = tracker.track_base_oracle(Oracle::new_constant(3, F::from(5u64)));
+    for target_nv in [3usize, 4, 66, 67, 131, 200] {
+        let claims = &mut tracker.state.mv_pcs_substate.sum_check_claims;
+        *claims = vec![
+            TrackerSumcheckClaim::new_raw(id, F::from(40u64)),
+            TrackerSumcheckClaim::new(id, F::from(40u64)),
+        ];
+        tracker
+            .equalize_sumcheck_claims(target_nv, target_nv)
+            .unwrap();
+        let lifted = F::from(40u64) * F::from(2u64).pow([target_nv as u64 - 3]);
+        assert_eq!(
+            tracker.sumcheck_claims_snapshot(),
+            [(id, lifted, true), (id, lifted, false)]
+        );
+    }
+}
+
+/// The proof declares a committed constant far larger than any column can
+/// be. Whatever the claims on it turn into, the verifier answers with an
+/// error.
+#[test]
+fn constant_of_an_absurd_declared_size_is_an_error_not_a_panic() {
+    let case = RawClaimCase::new(0, 6, Narrow::Committed);
+    let constants = &case.proof.mv_pcs_subproof.constant_map;
+    assert!(constants.contains_key(&case.narrow));
+    for num_vars in [63, 64, 65, 100, 127, 128, 144, 300, u32::MAX] {
+        let mut proof = case.proof.clone();
+        proof
+            .mv_pcs_subproof
+            .constant_num_vars
+            .insert(case.narrow, num_vars);
+        assert_check_failed(case.verify(proof, case.narrow_sum));
+    }
 }
