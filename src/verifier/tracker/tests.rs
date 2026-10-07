@@ -578,3 +578,46 @@ fn claim_on_a_zero_polynomial_gets_a_sumcheck_of_its_bucket_size() {
         assert_check_failed(run(F::one()));
     }
 }
+
+/// Lookup and keyed-sum claims are reduced by `ArgVerifier::verify` before
+/// the tracker verifies. The tracker's own `verify` cannot reduce them and
+/// must not pass over them.
+#[test]
+fn tracker_verify_refuses_claims_that_were_not_reduced() {
+    use crate::piop::keyed_sumcheck::KeyedSumcheckVerifierInput;
+
+    let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+    let evals = column(4, 3);
+    let column = prover
+        .track_and_commit_mat_mv_poly(&mle(&evals))
+        .unwrap()
+        .id();
+    prover.add_mv_sumcheck_claim(column, sum(&evals)).unwrap();
+    let proof = prover.build_proof().unwrap();
+
+    let mirror = || {
+        let mut verifier = verifier.fork();
+        verifier.set_proof_ref(&proof);
+        let oracle = verifier.track_mv_com_by_id(column).unwrap();
+        verifier.add_mv_sumcheck_claim(column, sum(&evals));
+        (verifier, oracle)
+    };
+    let tracker_verify = |verifier: ArgVerifier<B>| verifier.tracker().borrow_mut().verify();
+
+    tracker_verify(mirror().0).unwrap();
+
+    let (mut with_lookup, _) = mirror();
+    with_lookup.add_mv_lookup_claim(column, column).unwrap();
+    assert_check_failed(tracker_verify(with_lookup));
+
+    let (mut with_keyed_sum, oracle) = mirror();
+    with_keyed_sum
+        .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+            fxs: vec![oracle.clone()],
+            gxs: vec![oracle],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        })
+        .unwrap();
+    assert_check_failed(tracker_verify(with_keyed_sum));
+}

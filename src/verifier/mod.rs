@@ -432,6 +432,16 @@ where
     /// one batch, as the prover did before it compiled the proof.
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let reduced = self.reduce_queued_claims();
+        if reduced.is_err() {
+            // The queues are empty from here on, wherever the reduction
+            // stopped: without a record, the claims would be gone.
+            self.tracker_rc.borrow_mut().reject();
+        }
+        reduced
+    }
+
+    fn reduce_queued_claims(&mut self) -> SnarkResult<()> {
         let (lookup_claims, keyed_sum_claims) = {
             let mut tracker = self.tracker_rc.borrow_mut();
             (
@@ -473,6 +483,11 @@ where
         verify_keyed_sums(self, &relations)
     }
 
+    /// Verify the proof against every claim made on this verifier.
+    ///
+    /// The claims are used up by this, so a verifier verifies once; use
+    /// [`Self::fork`] to keep one to verify again. Once a lookup or keyed
+    /// sum has been found false, every later call fails too.
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&self) -> SnarkResult<()> {
         let mut verifier = self.clone();

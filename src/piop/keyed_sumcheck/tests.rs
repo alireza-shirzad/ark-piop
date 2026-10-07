@@ -2285,3 +2285,80 @@ fn both_sides_hold_polynomials_of_the_same_size_under_every_id() {
         assert_in_sync(&after_reduction, &verifier);
     }
 }
+
+// ─── A verdict that stays ────────────────────────────────────────────────
+
+/// A false lookup by a prover that is honest about everything else: the GKR
+/// and every input claim are true statements about the committed columns,
+/// and only the sums of the two sides differ. They are compared once, in
+/// the reduction, which leaves nothing false behind for the sumchecks to
+/// find; a verifier asked a second time must still know.
+#[test]
+fn rejected_lookup_stays_rejected_on_a_second_verify() {
+    let table = fv(0..8);
+    let mut sub = in_table(3, 8, 1);
+    sub[4] = F::from(9u64);
+    let (mut prover, mut verifier) = setup();
+    let table_id = commit(&mut prover, &table).id();
+    let sub_id = commit(&mut prover, &sub).id();
+    let counts_id = commit(&mut prover, &tally(&table, &[(&sub, None)])).id();
+    let relation = KeyedSumRelation {
+        fxs: vec![KeyedTerm::Poly(sub_id)],
+        mfxs: vec![None],
+        gxs: vec![KeyedTerm::Poly(table_id)],
+        mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
+    };
+    prove_keyed_sums(&mut prover, &[relation], ColumnEvals::new()).unwrap();
+    let proof = prover.build_proof().unwrap();
+
+    verifier.set_proof_ref(&proof);
+    verifier.track_mv_com_by_id(table_id).unwrap();
+    verifier.track_mv_com_by_id(sub_id).unwrap();
+    verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
+    assert_verifier_error(verifier.verify().unwrap_err());
+    assert_verifier_error(verifier.verify().unwrap_err());
+    // Handing it the proof again does not take the reduction back.
+    verifier.set_proof_ref(&proof);
+    assert_verifier_error(verifier.verify().unwrap_err());
+}
+
+/// The same when the keyed sum is checked on the spot and the caller goes
+/// on to `verify` although the check failed.
+#[test]
+fn rejected_keyed_sum_fails_the_verify_that_follows() {
+    let columns = [fv(0..8), fv([0, 1, 2, 3, 4, 5, 6, 6])];
+    let mut session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+
+    let mut verifier = session.verifier.fork();
+    verifier.set_proof_ref(&proof);
+    for id in &session.ids {
+        verifier.track_mv_com_by_id(*id).unwrap();
+    }
+    assert_verifier_error(verify_keyed_sums(&mut verifier, &session.relations).unwrap_err());
+    assert_verifier_error(verifier.verify().unwrap_err());
+}
+
+/// The reduction can fail before it reaches the GKR: here the proof is from
+/// a prover that never made the lookup, so the multiplicity commitment the
+/// verifier asks for is not there. The claim is not forgotten with it.
+#[test]
+fn lookup_that_could_not_be_reduced_fails_every_later_verify() {
+    let table = fv(0..8);
+    let mut sub = in_table(3, 8, 1);
+    sub[4] = F::from(9u64);
+    let (mut prover, mut verifier) = setup();
+    let table_id = commit(&mut prover, &table).id();
+    let sub_id = commit(&mut prover, &sub).id();
+    prover.add_mv_sumcheck_claim(sub_id, sum(&sub)).unwrap();
+    let proof = prover.build_proof().unwrap();
+
+    verifier.set_proof_ref(&proof);
+    verifier.track_mv_com_by_id(table_id).unwrap();
+    verifier.track_mv_com_by_id(sub_id).unwrap();
+    verifier.add_mv_sumcheck_claim(sub_id, sum(&sub));
+    verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
+    assert_verifier_error(verifier.verify().unwrap_err());
+    assert_verifier_error(verifier.verify().unwrap_err());
+}

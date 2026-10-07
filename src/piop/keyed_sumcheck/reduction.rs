@@ -656,6 +656,15 @@ pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
 ) -> SnarkResult<()> {
     let tracker = verifier.tracker();
     let mut tracker = tracker.borrow_mut();
-    let reduction = reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations)?;
-    check_relation_sums(&reduction, relations.len()).map_err(VerifyingParty::check_failed)
+    let checked =
+        reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations).and_then(|reduction| {
+            check_relation_sums(&reduction, relations.len()).map_err(VerifyingParty::check_failed)
+        });
+    if checked.is_err() {
+        // The roots and the constants are compared here and nowhere else.
+        // The claims pushed up to the failure can all be true, and the
+        // subproofs are consumed, so a verifier that went on would accept.
+        tracker.reject();
+    }
+    checked
 }

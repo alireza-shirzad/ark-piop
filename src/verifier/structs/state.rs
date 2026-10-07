@@ -50,6 +50,10 @@ where
     /// Keyed sums claimed for later: reduced with the lookup claims, after
     /// them and in this order.
     pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,
+    /// Set when a check made outside the sumcheck and evaluation claims has
+    /// failed. Such a check leaves no false claim behind, so without this
+    /// the claims that remain could still verify.
+    pub(crate) rejected: bool,
 }
 
 #[derive(Derivative)]

@@ -153,6 +153,14 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(claims)
     }
 
+    /// Makes every later [`Self::verify`] fail. For the caller of a check
+    /// that is not a claim of this tracker, such as the comparison of the
+    /// two sides of a keyed sum: once it has failed, the claims the tracker
+    /// holds may all be true, and the caller's error is the only record.
+    pub(crate) fn reject(&mut self) {
+        self.state.rejected = true;
+    }
+
     /// Return the currently-set proof, or `VerifierError::ProofNotReceived`.
     /// Prefer this over `self.proof.as_ref().unwrap()` in verify paths.
     pub(super) fn proof_or_err(&self) -> SnarkResult<&ProcessedProof<B>> {

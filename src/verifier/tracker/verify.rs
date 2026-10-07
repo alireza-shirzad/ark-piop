@@ -1006,6 +1006,25 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn verify(&mut self) -> SnarkResult<()> {
         // Fail fast if the caller forgot to set a proof.
         let proof = self.proof_or_err()?;
+        if self.state.rejected {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(
+                    "an earlier check of this verifier failed".to_string(),
+                ),
+            ));
+        }
+        // Lookup and keyed-sum claims become sumcheck claims in
+        // `ArgVerifier::verify`. One that is still queued here was never
+        // checked against the proof.
+        let lookups = self.state.mv_pcs_substate.lookup_claims.len();
+        let keyed_sums = self.state.keyed_sum_claims.len();
+        if lookups + keyed_sums != 0 {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "{lookups} lookup and {keyed_sums} keyed-sum claims were not reduced"
+                )),
+            ));
+        }
         // A subproof nobody verified is either unaccounted-for bytes or a
         // batch this verifier never ran while the prover did.
         let consumed = self.state.logup_gkr_subproofs_consumed;
