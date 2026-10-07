@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 
 use ark_ff::{One, Zero};
+use ark_poly::Polynomial;
 use ark_serialize::{CanonicalSerialize, Compress};
 
 use super::{
@@ -50,6 +51,10 @@ fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
 
 fn fv(vals: impl IntoIterator<Item = u64>) -> Vec<F> {
     vals.into_iter().map(F::from).collect()
+}
+
+fn sum(evals: &[F]) -> F {
+    evals.iter().fold(F::zero(), |acc, v| acc + v)
 }
 
 fn mle(evals: &[F]) -> MLE<F> {
@@ -1095,6 +1100,181 @@ fn honest_check_agrees_with_protocol_on_mixed_col_mult_nv() {
             }
         }
     }
+}
+
+// ─── Parity ──────────────────────────────────────────────────────────────
+
+/// Lookups into three tables, two of them with several sub columns of
+/// mixed sizes, interleaved with ordinary claims and with keyed sums proved
+/// on the spot. After each side has reduced its lookup claims, and before
+/// either compiles anything, both hold the same ids, claims and transcript.
+#[test]
+fn both_sides_are_in_step_after_reducing_their_lookup_claims() {
+    let table_a = fv(0..16);
+    let table_b = fv((0..8).map(|i| i * 9));
+    let subs_a: Vec<Vec<F>> = vec![
+        in_table(4, 16, 1),
+        in_table(6, 16, 2),
+        in_table(4, 16, 3),
+        in_table(2, 16, 4),
+        in_table(4, 16, 5),
+    ];
+    let subs_b: Vec<Vec<F>> = vec![
+        fv((0..8).map(|i| ((i * 3) % 8) * 9)),
+        fv((0..8).map(|i| ((i * 5) % 8) * 9)),
+    ];
+    let data_c = fv((0..32).map(|i| if i < 25 { i } else { 900 + i }));
+    let act_c = fv((0..32).map(|i| u64::from(i < 25)));
+    let summed = fv((0..16).map(|i| i * i));
+    let perm_f = fv(0..32);
+    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+    let weighted_f = fv((0..8).map(|i| i + 100));
+    let weights = fv(1..9);
+
+    let (mut prover, mut verifier) = setup();
+    let mut committed = Vec::new();
+    let mut commit_all = |prover: &mut ArgProver<B>, cols: &[&Vec<F>]| -> Vec<TrackedPoly<B>> {
+        let handles: Vec<_> = cols.iter().map(|col| commit(prover, col)).collect();
+        committed.extend(handles.iter().map(TrackedPoly::id));
+        handles
+    };
+    let cols: Vec<&Vec<F>> = [&table_a, &table_b, &data_c, &act_c, &summed]
+        .into_iter()
+        .chain(&subs_a)
+        .chain(&subs_b)
+        .chain([&perm_f, &perm_g, &weighted_f, &weights])
+        .collect();
+    let handles = commit_all(&mut prover, &cols);
+    let (table_a_p, table_b_p, data_p, act_p, summed_p) = (
+        &handles[0],
+        &handles[1],
+        &handles[2],
+        &handles[3],
+        &handles[4],
+    );
+    let (subs_a_p, subs_b_p, rest_p) = (&handles[5..10], &handles[10..12], &handles[12..]);
+    let table_c_p = prover.track_mat_mv_poly(mle(&fv(0..32)));
+    let sub_c_p = data_p * act_p;
+
+    prover
+        .add_mv_sumcheck_claim(summed_p.id(), sum(&summed))
+        .unwrap();
+    for sub in &subs_a_p[..3] {
+        prover
+            .add_mv_lookup_claim(table_a_p.id(), sub.id())
+            .unwrap();
+    }
+    KeyedSumcheck::<B>::prove(
+        &mut prover,
+        KeyedSumcheckProverInput {
+            fxs: vec![rest_p[0].clone()],
+            gxs: vec![rest_p[1].clone()],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        },
+    )
+    .unwrap();
+    let after_first_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+    for sub in subs_b_p {
+        prover
+            .add_mv_lookup_claim(table_b_p.id(), sub.id())
+            .unwrap();
+    }
+    prover
+        .add_mv_lookup_claim(table_c_p.id(), sub_c_p.id())
+        .unwrap();
+    for sub in &subs_a_p[3..] {
+        prover
+            .add_mv_lookup_claim(table_a_p.id(), sub.id())
+            .unwrap();
+    }
+    KeyedSumcheck::<B>::prove(
+        &mut prover,
+        KeyedSumcheckProverInput {
+            fxs: vec![rest_p[2].clone()],
+            gxs: vec![rest_p[2].clone()],
+            mfxs: vec![Some(rest_p[3].clone())],
+            mgxs: vec![Some(rest_p[3].clone())],
+        },
+    )
+    .unwrap();
+    let after_second_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+
+    // The proof comes from a copy, so that the prover itself stops right
+    // after its reduction.
+    let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
+        .build_proof()
+        .unwrap();
+    prover.reduce_lookup_claims().unwrap();
+    // Three tables: one batch, with the sub columns of each in stacks.
+    assert_eq!(proof.logup_gkr_subproofs.len(), 3);
+    assert_eq!(proof.logup_gkr_subproofs[2].roots.len(), 5 + 2 + 2);
+
+    verifier.set_proof_ref(&proof);
+    let oracles: Vec<TrackedOracle<B>> = committed
+        .iter()
+        .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
+        .collect();
+    let (table_a_v, table_b_v, data_v, act_v, summed_v) = (
+        &oracles[0],
+        &oracles[1],
+        &oracles[2],
+        &oracles[3],
+        &oracles[4],
+    );
+    let (subs_a_v, subs_b_v, rest_v) = (&oracles[5..10], &oracles[10..12], &oracles[12..]);
+    let table_c = mle(&fv(0..32));
+    let table_c_v = verifier
+        .track_base_oracle(Oracle::new_multivariate(5, move |point: Vec<F>| {
+            Ok(table_c.evaluate(&point[..5].to_vec()))
+        }));
+    let sub_c_v = data_v * act_v;
+
+    verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
+    for sub in &subs_a_v[..3] {
+        verifier
+            .add_mv_lookup_claim(table_a_v.id(), sub.id())
+            .unwrap();
+    }
+    KeyedSumcheck::<B>::verify(
+        &mut verifier,
+        KeyedSumcheckVerifierInput {
+            fxs: vec![rest_v[0].clone()],
+            gxs: vec![rest_v[1].clone()],
+            mfxs: vec![None],
+            mgxs: vec![None],
+        },
+    )
+    .unwrap();
+    assert_in_sync(&after_first_piop, &verifier);
+    for sub in subs_b_v {
+        verifier
+            .add_mv_lookup_claim(table_b_v.id(), sub.id())
+            .unwrap();
+    }
+    verifier
+        .add_mv_lookup_claim(table_c_v.id(), sub_c_v.id())
+        .unwrap();
+    for sub in &subs_a_v[3..] {
+        verifier
+            .add_mv_lookup_claim(table_a_v.id(), sub.id())
+            .unwrap();
+    }
+    KeyedSumcheck::<B>::verify(
+        &mut verifier,
+        KeyedSumcheckVerifierInput {
+            fxs: vec![rest_v[2].clone()],
+            gxs: vec![rest_v[2].clone()],
+            mfxs: vec![Some(rest_v[3].clone())],
+            mgxs: vec![Some(rest_v[3].clone())],
+        },
+    )
+    .unwrap();
+    assert_in_sync(&after_second_piop, &verifier);
+
+    verifier.reduce_lookup_claims().unwrap();
+    assert_in_sync(&prover, &verifier);
+    verifier.verify().unwrap();
 }
 
 // ─── Proof plumbing ──────────────────────────────────────────────────────

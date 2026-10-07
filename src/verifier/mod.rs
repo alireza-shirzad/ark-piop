@@ -19,9 +19,8 @@ use crate::{
     errors::SnarkResult,
     pcs::PolynomialCommitment,
     piop::{
-        PIOP,
+        keyed_sumcheck::reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
         logup_gkr::{GkrClaims, GkrShape},
-        lookup_check,
     },
     prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk,
@@ -413,24 +412,24 @@ where
                 .push(claim.sub_poly());
         }
 
+        // Mirrors the prover: every multiplicity commitment is absorbed
+        // before the reduction draws its one gamma.
+        let mut relations = Vec::with_capacity(by_super.len());
         for (super_id, sub_ids) in by_super {
-            let super_col = self.tracked_oracle_from_id(super_id)?;
-            let included_cols = sub_ids
-                .into_iter()
-                .map(|sub_id| self.tracked_oracle_from_id(sub_id))
-                .collect::<SnarkResult<Vec<_>>>()?;
-
-            let super_col_multiplicity = self.track_next_mv_com()?;
-
-            let lookup_verifier_input = lookup_check::HintedLookupCheckVerifierInput {
-                included_tracked_col_oracles: included_cols,
-                super_tracked_col_oracle: super_col,
-                super_col_multiplicity,
-            };
-            lookup_check::HintedLookupCheckPIOP::verify(self, lookup_verifier_input)?;
+            self.tracked_oracle_from_id(super_id)?;
+            for sub_id in &sub_ids {
+                self.tracked_oracle_from_id(*sub_id)?;
+            }
+            let multiplicity = self.track_next_mv_com()?.id();
+            relations.push(KeyedSumRelation {
+                mfxs: vec![None; sub_ids.len()],
+                fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
+                gxs: vec![KeyedTerm::Poly(super_id)],
+                mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+            });
         }
 
-        Ok(())
+        verify_keyed_sums(self, &relations)
     }
 
     #[instrument(level = "debug", skip_all)]

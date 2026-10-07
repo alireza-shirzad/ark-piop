@@ -1460,7 +1460,8 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
 
     let decoded = SNARKProof::<B>::from_bytes(&bytes).unwrap();
     assert_eq!(decoded.to_bytes().unwrap(), bytes);
-    assert!(!proof.logup_gkr_subproofs.is_empty());
+    // Both tables are reduced in one batch, which the decoded proof keeps.
+    assert_eq!(proof.logup_gkr_subproofs.len(), 1);
     assert_eq!(decoded.logup_gkr_subproofs, proof.logup_gkr_subproofs);
     verifier.set_proof(decoded);
     assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));

@@ -15,7 +15,7 @@ use crate::{
     errors::SnarkResult,
     pcs::PCS,
     piop::{
-        PIOP,
+        keyed_sumcheck::reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
         logup_gkr::{FractionInstance, GkrClaims},
         lookup_check,
     },
@@ -490,71 +490,64 @@ where
             );
         }
 
-        let mut hinted_inputs = Vec::with_capacity(by_super.len());
-        let mut multiplicity_jobs = Vec::with_capacity(by_super.len());
-
-        for (super_id, sub_ids) in by_super {
-            let super_nv = self.tracker_rc.borrow().poly_nv(super_id);
-            let super_col =
-                TrackedPoly::new(Either::Left(super_id), super_nv, self.tracker_rc.clone());
-
-            let included_cols = sub_ids
-                .into_iter()
-                .map(|sub_id| {
-                    let nv = self.tracker_rc.borrow().poly_nv(sub_id);
-                    TrackedPoly::new(Either::Left(sub_id), nv, self.tracker_rc.clone())
-                })
-                .collect::<Vec<_>>();
-
-            let super_col_evals = super_col.evaluations();
-            let included_col_evals = included_cols
+        // Every column is read once: the same evaluations give the
+        // multiplicities here and the GKR input layers in the reduction.
+        let mut evals = ColumnEvals::new();
+        {
+            let mut tracker = self.tracker_rc.borrow_mut();
+            for id in by_super
                 .iter()
-                .map(TrackedPoly::evaluations)
-                .collect::<Vec<_>>();
-
-            hinted_inputs.push((included_cols, super_col));
-            multiplicity_jobs.push((super_nv, included_col_evals, super_col_evals));
+                .flat_map(|(sup, subs)| subs.iter().chain([sup]))
+            {
+                if !evals.contains_key(id) {
+                    evals.insert(*id, tracker.evaluations(*id));
+                }
+            }
         }
 
         let mv_pcs_prover_param = self.mv_pcs_prover_param();
-        let super_col_m_polys_and_commitments = cfg_into_iter!(multiplicity_jobs)
-            .map(|(super_col_nv, included_col_evals, super_col_evals)| {
-                let super_col_m_mle =
-                    Arc::new(lookup_check::calc_inclusion_multiplicity_from_evals::<B>(
-                        &included_col_evals,
-                        &super_col_evals,
-                        super_col_nv,
-                    ));
-                let super_col_m_commitment =
-                    B::MvPCS::commit(mv_pcs_prover_param.as_ref(), &super_col_m_mle)?;
-                Ok::<(Arc<MLE<B::F>>, <B::MvPCS as PCS<B::F>>::Commitment), _>((
-                    super_col_m_mle,
-                    super_col_m_commitment,
-                ))
+        let groups: Vec<(&TrackerID, &Vec<TrackerID>)> = by_super.iter().collect();
+        let multiplicities = cfg_into_iter!(groups)
+            .map(|(super_id, sub_ids)| {
+                let included: Vec<&[B::F]> = sub_ids.iter().map(|id| &evals[id][..]).collect();
+                let super_evals = &evals[super_id];
+                let m_evals = lookup_check::inclusion_multiplicities(&included, super_evals);
+                let m_mle = Arc::new(MLE::from_evaluations_vec(
+                    super_evals.len().trailing_zeros() as usize,
+                    m_evals.clone(),
+                ));
+                let m_commitment = B::MvPCS::commit(mv_pcs_prover_param.as_ref(), &m_mle)?;
+                Ok((m_mle, m_commitment, m_evals))
             })
             .collect::<Vec<_>>()
             .into_iter()
             .collect::<SnarkResult<Vec<_>>>()?;
 
-        for ((included_cols, super_col), (super_col_m_mle, super_col_m_commitment)) in hinted_inputs
-            .into_iter()
-            .zip(super_col_m_polys_and_commitments)
+        // All multiplicities go into the transcript before the reduction
+        // draws its one gamma, which every group then shares.
+        let mut relations = Vec::with_capacity(by_super.len());
+        for ((super_id, sub_ids), (m_mle, m_commitment, m_evals)) in
+            by_super.into_iter().zip(multiplicities)
         {
-            let super_col_multiplicity = self.track_mat_mv_poly_with_commitment(
-                super_col_m_mle.as_ref(),
-                super_col_m_commitment,
-                CommitmentBinding::ProofEmitted,
-            )?;
-
-            let lookup_prover_input = lookup_check::HintedLookupCheckProverInput {
-                included_cols,
-                super_col,
-                super_col_multiplicity,
-            };
-            lookup_check::HintedLookupCheckPIOP::prove(self, lookup_prover_input)?;
+            let multiplicity = self
+                .tracker_rc
+                .borrow_mut()
+                .track_mat_mv_p_with_commitment(
+                    &m_mle,
+                    m_commitment,
+                    CommitmentBinding::ProofEmitted,
+                    false,
+                )?;
+            evals.insert(multiplicity, m_evals);
+            relations.push(KeyedSumRelation {
+                mfxs: vec![None; sub_ids.len()],
+                fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
+                gxs: vec![KeyedTerm::Poly(super_id)],
+                mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+            });
         }
 
-        Ok(())
+        prove_keyed_sums(self, &relations, evals)
     }
 
     pub fn get_or_build_contig_one_poly(

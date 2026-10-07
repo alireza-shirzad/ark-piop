@@ -1,6 +1,6 @@
 use crate::prover::structs::polynomial::TrackedPoly;
 use crate::{SnarkBackend, arithmetic::mat_poly::mle::MLE};
-use ark_ff::Zero;
+use ark_ff::PrimeField;
 use ark_std::cfg_iter;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -41,16 +41,29 @@ pub fn calc_inclusion_multiplicity_from_evals<B>(
 where
     B: SnarkBackend,
 {
+    let included: Vec<&[B::F]> = included_col_evals.iter().map(Vec::as_slice).collect();
+    MLE::from_evaluations_vec(
+        super_col_nv,
+        inclusion_multiplicities(&included, super_col_evals),
+    )
+}
+
+/// The evaluations behind [`calc_inclusion_multiplicity_from_evals`], from
+/// borrowed columns: one multiplicity per super-column row.
+pub(crate) fn inclusion_multiplicities<F: PrimeField>(
+    included_col_evals: &[&[F]],
+    super_col_evals: &[F],
+) -> Vec<F> {
     // Sort-based rather than a hash map: on a 2^23-entry super column the
     // map version was several seconds of one core per lookup, and this
     // runs inside a parallel job per super column.
-    let mut included: Vec<B::F> = included_col_evals
+    let mut included: Vec<F> = included_col_evals
         .iter()
         .flat_map(|evals| evals.iter().copied())
         .collect();
     sort_unstable(&mut included);
     // (value, count) runs, in value order.
-    let mut runs: Vec<(B::F, u64)> = Vec::new();
+    let mut runs: Vec<(F, u64)> = Vec::new();
     for val in included {
         match runs.last_mut() {
             Some((last, n)) if *last == val => *n += 1,
@@ -61,15 +74,15 @@ where
     // Super positions by value, ties by position: the first of each run is
     // the value's first occurrence, which carries the count; later
     // duplicates get 0 so the super-column total equals the sub-union total.
-    let mut sup: Vec<(B::F, usize)> = cfg_iter!(super_col_evals)
+    let mut sup: Vec<(F, usize)> = cfg_iter!(super_col_evals)
         .enumerate()
         .map(|(i, &v)| (v, i))
         .collect();
     sort_unstable(&mut sup);
 
-    let mut super_col_mult_evals = vec![B::F::zero(); super_col_evals.len()];
+    let mut super_col_mult_evals = vec![F::zero(); super_col_evals.len()];
     let mut runs = runs.iter().peekable();
-    let mut previous: Option<&B::F> = None;
+    let mut previous: Option<&F> = None;
     for (val, pos) in &sup {
         if previous == Some(val) {
             continue;
@@ -81,11 +94,11 @@ where
         if let Some((v, n)) = runs.peek()
             && v == val
         {
-            super_col_mult_evals[*pos] = B::F::from(*n);
+            super_col_mult_evals[*pos] = F::from(*n);
         }
     }
 
-    MLE::from_evaluations_vec(super_col_nv, super_col_mult_evals)
+    super_col_mult_evals
 }
 
 fn sort_unstable<T: Ord + Send>(v: &mut [T]) {
