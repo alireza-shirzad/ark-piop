@@ -132,7 +132,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.set_proof_ref(&proof);
     }
 
-    // Set the proof for the tracker from a borrowed proof
+    // Set the proof for the tracker from a borrowed proof. One made with
+    // another lookup protocol is refused by whatever reads it first
+    // (`proof_or_err`): there is no error to return from here.
     pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(proof));
         // The counts belong to the proof they were advanced on.
@@ -189,16 +191,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// this can be said plainly; which protocol the verifier runs is its
     /// configuration's alone.
     pub(crate) fn check_lookup_protocol(&self) -> SnarkResult<()> {
-        let proved = self.proof_or_err()?.lookup_messages.protocol();
-        let configured = self.config.lookup_protocol;
-        if proved != configured {
-            return Err(SnarkError::VerifierError(
-                VerifierError::VerifierCheckFailed(format!(
-                    "proof was made with {proved}, verifier is configured for {configured}"
-                )),
-            ));
-        }
-        Ok(())
+        self.proof_or_err().map(drop)
     }
 
     /// Makes every later [`Self::verify`] fail. For the caller of a check
@@ -211,10 +204,26 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     /// Return the currently-set proof, or `VerifierError::ProofNotReceived`.
     /// Prefer this over `self.proof.as_ref().unwrap()` in verify paths.
+    ///
+    /// A proof made with another lookup protocol than this verifier's is
+    /// refused here, from the first read after it is set: read as a proof
+    /// of the verifier's protocol, it would fail on whatever it lacks
+    /// first, with an error about that.
     pub(super) fn proof_or_err(&self) -> SnarkResult<&ProcessedProof<B>> {
-        self.proof
+        let proof = self
+            .proof
             .as_ref()
-            .ok_or(SnarkError::VerifierError(VerifierError::ProofNotReceived))
+            .ok_or(SnarkError::VerifierError(VerifierError::ProofNotReceived))?;
+        let proved = proof.lookup_messages.protocol();
+        let configured = self.config.lookup_protocol;
+        if proved != configured {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "proof was made with {proved}, verifier is configured for {configured}"
+                )),
+            ));
+        }
+        Ok(proof)
     }
 
     // Generate a new TrackerID

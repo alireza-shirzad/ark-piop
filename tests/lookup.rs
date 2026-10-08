@@ -2582,6 +2582,36 @@ fn verifier_of_another_protocol_refuses_a_proof_without_lookups() {
     }
 }
 
+/// A verifier does not wait for its `verify` to say that a proof was made
+/// with another protocol. Whatever it reads off the proof first says so: a
+/// commitment the proof has, or one it lacks where a statement laid out
+/// for the verifier's protocol would have one.
+#[test]
+fn verifier_of_another_protocol_refuses_the_proof_at_its_first_read() {
+    for protocol in PROTOCOLS {
+        let (mut prover, mut verifier) = setup_under(protocol, other(protocol));
+        let id = commit(&mut prover, &summed_column()).unwrap().id();
+        let proof = prover.build_proof().unwrap();
+        verifier.set_proof_ref(&proof);
+        let refusal = format!(
+            "proof was made with {protocol}, verifier is configured for {}",
+            other(protocol)
+        );
+        for id in [id, TrackerID(id.0 + 1)] {
+            match verifier.track_mv_com_by_id(id).map(drop) {
+                Err(SnarkError::VerifierError(VerifierError::VerifierCheckFailed(reason))) => {
+                    assert_eq!(reason, refusal)
+                }
+                other => panic!("expected the proof to be refused, got {other:?}"),
+            }
+        }
+
+        let (_, mut verifier) = setup_under(protocol, protocol);
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(id).unwrap();
+    }
+}
+
 /// The name a proof carries is not what makes a verifier accept it. A proof
 /// renamed to the verifier's protocol passes the comparison of the names
 /// and fails on the transcript, which opens with the prover's protocol;
