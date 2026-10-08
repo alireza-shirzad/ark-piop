@@ -269,6 +269,30 @@ mod tests {
         assert!(!counted);
     }
 
+    /// A value that is a small integer in its lowest limb only is not that
+    /// integer: it is no key of the array, in the super column or in an
+    /// included one, and it is not the value of the row before it.
+    #[test]
+    fn counting_tells_a_small_integer_from_a_value_that_ends_in_it() {
+        let high = F::from(1u128 << 64);
+
+        // In the super column, beside the integer it ends in: such a column
+        // is not small integers, and each of the two rows has its own count.
+        let super_col = vec![fr(3) + high, fr(3), fr(5)];
+        let included = vec![vec![fr(3), fr(3), fr(5), fr(3) + high]];
+        let (m, counted) = both_ways(&included, &super_col);
+        assert!(!counted);
+        assert_eq!(m, [1u64, 2, 1].map(fr).to_vec());
+
+        // In an included column, right after the integer it ends in and
+        // right before it: it is in no row of the super column.
+        let super_col: Vec<F> = (0..8).map(fr).collect();
+        let included = vec![vec![fr(3), fr(3) + high, fr(3) + high, fr(3), high]];
+        let (m, counted) = both_ways(&included, &super_col);
+        assert!(counted);
+        assert_eq!(m, [0u64, 0, 0, 2, 0, 0, 0, 0].map(fr).to_vec());
+    }
+
     /// Columns longer than one counting chunk, with long runs of one value
     /// across the chunk boundary.
     #[test]
@@ -302,7 +326,8 @@ mod tests {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
         /// Random columns of every kind: a dense range, small values with
-        /// gaps and repeats, and field elements at large.
+        /// gaps and repeats, field elements at large, and values that are
+        /// small in their lowest limb only.
         #[test]
         fn counting_matches_sorting(
             super_log in 0usize..7,
@@ -312,12 +337,21 @@ mod tests {
             seed in any::<u64>(),
         ) {
             let mut rng = StdRng::seed_from_u64(seed);
+            let above = |rng: &mut StdRng, low: u64| {
+                fr(low) + F::from(1u128 << 64) * fr(rng.gen_range(1..4))
+            };
             let mut super_col: Vec<F> = (0..1usize << super_log)
                 .map(|_| fr(rng.gen_range(0..range)))
                 .collect();
             for _ in 0..large_supers {
                 let row = rng.gen_range(0..super_col.len());
-                super_col[row] = F::rand(&mut rng);
+                super_col[row] = match rng.gen_range(0..2) {
+                    0 => F::rand(&mut rng),
+                    _ => {
+                        let low = rng.gen_range(0..range);
+                        above(&mut rng, low)
+                    }
+                };
             }
             let included: Vec<Vec<F>> = sub_lens
                 .iter()
@@ -326,6 +360,10 @@ mod tests {
                         .map(|_| match rng.gen_range(0..10) {
                             0 => F::rand(&mut rng),
                             1 => super_col[rng.gen_range(0..super_col.len())],
+                            2 => {
+                                let low = rng.gen_range(0..range + 20);
+                                above(&mut rng, low)
+                            }
                             _ => fr(rng.gen_range(0..range + 20)),
                         })
                         .collect()
