@@ -110,6 +110,11 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
         self.state.mv_pcs_substate.zero_check_claims.push(claim);
     }
 
+    fn add_zerocheck_claim(&mut self, id: TrackerID) -> SnarkResult<()> {
+        self.add_mv_zerocheck_claim(id);
+        Ok(())
+    }
+
     fn zerocheck_claims_len(&self) -> usize {
         self.state.mv_pcs_substate.zero_check_claims.len()
     }

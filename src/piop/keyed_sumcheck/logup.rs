@@ -50,7 +50,7 @@ use crate::{
     errors::{SnarkError, SnarkResult},
     prover::tracker::ProverTracker,
     tracker_core::TrackerCore,
-    types::{TrackerID, claim::TrackerZerocheckClaim},
+    types::TrackerID,
     verifier::tracker::VerifierTracker,
 };
 
@@ -200,7 +200,7 @@ fn claim_helper<T: TrackerCore, P: Party<T>>(
 
 /// Carries out one term and returns its sum,
 /// `sum_x mult(x)/(col(x) - gamma)` over the larger of the two hypercubes.
-fn reduce_term<T: TrackerCore, P: Party<T>>(
+pub(super) fn reduce_term<T: TrackerCore, P: Party<T>>(
     tracker: &mut T,
     party: &mut P,
     term: &Term<T::F>,
@@ -215,7 +215,7 @@ fn reduce_term<T: TrackerCore, P: Party<T>>(
             let product = tracker.mul_polys(product, b);
             let rest = tracker.sub_polys(product, a);
             let rest = tracker.sub_polys(rest, b);
-            tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
+            tracker.add_zerocheck_claim(rest)?;
             Ok(sum)
         }
         Term::Single {
@@ -238,7 +238,7 @@ fn reduce_term<T: TrackerCore, P: Party<T>>(
             let shifted = tracker.mul_scalar(helper, gamma);
             let rest = tracker.sub_polys(product, shifted);
             let rest = tracker.add_scalar(rest, -T::F::one());
-            tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
+            tracker.add_zerocheck_claim(rest)?;
             Ok(scale * sum)
         }
         Term::Single {

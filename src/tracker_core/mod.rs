@@ -87,6 +87,10 @@ pub trait TrackerCore {
     /// Append a single zerocheck claim.
     fn push_zerocheck_claim(&mut self, claim: TrackerZerocheckClaim);
 
+    /// Append a zerocheck claim on `id` that a protocol makes on both
+    /// sides. Fallible because an honest prover checks the claim.
+    fn add_zerocheck_claim(&mut self, id: TrackerID) -> SnarkResult<()>;
+
     /// Number of pending zerocheck claims.
     fn zerocheck_claims_len(&self) -> usize;
 
