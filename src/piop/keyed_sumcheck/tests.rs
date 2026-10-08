@@ -434,6 +434,70 @@ impl Session {
         logup::reduce_keyed_sums(&mut *tracker, &mut party, &self.relations).map(drop)
     }
 
+    /// A LogUp prover whose helpers are those of the columns in `fakes`
+    /// where the statement has others, and who keeps the tables it
+    /// committed to. Its sums are the sums of those tables: every sum it
+    /// sends and claims is true, and all that is false is that a helper is
+    /// the helper of the statement's column.
+    fn prove_with_fake_helpers(&mut self, fakes: ColumnEvals<F>) -> SnarkResult<()> {
+        struct FakeHelpers {
+            honest: logup::ProvingParty<F>,
+            fakes: ColumnEvals<F>,
+        }
+        impl logup::Party<ProverTracker<B>> for FakeHelpers {
+            fn helper(
+                &mut self,
+                tracker: &mut ProverTracker<B>,
+                cols: &[TrackerID],
+                mult: Option<TrackerID>,
+                gamma: F,
+            ) -> SnarkResult<(TrackerID, F)> {
+                let mut helper = vec![F::zero(); 1 << TrackerCore::poly_nv(tracker, cols[0])];
+                for col in cols {
+                    let col = match self.fakes.get(col) {
+                        Some(fake) => fake.clone(),
+                        None => tracker.evaluations(*col),
+                    };
+                    for (sum, value) in helper.iter_mut().zip(col) {
+                        *sum += (value - gamma).inverse().unwrap();
+                    }
+                }
+                let helper_sum = match mult {
+                    None => sum(&helper),
+                    Some(mult) => {
+                        let mult = tracker.evaluations(mult);
+                        (0..helper.len().max(mult.len()))
+                            .map(|row| helper[row % helper.len()] * mult[row % mult.len()])
+                            .sum()
+                    }
+                };
+                let helper = tracker
+                    .track_and_commit_mat_mv_p(&mle(&helper), false)?
+                    .left()
+                    .expect("the helper of a column that is not constant");
+                tracker.send_logup_sum(helper_sum);
+                Ok((helper, helper_sum))
+            }
+
+            fn sum(&mut self, tracker: &mut ProverTracker<B>, poly: TrackerID) -> SnarkResult<F> {
+                logup::Party::sum(&mut self.honest, tracker, poly)
+            }
+
+            fn reject(&self, reason: String) -> SnarkError {
+                logup::Party::<ProverTracker<B>>::reject(&self.honest, reason)
+            }
+        }
+        let mut party = FakeHelpers {
+            honest: logup::ProvingParty {
+                evals: ColumnEvals::new(),
+            },
+            fakes,
+        };
+        let tracker = self.prover.tracker();
+        let mut tracker = tracker.borrow_mut();
+        logup::reduce_keyed_sums(&mut *tracker, &mut party, &self.relations).map(drop)
+    }
+
     fn plan(&self) -> Vec<InstancePlan<F>> {
         plan_of(&self.prover.tracker().borrow(), &self.relations).unwrap()
     }
@@ -3391,6 +3455,102 @@ fn logup_sum_that_balances_a_false_lookup_is_rejected() {
     assert_stopped_by_the_input_claims(session(), |session| {
         session.prove_shifting_sums(&[zero, zero, zero, gap])
     });
+}
+
+/// The terms `session` lays its relations out as under LogUp.
+fn logup_plan(session: &Session) -> Vec<logup::RelationPlan<F>> {
+    logup::plan_relations(&*session.prover.tracker().borrow(), &session.relations).unwrap()
+}
+
+/// What ties a helper to its column is a zerocheck, and nothing else. A
+/// prover with a sub column outside the table commits to the helper of a
+/// column inside it, counted by the multiplicities, and sends that
+/// helper's sum: the two sides balance and every sum is the sum of what
+/// was committed. For a column with a helper of its own, with and without
+/// weights, for either column of two that share one, and for a column that
+/// is a product.
+#[test]
+fn logup_helper_of_another_column_than_the_statements_is_rejected() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let table = fv(0..8);
+    let outside = |fake: &[F]| {
+        let mut committed = fake.to_vec();
+        committed[1] = F::from(9u64);
+        committed
+    };
+    let stopped = |session: Session, column: TrackerID, fake: &[F]| {
+        let fakes = BTreeMap::from([(column, fake.to_vec())]);
+        assert_stopped_by_the_input_claims(session, |session| {
+            session.prove_with_fake_helpers(fakes)
+        });
+    };
+
+    for sub_nv in [3, 5, 2] {
+        let fake = [in_table(sub_nv, 8, 1)];
+        let committed = [outside(&fake[0])];
+        lookup_session(&table, &fake, &fake)
+            .prove_and_verify()
+            .unwrap();
+        let session = lookup_session(&table, &fake, &committed);
+        assert!(matches!(
+            logup_plan(&session)[0][0][..],
+            [logup::Term::Single { mult: None, .. }]
+        ));
+        let sub = session.ids[2];
+        stopped(session, sub, &fake[0]);
+    }
+
+    let (fake, weights) = (in_table(3, 8, 1), fv(1..5));
+    let weighted = |sub: &[F]| {
+        let counts = tally(&table, &[(&fake, Some(&weights))]);
+        let columns = [table.clone(), counts, sub.to_vec(), weights.clone()];
+        Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
+    };
+    weighted(&fake).prove_and_verify().unwrap();
+    let session = weighted(&outside(&fake));
+    let sub = session.ids[2];
+    stopped(session, sub, &fake);
+
+    for fake_at in [0, 1] {
+        let fake = [in_table(3, 8, 1), in_table(3, 8, 2)];
+        let mut committed = fake.clone();
+        committed[fake_at] = outside(&fake[fake_at]);
+        lookup_session(&table, &fake, &fake)
+            .prove_and_verify()
+            .unwrap();
+        let session = lookup_session(&table, &fake, &committed);
+        assert!(matches!(
+            logup_plan(&session)[0][0][..],
+            [logup::Term::Pair { .. }]
+        ));
+        let sub = session.ids[2 + fake_at];
+        stopped(session, sub, &fake[fake_at]);
+    }
+
+    // The sub column is `data · activator`, and the fake one what it would
+    // be with the row that is outside the table switched off. The product
+    // has an id on both sides for being summed.
+    let data = fv([1, 9, 2, 3, 5, 5, 5, 7]);
+    let fake = fv([1, 0, 2, 3, 5, 5, 5, 7]);
+    let product = |activator: &[F]| {
+        let counts = tally(&table, &[(&fake, None)]);
+        let columns = [table.clone(), counts, data.clone(), activator.to_vec()];
+        let relation = (vec![(2, None)], vec![(0, Some(1))]);
+        let mut session = Session::new(&columns, &[&[2, 3]], &[relation]);
+        let claims = session.prover.tracker().borrow().sumcheck_claims_snapshot();
+        let product = claims[0].0;
+        session.relations[0].fxs[0] = KeyedTerm::Poly(product);
+        (session, product)
+    };
+    let (session, _) = product(&fv([1, 0, 1, 1, 1, 1, 1, 1]));
+    session.prove_and_verify().unwrap();
+    let (session, sub) = product(&fv([1; 8]));
+    // The product has no table for a lazy helper to be read off.
+    assert!(!TrackerCore::is_material(
+        &*session.prover.tracker().borrow(),
+        sub
+    ));
+    stopped(session, sub, &fake);
 }
 
 /// The size of a helper is the prover's to choose with its commitment, and
