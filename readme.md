@@ -16,7 +16,7 @@ tracker supports five claim kinds:
 | **sumcheck**     | `∑_{x ∈ {0,1}^n} p(x) = s` for a declared sum `s`                       |
 | **zerocheck**    | `p(x) = 0` for all `x ∈ {0,1}^n`                                        |
 | **nozerocheck**  | `p(x) ≠ 0` for all `x ∈ {0,1}^n`                                        |
-| **lookup**       | every value in a sub-column appears in a super-column (LogUp)           |
+| **lookup**       | every value in a sub-column appears in a super-column (LogUp or LogUp-GKR) |
 | **evaluation**   | `p(r) = v` at a committed point `r`                                     |
 
 You emit as many claims as you like across the run. When the prover calls
@@ -109,6 +109,37 @@ the same order** — tracker IDs are assigned sequentially from a shared
 counter, and the final batched proof is only sound if both sides agree on
 what each ID refers to. Skip a `track_mv_com_by_id` call on the verifier
 and every subsequent ID will be off by one.
+
+### Choosing the lookup protocol
+
+Lookup claims and keyed sums are proved by one of two arguments, chosen per
+proof in `SharedArgConfig::lookup_protocol`:
+
+| `LookupProtocol` | Prover                                      | Proof                              |
+| ---------------- | ------------------------------------------- | ---------------------------------- |
+| `LogUpGkr` (default) | no helper commitments; one batched GKR per proof | carries the GKR messages, so it is larger |
+| `LogUp`          | commits to a helper `1/(column - γ)` per column | smaller                            |
+
+```rust
+use ark_piop::{
+    prover::ArgProver,
+    types::{LookupProtocol, SharedArgConfig},
+    verifier::ArgVerifier,
+};
+
+let config = SharedArgConfig {
+    lookup_protocol: LookupProtocol::LogUp,
+    ..SharedArgConfig::default()
+};
+let mut prover = ArgProver::<B>::new_from_pk_with_config(pk, config.clone())?;
+let mut verifier = ArgVerifier::<B>::new_from_vk_with_config(vk, config)?;
+```
+
+To switch a whole run without touching code, set
+`ARK_PIOP_LOOKUP_PROTOCOL=logup` or `=gkr`: it selects the protocol of
+`SharedArgConfig::default()`. The prover and the verifier have to agree. The
+proof names the protocol it was made with, and a verifier configured for the
+other one rejects it.
 
 A larger worked example exercising zerocheck and lookup claims lives in
 [tests/pipeline.rs](tests/pipeline.rs). For a real-world downstream use,
