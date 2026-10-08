@@ -12,8 +12,9 @@ use indexmap::IndexMap;
 use super::{
     KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput,
     reduction::{
-        ColumnEvals, InstancePlan, KeyedSumRelation, KeyedTerm, Operand, Party, ProvingParty, Side,
-        plan_instances, prove_keyed_sums, reduce_keyed_sums, verify_keyed_sums,
+        Batch, ColumnEvals, InstancePlan, KeyedSumRelation, KeyedTerm, Operand, Party,
+        ProvingParty, Reduction, Side, check_batch_sums, plan_instances, prove_keyed_sums,
+        reduce_keyed_sums, verify_keyed_sums,
     },
 };
 use crate::{
@@ -24,7 +25,7 @@ use crate::{
     piop::{
         PIOP,
         logup_gkr::{
-            GkrClaims, GkrShape, proof_len,
+            FractionInstance, GkrClaims, GkrShape, Numerator, proof_len,
             tests::{Deviation, Fault, naive_prove_batch},
         },
         lookup_check::multiplicities_by_sorting,
@@ -297,11 +298,10 @@ impl Session {
             fn run(
                 &mut self,
                 tracker: &mut ProverTracker<B>,
-                plan: &[InstancePlan<F>],
-                run: std::ops::Range<usize>,
-                gamma: F,
+                batch: &Batch<F>,
+                run: usize,
             ) -> SnarkResult<GkrClaims<F>> {
-                let instances = self.honest.instances(tracker, plan, run, gamma)?;
+                let instances = self.honest.instances(tracker, batch, run)?;
                 let fault = Fault {
                     deviation: self.deviation,
                     patch_until: 0,
@@ -661,13 +661,26 @@ fn with_claim_map_entry(proof: &SNARKProof<B>, id: TrackerID, value: F) -> SNARK
 /// The claim map of a proof is not bound by the transcript. Whatever it
 /// says about an input claim of the reduction, the verifier uses its own
 /// value. `(wide nv, buckets)`: one sumcheck for everything, and one for
-/// the lookup alone.
+/// the lookups alone. For one lookup, and for two whose columns share their
+/// instances.
 #[test]
 fn raw_claim_ignores_proof_map() {
     let table = fv(0..8);
     let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
-    for (wide_nv, buckets) in [(4, 1), (8, 2)] {
-        let mut session = narrow_lookup_session(&table, &sub, &sub, wide_nv);
+    let one_lookup = |wide_nv: usize| narrow_lookup_session(&table, &sub, &sub, wide_nv);
+    let two_lookups = |wide_nv: usize| {
+        let subs = two_lookup_subs();
+        let mut columns = two_lookup_columns(&subs, &subs);
+        columns.push(fv((0..1u64 << wide_nv).map(|i| i * i + 1)));
+        columns.push(fv((0..1u64 << wide_nv).map(|i| 3 * i + 2)));
+        Session::new(&columns, &[&[8, 9]], &two_lookup_relations(false))
+    };
+    let sessions: [&dyn Fn(usize) -> Session; 2] = [&one_lookup, &two_lookups];
+    for (session, (wide_nv, buckets)) in sessions
+        .into_iter()
+        .flat_map(|session| [(session, (4, 1)), (session, (8, 2))])
+    {
+        let mut session = session(wide_nv);
         session.prove_with(ColumnEvals::new()).unwrap();
         let claims = session.prover.tracker().borrow().sumcheck_claims_snapshot();
         let raw: Vec<(TrackerID, F)> = claims
@@ -675,7 +688,8 @@ fn raw_claim_ignores_proof_map() {
             .filter(|(_, _, raw)| *raw)
             .map(|(id, sum, _)| (*id, *sum))
             .collect();
-        // The sub, the table and the multiplicities.
+        // The sub columns, the tables and the multiplicities, each kind in
+        // one instance.
         assert_eq!(raw.len(), 3);
         assert_eq!(claims.len(), 4);
 
@@ -745,33 +759,348 @@ fn scaled_column_attack_through_the_proof_map_is_rejected() {
     }
 }
 
-/// Two relations in one batch, each false, with errors that cancel over the
-/// batch: the sides are compared per relation.
+/// The sum of an instance's fractions, as one fraction.
+fn root(instance: &FractionInstance<F>) -> [F; 2] {
+    let mut sum = [F::zero(), F::one()];
+    for (row, den) in instance.den.iter().enumerate() {
+        let num = match &instance.num {
+            Numerator::One => F::one(),
+            Numerator::Values(values) => values[row],
+        };
+        sum = [sum[0] * den + num * sum[1], sum[1] * den];
+    }
+    sum
+}
+
+/// Whether the verifier's comparison of the two sides holds for `plan` when
+/// the prover's instances are built under `gammas`, one per relation.
+fn balances_under(session: &Session, plan: &[InstancePlan<F>], gammas: &[F]) -> bool {
+    let batch = Batch {
+        plan: plan.to_vec(),
+        gammas: gammas.to_vec(),
+        runs: vec![(0..plan.len()).collect()],
+    };
+    let mut party = ProvingParty {
+        evals: ColumnEvals::new(),
+    };
+    let tracker = session.prover.tracker();
+    let instances = party
+        .instances(&mut tracker.borrow_mut(), &batch, 0)
+        .unwrap();
+    let reduction = Reduction {
+        plan: batch.plan,
+        roots: instances.iter().map(root).collect(),
+    };
+    check_batch_sums(&reduction).is_ok()
+}
+
+/// Two relations in one batch, each false, with errors that cancel: what
+/// the first has on its `f` side and lacks on its `g` side, the second has
+/// the other way round. Their entries share the instances of the batch and
+/// the two sides are compared once, over all of them. What tells the
+/// relations apart is that each has a `gamma` of its own: under one for
+/// both, the two sides are the same sum.
 #[test]
 fn relations_whose_errors_cancel_over_the_batch_are_rejected() {
     let a = fv(0..8);
     let b = fv((0..8).map(|i| i + 100));
     let columns = [a, b];
     let entry = |column: usize| vec![(column, None)];
+    let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
 
     // As one relation the four columns balance.
-    let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
-    Session::new(&columns, &[&[0]], &[together])
-        .prove_and_verify()
-        .unwrap();
+    let together = [(vec![(0, None), (1, None)], vec![(1, None), (0, None)])];
+    let mut merged = Session::new(&columns, &[&[0]], &together);
+    let merged_plan = merged.plan();
+    assert!(balances_under(&merged, &merged_plan, &[gamma]));
+    merged.prove_with(ColumnEvals::new()).unwrap();
+    let merged_proof = merged.prover.build_proof().unwrap();
+    merged.verify(&merged_proof).unwrap();
 
+    // As two relations they are laid out as before, column for column: all
+    // that differs is the relation of every second entry.
     let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
-    match Session::new(&columns, &[&[0]], &apart).prove_and_verify() {
-        Err(Rejected::Reduction(err)) => assert_verifier_error(err),
-        other => panic!("expected the roots to differ, got {other:?}"),
+    let session = Session::new(&columns, &[&[0]], &apart);
+    let plan = session.plan();
+    assert_eq!(
+        layout(&plan),
+        [
+            (Side::F, 3, 1, true, false, false),
+            (Side::G, 3, 1, true, false, false),
+        ]
+    );
+    for (instance, merged_instance) in plan.iter().zip(&merged_plan) {
+        assert_eq!(instance.cols, merged_instance.cols);
+        assert_eq!(instance.relations, [0, 1]);
+        assert_eq!(merged_instance.relations, [0, 0]);
     }
+    // So with one gamma for both relations the comparison would hold. With
+    // one each it does not.
+    assert!(balances_under(&session, &plan, &[gamma, gamma]));
+    assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
+    let apart_relations = session.relations.clone();
+    assert_eq!(session.ids, merged.ids);
+    assert_rejected_in_the_reduction(session.prove_and_verify());
+
+    // Nor is the proof of the one relation a proof of the two: they have
+    // the same instances and differ in their gammas alone.
+    merged.relations = apart_relations;
+    assert_rejected_in_the_reduction(merged.verify(&merged_proof));
 
     // A true relation does not vouch for a false one next to it.
     let mixed = [(entry(0), entry(0)), (entry(0), entry(1))];
-    match Session::new(&columns, &[&[0]], &mixed).prove_and_verify() {
-        Err(Rejected::Reduction(err)) => assert_verifier_error(err),
-        other => panic!("expected the roots to differ, got {other:?}"),
+    assert_rejected_in_the_reduction(Session::new(&columns, &[&[0]], &mixed).prove_and_verify());
+}
+
+// ─── Instances shared by relations ───────────────────────────────────────
+
+/// Two sub columns of 8 rows for each of the tables `0..8` and `100..108`.
+fn two_lookup_subs() -> [Vec<F>; 4] {
+    let second = |seed| {
+        in_table(3, 8, seed)
+            .iter()
+            .map(|v| *v + F::from(100u64))
+            .collect()
+    };
+    [in_table(3, 8, 1), in_table(3, 8, 2), second(3), second(4)]
+}
+
+/// The columns of [`two_lookups`]: the first table and its multiplicities,
+/// the second and its own, then `committed`. Each table counts whatever of
+/// `counted` is in it, whichever table it is meant for.
+fn two_lookup_columns(counted: &[Vec<F>; 4], committed: &[Vec<F>; 4]) -> Vec<Vec<F>> {
+    let tables = [fv(0..8), fv((0..8).map(|i| i + 100))];
+    let counted: Vec<(&[F], Option<&[F]>)> = counted.iter().map(|sub| (&sub[..], None)).collect();
+    let mut columns = Vec::new();
+    for table in tables {
+        columns.push(table.clone());
+        columns.push(tally(&table, &counted));
     }
+    columns.extend_from_slice(committed);
+    columns
+}
+
+/// The first two sub columns looked up in the first table and the last two
+/// in the second: as two relations, or `merged` into one keyed sum of all
+/// four against both tables.
+fn two_lookup_relations(merged: bool) -> Vec<Sides> {
+    let subs =
+        |range: std::ops::Range<usize>| -> Vec<Entry> { range.map(|sub| (sub, None)).collect() };
+    if merged {
+        vec![(subs(4..8), vec![(0, Some(1)), (2, Some(3))])]
+    } else {
+        vec![
+            (subs(4..6), vec![(0, Some(1))]),
+            (subs(6..8), vec![(2, Some(3))]),
+        ]
+    }
+}
+
+fn two_lookups(columns: &[Vec<F>], merged: bool) -> Session {
+    Session::new(columns, &[], &two_lookup_relations(merged))
+}
+
+/// The sub columns of two lookups share a stack, and so do the two tables.
+/// A value outside its table is caught at every position of the stack. So
+/// is a value of the other table, which that table counts: the two lookups
+/// together balance then, and as one keyed sum they are a true statement,
+/// laid out in the same instances.
+#[test]
+fn value_out_of_its_table_is_rejected_at_every_position_of_a_stack_of_two_relations() {
+    let subs = two_lookup_subs();
+    let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
+    let honest = two_lookups(&two_lookup_columns(&subs, &subs), false);
+    let plan = honest.plan();
+    assert_eq!(
+        layout(&plan),
+        [
+            (Side::F, 3, 2, true, false, false),
+            (Side::G, 3, 1, false, false, false),
+        ]
+    );
+    assert_eq!(plan[0].relations, [0, 0, 1, 1]);
+    assert_eq!(plan[1].relations, [0, 1]);
+    assert!(balances_under(&honest, &plan, &[gamma, other_gamma]));
+    honest.prove_and_verify().unwrap();
+
+    for at in 0..4 {
+        let mut neither = subs.clone();
+        neither[at][5] = F::from(999u64);
+        let columns = two_lookup_columns(&neither, &neither);
+        assert_rejected_in_the_reduction(two_lookups(&columns, false).prove_and_verify());
+
+        let mut other_table = subs.clone();
+        other_table[at][5] = F::from(if at < 2 { 103u64 } else { 3 });
+        let columns = two_lookup_columns(&other_table, &other_table);
+        let merged = two_lookups(&columns, true);
+        assert_eq!(layout(&merged.plan()), layout(&plan));
+        merged.prove_and_verify().unwrap();
+        let session = two_lookups(&columns, false);
+        assert_eq!(session.plan(), plan);
+        assert!(balances_under(&session, &plan, &[gamma, gamma]));
+        assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
+        assert_rejected_in_the_reduction(session.prove_and_verify());
+    }
+}
+
+/// A stack of two relations has one claim on its columns, with the gammas
+/// of its entries weighted as the columns are. A committed sub column is
+/// out of its table at any position of the stack, or a committed
+/// multiplicity of either table is off, and the prover runs the GKR on
+/// columns that balance; or it bends the last mask of either stack.
+#[test]
+fn gkr_on_fake_leaves_of_a_stack_of_two_relations_is_rejected() {
+    let subs = two_lookup_subs();
+    for at in 0..4 {
+        let mut committed = subs.clone();
+        committed[at][5] = F::from(999u64);
+        let cheater = two_lookups(&two_lookup_columns(&subs, &committed), false);
+        let evals = BTreeMap::from([(cheater.ids[4 + at], subs[at].clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    }
+
+    let honest = two_lookup_columns(&subs, &subs);
+    for multiplicity in [1, 3] {
+        let mut committed = honest.clone();
+        committed[multiplicity][2] += F::one();
+        let cheater = two_lookups(&committed, false);
+        let evals = BTreeMap::from([(cheater.ids[multiplicity], honest[multiplicity].clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    }
+
+    // Four sub columns of 8 rows have five layers, and the two tables join
+    // in the second iteration.
+    for instance in [0, 1] {
+        let session = two_lookups(&honest, false);
+        assert_eq!(session.shape(), gkr_shape(&[(5, true), (4, false)]));
+        let deviation = Deviation::Mask {
+            iteration: 4,
+            instance,
+            delta: F::from(5u64),
+        };
+        assert_stopped_by_the_input_claims(session, |session| session.prove_deviating(deviation));
+    }
+}
+
+/// One-row columns of two relations make an instance of two rows, whose
+/// first layer is its input, and a third one is left an instance without
+/// variables, whose root is. Their claims are on polynomials without
+/// variables, each with the gamma of its own relation. With and without
+/// weights.
+#[test]
+fn one_row_entries_of_different_relations_are_claimed_with_their_own_gammas() {
+    let table = fv(0..8);
+    let (keys, weights) = ([5, 2, 7], [3, 4, 6]);
+    for weighted in [false, true] {
+        // Column 0 is the table, 1 to 3 what it counts for each relation, 4
+        // to 6 are the keys and 7 to 9 their weights.
+        let session = |keys: [u64; 3], counted: [u64; 3]| {
+            let mut columns = vec![table.clone()];
+            for (key, weight) in counted.iter().zip(weights) {
+                let weight = fv([if weighted { weight } else { 1 }]);
+                columns.push(tally(&table, &[(&fv([*key]), Some(&weight))]));
+            }
+            columns.extend(keys.map(|key| fv([key])));
+            columns.extend(weights.map(|weight| fv([weight])));
+            let relations: Vec<Sides> = (0..3)
+                .map(|r| {
+                    let f = vec![(4 + r, weighted.then_some(7 + r))];
+                    (f, vec![(0, Some(1 + r))])
+                })
+                .collect();
+            Session::new(&columns, &[], &relations)
+        };
+        let honest = session(keys, keys);
+        let plan = honest.plan();
+        assert_eq!(
+            layout(&plan),
+            [
+                (Side::F, 0, 1, !weighted, false, false),
+                (Side::F, 0, 0, !weighted, false, false),
+                (Side::G, 3, 1, false, false, false),
+                (Side::G, 3, 0, false, false, false),
+            ]
+        );
+        assert_eq!(plan[0].relations, [0, 1]);
+        assert_eq!(plan[1].relations, [2]);
+        honest.prove_and_verify().unwrap();
+
+        for at in 0..3 {
+            // The committed key is not the one its table counts.
+            let mut committed = keys;
+            committed[at] = 6;
+            assert_rejected_in_the_reduction(session(committed, keys).prove_and_verify());
+            // The prover runs the GKR on the one it counts.
+            let cheater = session(committed, keys);
+            let evals = BTreeMap::from([(cheater.ids[4 + at], fv([keys[at]]))]);
+            assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        }
+
+        // Another pair of fractions with the same sum, sent as the first
+        // layer of the two-row instance in the last of the four iterations
+        // of the tables.
+        let deviation = Deviation::Mask {
+            iteration: 3,
+            instance: 0,
+            delta: F::from(5u64),
+        };
+        assert_stopped_by_the_input_claims(session(keys, keys), |session| {
+            session.prove_deviating(deviation)
+        });
+        // The root of the instance without variables sent as an equal
+        // fraction. A numerator that has to be 1 leaves no other.
+        if weighted {
+            let deviation = Deviation::ScaleRoot {
+                instance: 1,
+                scale: F::from(2u64),
+            };
+            assert_stopped_by_the_input_claims(session(keys, keys), |session| {
+                session.prove_deviating(deviation)
+            });
+        }
+    }
+}
+
+/// The comparison of the two sides is one of sums of fractions: the roots
+/// of each side are added whatever their order, a zero denominator is
+/// refused rather than multiplied through, and an empty batch balances.
+#[test]
+fn batch_sums_are_compared_as_fractions_and_refuse_a_zero_denominator() {
+    let instance = |side: Side| InstancePlan::<F> {
+        side,
+        claim_nv: 0,
+        stack_log: 0,
+        relations: vec![0],
+        cols: Operand::Constant(F::zero()),
+        mults: None,
+    };
+    let check = |roots: &[(Side, [u64; 2])]| {
+        check_batch_sums(&Reduction {
+            plan: roots.iter().map(|(side, _)| instance(*side)).collect(),
+            roots: roots
+                .iter()
+                .map(|(_, [p, q])| [F::from(*p), F::from(*q)])
+                .collect(),
+        })
+    };
+    use Side::{F as Left, G as Right};
+    check(&[]).unwrap();
+    // 1/2 + 1/3 = 5/6 = 2/6 + 3/6.
+    check(&[(Left, [1, 2]), (Left, [1, 3]), (Right, [5, 6])]).unwrap();
+    check(&[
+        (Right, [2, 6]),
+        (Left, [1, 2]),
+        (Right, [3, 6]),
+        (Left, [2, 6]),
+    ])
+    .unwrap();
+    assert!(check(&[(Left, [1, 2]), (Left, [1, 3]), (Right, [5, 7])]).is_err());
+    assert!(check(&[(Left, [1, 2]), (Left, [1, 3])]).is_err());
+    assert!(check(&[(Right, [5, 6])]).is_err());
+    // Cross-multiplied, a zero denominator would balance anything.
+    assert!(check(&[(Left, [1, 0]), (Right, [5, 6])]).is_err());
+    assert!(check(&[(Left, [5, 6]), (Right, [1, 0])]).is_err());
+    assert!(check(&[(Left, [0, 0]), (Right, [0, 0])]).is_err());
 }
 
 // ─── Runs of bounded size ────────────────────────────────────────────────
@@ -796,25 +1125,33 @@ fn gkr_shape(batch: &[(usize, bool)]) -> Vec<GkrShape> {
         .collect()
 }
 
-/// How many instances each GKR subproof of `proof` covers, the batch being
-/// the instances `shape` in order. A subproof is its messages and nothing
-/// else, and there are more of them with every instance a run takes in, so
-/// their number tells where a run ends.
-fn run_lengths(proof: &SNARKProof<B>, shape: &[GkrShape]) -> Vec<usize> {
-    let mut rest = shape;
-    let lengths = proof
-        .logup_gkr_subproofs
+/// Asserts that the GKR subproofs of `proof` are the runs `runs`, in order,
+/// each given by the positions of its instances in the batch `shape`. A
+/// subproof is its messages and nothing else, and how many it has follows
+/// from the instances it covers.
+fn assert_runs(proof: &SNARKProof<B>, shape: &[GkrShape], runs: &[Vec<usize>]) {
+    let mut covered = runs.concat();
+    covered.sort_unstable();
+    let all: Vec<usize> = (0..shape.len()).collect();
+    assert_eq!(covered, all, "every instance is in one run");
+    let expected: Vec<Option<usize>> = runs
         .iter()
-        .map(|subproof| {
-            let run = (1..=rest.len())
-                .find(|run| proof_len(&rest[..*run]) == Some(subproof.messages.len()))
-                .expect("a subproof that is no run of the batch");
-            rest = &rest[run..];
-            run
+        .map(|run| {
+            let run_shape: Vec<GkrShape> = run.iter().map(|index| shape[*index]).collect();
+            proof_len(&run_shape)
         })
         .collect();
-    assert!(rest.is_empty(), "instances without a subproof");
-    lengths
+    let sent: Vec<Option<usize>> = proof
+        .logup_gkr_subproofs
+        .iter()
+        .map(|subproof| Some(subproof.messages.len()))
+        .collect();
+    assert_eq!(sent, expected, "the subproofs are not the runs {runs:?}");
+}
+
+/// [`assert_runs`] for a batch proved in one run.
+fn assert_one_run(proof: &SNARKProof<B>, shape: &[GkrShape]) {
+    assert_runs(proof, shape, &[(0..shape.len()).collect()]);
 }
 
 fn assert_rejected_in_the_reduction(res: Result<(), Rejected>) {
@@ -856,7 +1193,8 @@ impl MixedColumns {
     /// side of the first two counts.
     ///
     /// Their instances, in order, with their weighted sizes: `a` 24, `b`
-    /// 96, `c` 32, the table 64, `d` 12, the table 64, `p` 96, `q` 96.
+    /// stacked with `p` 192, `c` 32, the table of the first relation stacked
+    /// with that of the second 128, `d` 12, `q` 96.
     fn session(&self, budgets: (usize, usize), counts_abc: &[F], counts_d: &[F]) -> Session {
         let columns = [
             self.table.clone(),
@@ -898,8 +1236,8 @@ impl MixedColumns {
 }
 
 /// A batch above the budget is proved in several GKR runs, each a subproof
-/// with a point of its own: instances fill a run in order until the next
-/// one would not fit. The relations are still compared as wholes, and every
+/// with a point of its own: an instance joins the first run that has room
+/// for it. The two sides are still compared over the whole batch, and every
 /// run's claims are tied to the columns.
 #[test]
 fn gkr_batch_split_small_budget() {
@@ -907,63 +1245,76 @@ fn gkr_batch_split_small_budget() {
     let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
 
     let mut session = columns.honest((100, 100));
-    assert_eq!(
-        weighted_sizes(&session.plan()),
-        [24, 96, 32, 64, 12, 64, 96, 96]
-    );
+    let plan = session.plan();
+    assert_eq!(weighted_sizes(&plan), [24, 192, 32, 128, 12, 96]);
+    // Both stacks hold entries of two relations.
+    assert_eq!(plan[1].relations, [0, 2]);
+    assert_eq!(plan[3].relations, [0, 1]);
     let shape = session.shape();
     session.prove_with(ColumnEvals::new()).unwrap();
     let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
     let proof = session.prover.build_proof().unwrap();
-    // `c` and the first table fill a run exactly; `d` shares one with the
-    // second table.
-    assert_eq!(run_lengths(&proof, &shape), [1, 1, 2, 2, 1, 1]);
+    // The stacks are above the budget, each a run of its own. `a`, `c` and
+    // `d` share the run opened before them, which has no room for `q`.
+    assert_runs(&proof, &shape, &[vec![0, 2, 4], vec![1], vec![3], vec![5]]);
     let verifier = session.verify_reduction(&proof).unwrap();
     assert_in_sync(&after_reduction, &verifier);
     verifier.verify().unwrap();
 
-    // One element less and `c` no longer fits beside its table, which then
-    // takes `d` in.
     for (budget, runs) in [
-        (unsplit, vec![8]),
-        (96, vec![1, 1, 2, 2, 1, 1]),
-        (95, vec![1, 1, 1, 2, 1, 1, 1]),
+        (unsplit, vec![vec![0, 1, 2, 3, 4, 5]]),
+        // `d` fills the first run to the last element.
+        (196, vec![vec![0, 2, 3, 4], vec![1], vec![5]]),
+        // One less and it opens a run, which `q` then joins.
+        (195, vec![vec![0, 2, 3], vec![1], vec![4, 5]]),
     ] {
         let mut session = columns.honest((budget, budget));
         session.prove_with(ColumnEvals::new()).unwrap();
+        let after_reduction =
+            ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
         let proof = session.prover.build_proof().unwrap();
-        assert_eq!(run_lengths(&proof, &shape), runs);
-        session.verify(&proof).unwrap();
+        assert_runs(&proof, &shape, &runs);
+        let verifier = session.verify_reduction(&proof).unwrap();
+        assert_in_sync(&after_reduction, &verifier);
+        verifier.verify().unwrap();
     }
 
-    // A value outside the table in the first run, whose relation is closed
-    // by the table two runs later.
+    // A value outside the table in the first run, whose table is in a
+    // stack two runs later.
     let mut bad = MixedColumns::new();
     bad.a[5] = F::from(16u64);
     let session = bad.session((100, 100), &columns.counts_abc(), &columns.counts_d());
     assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // A miscounted table in the run it shares with `d`.
+    // The same in the stack `b` shares with a column of another relation.
+    let mut bad = MixedColumns::new();
+    bad.b[5] = F::from(16u64);
+    let session = bad.session((100, 100), &columns.counts_abc(), &columns.counts_d());
+    assert_rejected_in_the_reduction(session.prove_and_verify());
+
+    // A miscounted table of the second relation, stacked with that of the
+    // first, two runs after `d`.
     let mut counts_d = columns.counts_d();
     counts_d[3] += F::one();
     let session = columns.session((100, 100), &columns.counts_abc(), &counts_d);
     assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // The last instance of the last run is not a permutation of `p`, which
-    // sits in the run before.
+    // The last run is not a permutation of `p`, which sits in the stack of
+    // the second run.
     let mut bad = MixedColumns::new();
     bad.q[31] = bad.q[30];
     assert_rejected_in_the_reduction(bad.honest((100, 100)).prove_and_verify());
 }
 
 /// The input claims of every run are pushed, each at its run's point. A
-/// committed column is not what the table counts and the prover runs the
-/// GKR on one that is: a column alone in the first run, and a column and a
-/// multiplicity of the fourth.
+/// committed column is not what the other side counts and the prover runs
+/// the GKR on one that is: two columns of the first run, a multiplicity in
+/// the stack of tables, either column of the stack two relations share, and
+/// the column of the last run.
 #[test]
 fn gkr_on_fake_leaves_in_any_run_is_rejected() {
     let columns = MixedColumns::new();
-    for column in [2, 7, 6] {
+    for column in [2, 7, 6, 3, 8, 9] {
         let mut committed = MixedColumns::new();
         let mut counts_d = columns.counts_d();
         let fake = match column {
@@ -975,9 +1326,21 @@ fn gkr_on_fake_leaves_in_any_run_is_rejected() {
                 committed.d[1] = F::from(16u64);
                 columns.d.clone()
             }
-            _ => {
+            6 => {
                 counts_d[3] += F::one();
                 columns.counts_d()
+            }
+            3 => {
+                committed.b[1] = F::from(16u64);
+                columns.b.clone()
+            }
+            8 => {
+                committed.p[1] = F::from(999u64);
+                columns.p.clone()
+            }
+            _ => {
+                committed.q[1] = F::from(999u64);
+                columns.q.clone()
             }
         };
         let session = committed.session((100, 100), &columns.counts_abc(), &counts_d);
@@ -986,33 +1349,36 @@ fn gkr_on_fake_leaves_in_any_run_is_rejected() {
     }
 }
 
-/// Two relations, each false and each side a run of its own, whose errors
-/// cancel over the batch.
+/// Two relations, each false, whose errors cancel over the batch. Each
+/// side is one stack of both relations and a run of its own.
 #[test]
 fn relations_whose_errors_cancel_across_runs_are_rejected() {
     let columns = [fv(0..32), fv((0..32).map(|i| i + 100))];
     let entry = |column: usize| vec![(column, None)];
     let budgets = (100, 100);
+    let runs = [vec![0], vec![1]];
 
     let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
     let mut session = Session::with_budgets(budgets, &columns, &[together]);
     let shape = session.shape();
+    assert_eq!(shape, gkr_shape(&[(6, true), (6, true)]));
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof, &shape), [1, 1]);
+    assert_runs(&proof, &shape, &runs);
     session.verify(&proof).unwrap();
 
     let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
     let mut session = Session::with_budgets(budgets, &columns, &apart);
-    let shape = session.shape();
+    assert_eq!(session.shape(), shape);
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof, &shape), [1, 1, 1, 1]);
+    assert_runs(&proof, &shape, &runs);
     assert_rejected_in_the_reduction(session.verify(&proof));
 }
 
-/// An instance above the budget is proved in a run of its own, between the
-/// runs its neighbours are packed into, down to a budget nothing fits in.
+/// An instance above the budget is proved in a run of its own and closes
+/// no other: an instance after it still joins a run before it that has
+/// room. Down to a budget nothing fits in.
 #[test]
 fn gkr_single_instance_over_budget() {
     let table = fv(0..8);
@@ -1037,27 +1403,33 @@ fn gkr_single_instance_over_budget() {
     let mut outside = big.clone();
     outside[17] = F::from(8u64);
 
-    assert_eq!(
-        weighted_sizes(&session(40, &big).plan()),
-        [12, 12, 96, 32, 12, 12]
-    );
+    // The two sides of the permutations, each a stack of the first relation
+    // and the last, then the big column and its table.
+    let plan = session(40, &big).plan();
+    assert_eq!(weighted_sizes(&plan), [24, 24, 96, 32]);
+    assert_eq!(plan[0].relations, [0, 2]);
+    assert_eq!(plan[1].relations, [0, 2]);
     for (budget, runs) in [
-        (40, vec![2, 1, 1, 2]),
-        // The table's run has room for one more instance, which parts the
-        // two sides of the last relation.
-        (44, vec![2, 1, 2, 1]),
-        (95, vec![2, 1, 3]),
+        (56, vec![vec![0, 1], vec![2], vec![3]]),
+        (79, vec![vec![0, 1], vec![2], vec![3]]),
+        // The table fits beside the stacks, past the big column that
+        // stands between them.
+        (80, vec![vec![0, 1, 3], vec![2]]),
+        (95, vec![vec![0, 1, 3], vec![2]]),
+        // The big column is within the budget and still alone.
+        (96, vec![vec![0, 1, 3], vec![2]]),
+        (152, vec![vec![0, 1, 2], vec![3]]),
         // Every instance is above the budget.
-        (11, vec![1; 6]),
-        (0, vec![1; 6]),
-        (usize::MAX, vec![6]),
+        (23, vec![vec![0], vec![1], vec![2], vec![3]]),
+        (0, vec![vec![0], vec![1], vec![2], vec![3]]),
+        (usize::MAX, vec![vec![0, 1, 2, 3]]),
     ] {
         let mut honest = session(budget, &big);
         let shape = honest.shape();
         honest.prove_with(ColumnEvals::new()).unwrap();
         let after_reduction = ArgProver::new_from_tracker(honest.prover.tracker().borrow().clone());
         let proof = honest.prover.build_proof().unwrap();
-        assert_eq!(run_lengths(&proof, &shape), runs, "budget {budget}");
+        assert_runs(&proof, &shape, &runs);
         let verifier = honest.verify_reduction(&proof).unwrap();
         assert_in_sync(&after_reduction, &verifier);
         verifier.verify().unwrap();
@@ -1066,10 +1438,10 @@ fn gkr_single_instance_over_budget() {
     }
 }
 
-/// The cut into runs is part of the statement the verifier checks: a proof
-/// cut by another budget than the verifier's is rejected at the first run
-/// that differs, whichever side has the finer cut. Budgets that give the
-/// same cut are the same statement.
+/// The split into runs is part of the statement the verifier checks: a
+/// proof split by another budget than the verifier's is rejected at the
+/// first run that differs, whichever side has the finer split. Budgets that
+/// give the same runs are the same statement.
 #[test]
 fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
     let columns = MixedColumns::new();
@@ -1084,31 +1456,40 @@ fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
     for budgets in [
         (100, unsplit),
         (unsplit, 100),
-        // The first two runs are the same on both sides.
-        (100, 95),
-        (95, 100),
+        // `d` in the first run or in a later one.
+        (196, 195),
+        (195, 196),
+        // `q` in the first run or in the last.
+        (100, 164),
+        (164, 100),
         (0, 100),
         (100, 0),
     ] {
         assert_rejected_in_the_reduction(run(budgets));
     }
-    run((100, 96)).unwrap();
+    run((100, 163)).unwrap();
+    run((100, 68)).unwrap();
     run((unsplit, usize::MAX)).unwrap();
 }
 
-/// The budget cuts the batch the lookup claims and the deferred keyed sums
-/// are reduced in like any other: a stack of two sub columns, a wider sub
-/// column, the table, and the two sides of a permutation, with weighted
-/// sizes 48, 96, 64, 96 and 96.
+/// The lookup claims and the deferred keyed sums are reduced in one batch,
+/// which the budget splits like any other: a stack of two sub columns, the
+/// wider sub column stacked with one side of a permutation, the table, and
+/// the other side of the permutation, with weighted sizes 48, 192, 64 and
+/// 96.
 #[test]
 fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     let table = fv(0..16);
     let subs = [in_table(3, 16, 1), in_table(3, 16, 2), in_table(5, 16, 3)];
     let p = fv((0..32).map(|i| i + 100));
     let q = fv((0..32).map(|i| (i * 13 + 5) % 32 + 100));
-    let shape = gkr_shape(&[(4, true), (5, true), (4, false), (5, true), (5, true)]);
+    let shape = gkr_shape(&[(4, true), (6, true), (4, false), (5, true)]);
+    // Were the wide sub column and its neighbour of the permutation not in
+    // one instance, the batch would have five and a longer proof.
+    let apart = gkr_shape(&[(4, true), (5, true), (4, false), (5, true), (5, true)]);
+    assert!(proof_len(&shape) < proof_len(&apart));
 
-    let run = |budget: usize, subs: &[Vec<F>; 3], q: &[F]| -> SnarkResult<Vec<usize>> {
+    let run = |budget: usize, subs: &[Vec<F>; 3], q: &[F]| -> SnarkResult<SNARKProof<B>> {
         let (mut prover, mut verifier) = setup_with_budgets(budget, budget);
         let mut columns = vec![&table[..]];
         columns.extend(subs.iter().map(|sub| &sub[..]));
@@ -1145,22 +1526,26 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
         verifier.reduce_lookup_claims()?;
         assert_in_sync(&reduced, &verifier);
         verifier.verify()?;
-        Ok(run_lengths(&proof, &shape))
+        Ok(proof)
     };
 
     let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
     for (budget, runs) in [
-        (unsplit, vec![5]),
-        // The table fits beside one side of the permutation, exactly.
-        (160, vec![2, 2, 1]),
-        (150, vec![2, 1, 1, 1]),
-        (0, vec![1; 5]),
+        (unsplit, vec![vec![0, 1, 2, 3]]),
+        // The table has no room beside the two stacks, by one element.
+        (303, vec![vec![0, 1], vec![2, 3]]),
+        // The stack of the two relations opens a run and the instances
+        // after it go back to the first.
+        (239, vec![vec![0, 2, 3], vec![1]]),
+        (200, vec![vec![0, 2], vec![1], vec![3]]),
+        (0, vec![vec![0], vec![1], vec![2], vec![3]]),
     ] {
-        assert_eq!(run(budget, &subs, &q).unwrap(), runs, "budget {budget}");
+        let proof = run(budget, &subs, &q).unwrap();
+        assert_runs(&proof, &shape, &runs);
 
-        // A value outside the table in the stack and in the wide column,
-        // whose table is one or two runs away, and a `q` that repeats a row.
-        for bad_sub in [1, 2] {
+        // A value outside the table in either stack, whichever run its
+        // table is in, and a `q` that repeats a row.
+        for bad_sub in [0, 1, 2] {
             let mut subs = subs.clone();
             subs[bad_sub][5] = F::from(16u64);
             assert_false_statement_rejected(run(budget, &subs, &q));
@@ -1215,7 +1600,7 @@ fn same_size_columns_are_stacked_by_binary_decomposition() {
             .collect();
         batch.push((4, false));
         assert_eq!(batch.len(), n_subs.count_ones() as usize + 1);
-        assert_eq!(run_lengths(&proof, &gkr_shape(&batch)), [batch.len()]);
+        assert_one_run(&proof, &gkr_shape(&batch));
 
         // The first and the last column of the largest stack, and the
         // first and the last of the smallest.
@@ -1225,6 +1610,94 @@ fn same_size_columns_are_stacked_by_binary_decomposition() {
             let mut subs = subs.clone();
             subs[at][5] = F::from(16u64);
             assert_false_statement_rejected(lookup_e2e(&table, &subs));
+        }
+    }
+}
+
+/// Lookups into three tables of one size through the public claims. Sub
+/// columns of one size share stacks whichever table they are looked up in,
+/// and the tables share theirs: six instances where the lookups one by one
+/// would have eight. A value outside its table, be it a value of the next
+/// table, is caught wherever its column sits.
+#[test]
+fn lookups_into_tables_of_one_size_share_their_instances() {
+    let tables: Vec<Vec<F>> = (0..3).map(|t| fv((0..16).map(|i| i + 100 * t))).collect();
+    // `(table, variables)` of every sub column, in the order of the claims.
+    let sizes = [
+        (0, 3),
+        (0, 3),
+        (0, 3),
+        (1, 3),
+        (1, 5),
+        (1, 3),
+        (2, 3),
+        (2, 3),
+    ];
+    let subs: Vec<Vec<F>> = (0..)
+        .zip(sizes)
+        .map(|(seed, (table, nv))| {
+            let offset = F::from(100 * table as u64);
+            in_table(nv, 16, seed).iter().map(|v| *v + offset).collect()
+        })
+        .collect();
+
+    let run = |subs: &[Vec<F>]| -> SnarkResult<SNARKProof<B>> {
+        let (mut prover, mut verifier) = setup();
+        let table_ids: Vec<TrackerID> =
+            tables.iter().map(|t| commit(&mut prover, t).id()).collect();
+        let sub_ids: Vec<TrackerID> = subs.iter().map(|s| commit(&mut prover, s).id()).collect();
+        for ((table, _), sub) in sizes.iter().zip(&sub_ids) {
+            prover.add_mv_lookup_claim(table_ids[*table], *sub)?;
+        }
+        let mut reduced = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        reduced.reduce_lookup_claims()?;
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        for id in table_ids.iter().chain(&sub_ids) {
+            verifier.track_mv_com_by_id(*id)?;
+        }
+        for ((table, _), sub) in sizes.iter().zip(&sub_ids) {
+            verifier.add_mv_lookup_claim(table_ids[*table], *sub)?;
+        }
+        verifier.reduce_lookup_claims()?;
+        assert_in_sync(&reduced, &verifier);
+        verifier.verify()?;
+        Ok(proof)
+    };
+
+    let proof = run(&subs).unwrap();
+    // Seven sub columns of 8 rows in stacks of four, two and one, the
+    // first two of which span two tables each; three tables in a stack of
+    // two and one of one; and the sub column of 32 rows.
+    let shape = gkr_shape(&[
+        (5, true),
+        (4, true),
+        (3, true),
+        (5, false),
+        (4, false),
+        (5, true),
+    ]);
+    assert_one_run(&proof, &shape);
+    // Table by table: a stack of two and one of one, a table; a stack of
+    // two, the wide column, a table; a stack of two, a table.
+    let one_by_one = gkr_shape(&[
+        (4, true),
+        (3, true),
+        (4, false),
+        (4, true),
+        (5, true),
+        (4, false),
+        (4, true),
+        (4, false),
+    ]);
+    assert!(proof_len(&shape) < proof_len(&one_by_one));
+
+    for (at, (table, _)) in sizes.iter().enumerate() {
+        for outside in [999, 100 * ((table + 1) % 3) as u64 + 3] {
+            let mut subs = subs.clone();
+            subs[at][5] = F::from(outside);
+            assert_false_statement_rejected(run(&subs));
         }
     }
 }
@@ -1359,7 +1832,7 @@ fn mixed_signatures_on_one_side_are_grouped_in_order_of_appearance() {
         ]
     );
     let shape: Vec<GkrShape> = plan.iter().map(InstancePlan::shape).collect();
-    assert_eq!(run_lengths(&proof, &shape), [plan.len()]);
+    assert_one_run(&proof, &shape);
 
     // One value outside the table, or one weight off, in every group.
     let bad_value = |fs: &mut Vec<KeyedCol>, at: usize| fs[at].0[1] = F::from(16u64);
@@ -1412,7 +1885,7 @@ fn constant_entries_stand_alone_among_stacked_ones() {
         ]
     );
     let shape: Vec<GkrShape> = plan.iter().map(InstancePlan::shape).collect();
-    assert_eq!(run_lengths(&proof, &shape), [plan.len()]);
+    assert_one_run(&proof, &shape);
 
     for (constant, weighted_constant, constant_weight) in [(16, 11, 4), (7, 16, 4), (7, 11, 5)] {
         let fs = fs(constant, weighted_constant, constant_weight);
@@ -1870,7 +2343,8 @@ fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
         (3, false),
         (3, false),
     ]);
-    assert_eq!(run_lengths(&proof, &shape), [3 + 2 + 2]);
+    assert_eq!(shape.len(), 3 + 2 + 2);
+    assert_one_run(&proof, &shape);
     // The subproof opens with the first layer of every instance in instance
     // order, four values each at these sizes, and a first layer gives its
     // instance's root. Each relation balances on the roots at its own
@@ -2138,38 +2612,66 @@ fn proof_with_a_lookup_carries_its_gkr_subproof_through_a_roundtrip() {
 
 /// The prover's instances are the columns side by side, entry `i` of a
 /// stack in the rows `i·2^claim_nv ..`, a column narrower than its
-/// multiplicity repeated, and `gamma` taken off the columns only.
+/// multiplicity repeated, and the `gamma` of each entry's relation taken
+/// off its column only. A column is kept for as long as a later run reads
+/// it.
 #[test]
 fn stacked_instance_lays_its_entries_out_by_row_then_entry() {
-    use crate::piop::logup_gkr::Numerator;
-
     let cols: Vec<Vec<F>> = (0..3).map(|s| in_table(1, 16, s + 1)).collect();
     let mults: Vec<Vec<F>> = (0..3).map(|s| fv((0..4).map(|i| 10 * s + i))).collect();
     let columns: Vec<Vec<F>> = cols.iter().chain(&mults).cloned().collect();
-    let f = (0..3).map(|i| (i, Some(i + 3))).collect();
-    let session = Session::new(&columns, &[], &[(f, vec![(0, Some(3))])]);
+    // One entry of the first relation and two of the second, with the same
+    // column on the other side of each.
+    let relations = [
+        (vec![(0, Some(3))], vec![(0, Some(3))]),
+        (vec![(1, Some(4)), (2, Some(5))], vec![(0, Some(3))]),
+    ];
+    let session = Session::new(&columns, &[], &relations);
     let plan = session.plan();
-    assert_eq!(plan[0].stack_log, 1);
+    // The other sides are a stack too.
+    assert_eq!(plan.len(), 3);
+    assert_eq!((plan[0].stack_log, plan[1].stack_log), (1, 0));
     assert_eq!((plan[0].claim_nv, plan[0].n_vars()), (2, 3));
+    assert_eq!(plan[0].relations, [0, 1]);
+    assert_eq!(plan[1].relations, [1]);
+    assert_eq!((plan[2].side, &plan[2].relations), (Side::G, &vec![0, 1]));
 
-    let gamma = F::from(1000u64);
+    let gammas = fv([1000, 2000]);
+    let batch = Batch {
+        plan,
+        gammas: gammas.clone(),
+        runs: vec![vec![0], vec![1, 2]],
+    };
     let mut party = ProvingParty {
         evals: ColumnEvals::new(),
     };
     let tracker = session.prover.tracker();
-    let instances = party
-        .instances(&mut tracker.borrow_mut(), &plan, 0..plan.len(), gamma)
+    let stack = party
+        .instances(&mut tracker.borrow_mut(), &batch, 0)
         .unwrap();
-    assert!(party.evals.is_empty());
+    // The other sides read the first entry's polynomials in the next run.
+    let kept: Vec<TrackerID> = party.evals.keys().copied().collect();
+    assert_eq!(kept, [session.ids[0], session.ids[3]]);
 
-    let expected_den: Vec<F> = (0..8).map(|j| cols[j >> 2][j & 1] - gamma).collect();
+    let expected_den: Vec<F> = (0..8)
+        .map(|j| cols[j >> 2][j & 1] - gammas[j >> 2])
+        .collect();
     let expected_num: Vec<F> = (0..8).map(|j| mults[j >> 2][j & 3]).collect();
-    assert_eq!(instances[0].den, expected_den);
-    match &instances[0].num {
+    assert_eq!(stack.len(), 1);
+    assert_eq!(stack[0].den, expected_den);
+    match &stack[0].num {
         Numerator::Values(num) => assert_eq!(*num, expected_num),
         Numerator::One => panic!("the stack has multiplicities"),
     }
-    assert_eq!(instances[1].den.len(), 4);
+
+    let rest = party
+        .instances(&mut tracker.borrow_mut(), &batch, 1)
+        .unwrap();
+    assert!(party.evals.is_empty());
+    let single_den: Vec<F> = (0..4).map(|j| cols[2][j & 1] - gammas[1]).collect();
+    assert_eq!(rest[0].den, single_den);
+    let other_side_den: Vec<F> = (0..8).map(|j| cols[0][j & 1] - gammas[j >> 2]).collect();
+    assert_eq!(rest[1].den, other_side_den);
 }
 
 // ─── Claims of every kind of instance ────────────────────────────────────
@@ -2313,10 +2815,10 @@ fn input_claim_on_a_polynomial_of_another_size_than_its_instance_is_refused() {
     let column = commit(&mut prover, &in_table(3, 8, 1)).id();
     let proof = prover.build_proof().unwrap();
     let instance = |nv: usize| InstancePlan {
-        relation: 0,
         side: Side::F,
         claim_nv: nv,
         stack_log: 0,
+        relations: vec![0],
         cols: Operand::Polys {
             ids: vec![column],
             nv,
@@ -2334,13 +2836,12 @@ fn input_claim_on_a_polynomial_of_another_size_than_its_instance_is_refused() {
         verifier.track_mv_com_by_id(column).unwrap();
         let tracker = verifier.tracker();
         let mut tracker = tracker.borrow_mut();
-        let pushed = push_input_claims(
-            &mut *tracker,
-            &VerifyingParty,
-            &[instance(nv)],
-            F::from(7u64),
-            &claims(nv),
-        );
+        let batch = Batch {
+            plan: vec![instance(nv)],
+            gammas: fv([7]),
+            runs: vec![vec![0]],
+        };
+        let pushed = push_input_claims(&mut *tracker, &VerifyingParty, &batch, 0, &claims(nv));
         pushed.map(|()| tracker.sumcheck_claims_snapshot().len())
     };
     // The column has three variables.
@@ -2385,14 +2886,19 @@ fn multiplicities_chosen_after_gamma_are_rejected() {
             let tracker = prover.tracker();
             let mut tracker = tracker.borrow_mut();
             let plan = plan_instances(&*tracker, &[relation]).unwrap();
+            let batch = Batch {
+                runs: vec![(0..plan.len()).collect()],
+                plan,
+                gammas: vec![gamma],
+            };
             let mut party = ProvingParty {
                 evals: ColumnEvals::new(),
             };
-            let claims = party.run(&mut *tracker, &plan, 0..plan.len(), gamma)?;
+            let claims = party.run(&mut *tracker, &batch, 0)?;
             // The two sides balance under this `gamma`.
             let ([p_f, q_f], [p_g, q_g]) = (claims.roots[0], claims.roots[1]);
             assert_eq!(p_f * q_g, p_g * q_f);
-            push_input_claims(&mut *tracker, &party, &plan, gamma, &claims)?;
+            push_input_claims(&mut *tracker, &party, &batch, 0, &claims)?;
         }
         let proof = prover.build_proof()?;
 
@@ -2409,6 +2915,130 @@ fn multiplicities_chosen_after_gamma_are_rejected() {
     assert_verifier_error(run(&outside, true).unwrap_err());
     // Done by hand in the verifier's order, the reduction is the real one.
     run(&inside, false).unwrap();
+}
+
+/// Each relation has a `gamma` of its own, drawn in the order of the
+/// relations once the multiplicities of all of them are committed. Two
+/// lookups reduced by hand in that order are the real reduction. With the
+/// two gammas exchanged, or the first drawn before the second table's
+/// multiplicities are committed, they are not.
+#[test]
+fn gammas_are_drawn_per_relation_in_order_after_every_multiplicity() {
+    use super::reduction::push_input_claims;
+
+    #[derive(Clone, Copy)]
+    enum Order {
+        AsTheVerifier,
+        Exchanged,
+        BetweenTheMultiplicities,
+    }
+    let columns = {
+        let subs = two_lookup_subs();
+        two_lookup_columns(&subs, &subs)
+    };
+    let run = |order: Order| -> SnarkResult<()> {
+        let (mut prover, mut verifier) = setup();
+        let mut commit_column = |at: usize| commit(&mut prover, &columns[at]).id();
+        let tables = [0, 2].map(&mut commit_column);
+        let subs = [4, 5, 6, 7].map(&mut commit_column);
+        let (first_counts, first_gamma) = match order {
+            Order::BetweenTheMultiplicities => {
+                let counts = commit(&mut prover, &columns[1]).id();
+                (counts, Some(prover.get_and_append_challenge(b"gamma")?))
+            }
+            _ => (commit(&mut prover, &columns[1]).id(), None),
+        };
+        let counts = [first_counts, commit(&mut prover, &columns[3]).id()];
+        let first_gamma = match first_gamma {
+            Some(gamma) => gamma,
+            None => prover.get_and_append_challenge(b"gamma")?,
+        };
+        let mut gammas = vec![first_gamma, prover.get_and_append_challenge(b"gamma")?];
+        if matches!(order, Order::Exchanged) {
+            gammas.swap(0, 1);
+        }
+        let relations: Vec<KeyedSumRelation<F>> = (0..2)
+            .map(|r| KeyedSumRelation {
+                fxs: subs[2 * r..2 * r + 2]
+                    .iter()
+                    .map(|sub| KeyedTerm::Poly(*sub))
+                    .collect(),
+                mfxs: vec![None; 2],
+                gxs: vec![KeyedTerm::Poly(tables[r])],
+                mgxs: vec![Some(KeyedTerm::Poly(counts[r]))],
+            })
+            .collect();
+        {
+            let tracker = prover.tracker();
+            let mut tracker = tracker.borrow_mut();
+            let plan = plan_instances(&*tracker, &relations).unwrap();
+            // Both instances hold entries of both relations.
+            assert_eq!(plan[0].relations, [0, 0, 1, 1]);
+            assert_eq!(plan[1].relations, [0, 1]);
+            let batch = Batch {
+                runs: vec![(0..plan.len()).collect()],
+                plan,
+                gammas,
+            };
+            let mut party = ProvingParty {
+                evals: ColumnEvals::new(),
+            };
+            let claims = party.run(&mut *tracker, &batch, 0)?;
+            push_input_claims(&mut *tracker, &party, &batch, 0, &claims)?;
+        }
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        for id in tables.iter().chain(&subs) {
+            verifier.track_mv_com_by_id(*id)?;
+        }
+        for (r, sub) in subs.iter().enumerate() {
+            verifier.add_mv_lookup_claim(tables[r / 2], *sub)?;
+        }
+        verifier.verify()
+    };
+
+    run(Order::AsTheVerifier).unwrap();
+    assert_verifier_error(run(Order::Exchanged).unwrap_err());
+    assert_verifier_error(run(Order::BetweenTheMultiplicities).unwrap_err());
+}
+
+/// A relation without entries has no column to take a `gamma` off and
+/// draws none. A batch of nothing else leaves the transcript as it was, and
+/// one among others does not move theirs.
+#[test]
+fn relation_without_entries_draws_no_gamma() {
+    let empty = || KeyedSumRelation::<F> {
+        fxs: Vec::new(),
+        mfxs: Vec::new(),
+        gxs: Vec::new(),
+        mgxs: Vec::new(),
+    };
+    let columns = [fv(0..8), fv((0..8).rev())];
+    let next_challenge = |session: &Session| {
+        let tracker = session.prover.tracker().borrow().clone();
+        let mut prover = ArgProver::new_from_tracker(tracker);
+        prover.get_and_append_challenge(b"probe").unwrap()
+    };
+
+    let mut session = Session::new(&columns, &[], &[]);
+    let untouched = next_challenge(&session);
+    session.relations = vec![empty(), empty()];
+    session.prove_with(ColumnEvals::new()).unwrap();
+    assert_eq!(next_challenge(&session), untouched);
+
+    let permutation = (vec![(0, None)], vec![(1, None)]);
+    let both = [permutation.clone(), permutation];
+    let mut plain = Session::new(&columns, &[], &both);
+    let mut padded = Session::new(&columns, &[], &both);
+    padded.relations.insert(1, empty());
+    assert_eq!(padded.plan()[0].relations, [0, 2]);
+    plain.prove_with(ColumnEvals::new()).unwrap();
+    padded.prove_with(ColumnEvals::new()).unwrap();
+    assert_ne!(next_challenge(&plain), untouched);
+    assert_eq!(next_challenge(&padded), next_challenge(&plain));
+    let proof = padded.prover.build_proof().unwrap();
+    padded.verify(&proof).unwrap();
 }
 
 /// A stack counts towards the run budget with all its entries: four
@@ -2431,7 +3061,7 @@ fn gkr_run_budget_counts_a_stack_at_its_full_height() {
     session.prove_with(ColumnEvals::new()).unwrap();
     let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof, &shape), [1, 1]);
+    assert_runs(&proof, &shape, &[vec![0], vec![1]]);
     let verifier = session.verify_reduction(&proof).unwrap();
     assert_in_sync(&after_reduction, &verifier);
     verifier.verify().unwrap();

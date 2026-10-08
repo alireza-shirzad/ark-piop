@@ -461,7 +461,7 @@ where
         }
 
         // Mirrors the prover: every multiplicity commitment is absorbed
-        // before the reduction draws its one gamma.
+        // before the reduction draws the first of its gammas.
         let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
         for (super_id, sub_ids) in by_super {
             self.tracked_oracle_from_id(super_id)?;

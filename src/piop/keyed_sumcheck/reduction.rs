@@ -6,33 +6,34 @@
 //! `claim_nv = max(nv_col, nv_mult)` variables, the smaller of the two
 //! repeated cyclically, and a missing multiplicity is 1.
 //!
-//! Several relations are reduced together under one `gamma`:
-//! 1. the entries are laid out as GKR instances ([`plan_instances`]);
-//! 2. the instances are proved in one or more GKR runs ([`gkr_runs`]), each
+//! Several relations are reduced together, each under a `gamma` of its own:
+//! 1. the entries of all relations are laid out as GKR instances
+//!    ([`plan_instances`]), entries of different relations side by side in
+//!    one instance where their sizes allow;
+//! 2. one `gamma` is drawn per relation ([`draw_gammas`]) and taken off the
+//!    columns of its entries;
+//! 3. the instances are proved in one or more GKR runs ([`gkr_runs`]), each
 //!    of which ends in an evaluation point and, per instance, the values of
 //!    its numerator and denominator MLEs there;
-//! 3. every such value is turned into a sumcheck claim on the polynomials
+//! 4. every such value is turned into a sumcheck claim on the polynomials
 //!    the statement names ([`push_input_claims`]), which is what ties the
 //!    GKR to them;
-//! 4. after the last run, the verifier compares the two sides of every
-//!    relation on the roots, wherever in the runs its instances fell.
+//! 5. after the last run, the verifier compares the `f` side of the whole
+//!    batch with its `g` side on the roots, once ([`check_batch_sums`]).
 //!
 //! Everything that consumes a tracker id, touches the transcript or pushes
 //! a claim is written once, over [`TrackerCore`]; the two sides differ only
 //! in how a run is carried out ([`Party`]).
 //!
-//! Soundness needs every column and multiplicity to be fixed before `gamma`:
-//! each committed leaf must already be in the transcript (a commitment or
-//! constant of this proof) or be an external commitment the caller has
-//! bound to the statement, and uncommitted leaves must be computable by the
-//! verifier.
+//! Soundness needs every column and multiplicity of the batch to be fixed
+//! before the first `gamma`: each committed leaf must already be in the
+//! transcript (a commitment or constant of this proof) or be an external
+//! commitment the caller has bound to the statement, and uncommitted leaves
+//! must be computable by the verifier.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    ops::Range,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
-use ark_ff::Field;
+use ark_ff::{Field, Zero};
 use ark_std::{cfg_into_iter, cfg_iter};
 use either::Either;
 use indexmap::IndexMap;
@@ -76,7 +77,7 @@ pub(crate) struct KeyedSumRelation<F> {
 /// does not materialise a column a second time.
 pub(crate) type ColumnEvals<F> = BTreeMap<TrackerID, Vec<F>>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Side {
     F,
     G,
@@ -108,10 +109,12 @@ impl<F> Operand<F> {
 /// the entries' MLEs at its low part, weighted by `eq(high part, i)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct InstancePlan<F> {
-    pub relation: usize,
     pub side: Side,
     pub claim_nv: usize,
     pub stack_log: usize,
+    /// The relation of each entry. The denominators of an entry are its
+    /// column less the `gamma` of its relation.
+    pub relations: Vec<usize>,
     pub cols: Operand<F>,
     /// `None` when every numerator is 1. This follows the statement alone,
     /// never the values: a multiplicity that happens to be all ones is still
@@ -148,16 +151,31 @@ impl<F> InstancePlan<F> {
     }
 }
 
+/// A batch as the GKR takes it: the instances, the `gamma` of every
+/// relation and the instances of every run.
+pub(super) struct Batch<F> {
+    pub plan: Vec<InstancePlan<F>>,
+    /// By relation.
+    pub gammas: Vec<F>,
+    /// By run, the positions of its instances in `plan`, ascending.
+    pub runs: Vec<Vec<usize>>,
+}
+
+impl<F> Batch<F> {
+    pub(super) fn instances(&self, run: usize) -> impl Iterator<Item = &InstancePlan<F>> {
+        self.runs[run].iter().map(|index| &self.plan[*index])
+    }
+}
+
 /// What the prover and the verifier do differently in a reduction.
 pub(super) trait Party<T: TrackerCore> {
-    /// Carry out one GKR run on `plan[run]` and return its claims. `plan` is
-    /// the whole batch, for a party that wants to look ahead.
+    /// Carry out GKR run `run` of `batch` and return its claims. The whole
+    /// batch is there for a party that wants to look ahead.
     fn run(
         &mut self,
         tracker: &mut T,
-        plan: &[InstancePlan<T::F>],
-        run: Range<usize>,
-        gamma: T::F,
+        batch: &Batch<T::F>,
+        run: usize,
     ) -> SnarkResult<GkrClaims<T::F>>;
 
     /// The error this party reports when the shared schedule cannot go on.
@@ -197,152 +215,169 @@ fn standalone_operand<F>(term: Either<TrackerID, F>, nv: usize) -> Operand<F> {
     }
 }
 
-/// Lays one side of a relation out as instances, appended to `plan`.
+/// The instances of a batch of relations. A function of the statement and
+/// of the tracker's sizes only, so both sides arrive at the same list.
 ///
 /// An entry with a constant column or multiplicity is an instance of its
-/// own. The others are grouped by `(nv_col, nv_mult)` and each group is cut
-/// into stacks of `2^s` entries, largest first, by the binary digits of its
-/// size: one instance per stack, so a group of `S` entries costs
-/// `popcount(S)` instances instead of `S`.
+/// own. The others are grouped by side, column size and multiplicity size,
+/// across all relations, and each group is cut into stacks of `2^s` entries,
+/// largest first, by the binary digits of its size: one instance per stack,
+/// so a group of `S` entries costs `popcount(S)` instances instead of `S`,
+/// however many relations they come from.
 ///
-/// Instances come out in the order of the entries, a group at the position
-/// of its first entry.
-fn plan_side<T: TrackerCore>(
+/// The entries are walked relation by relation, the `f` side of each before
+/// its `g` side. A group holds its entries in that order, and the instances
+/// come out in that order too, a group at the position of its first entry.
+pub(super) fn plan_instances<T: TrackerCore>(
     tracker: &T,
-    relation: usize,
-    side: Side,
-    cols: &[KeyedTerm<T::F>],
-    mults: &[Option<KeyedTerm<T::F>>],
-    plan: &mut Vec<InstancePlan<T::F>>,
-) -> Result<(), String> {
-    if cols.len() != mults.len() {
-        return Err(format!(
-            "keyed sum has {} columns but {} multiplicities",
-            cols.len(),
-            mults.len()
-        ));
-    }
-
-    type Signature = (usize, Option<usize>);
+    relations: &[KeyedSumRelation<T::F>],
+) -> Result<Vec<InstancePlan<T::F>>, String> {
+    type Signature = (Side, usize, Option<usize>);
     enum Slot<F> {
         Standalone(InstancePlan<F>),
         Group(Signature),
     }
+    #[derive(Default)]
+    struct Group {
+        relations: Vec<usize>,
+        cols: Vec<TrackerID>,
+        mults: Vec<TrackerID>,
+    }
     let mut slots = Vec::new();
-    let mut groups: IndexMap<Signature, (Vec<TrackerID>, Vec<TrackerID>)> = IndexMap::new();
-    for (col, mult) in cols.iter().zip(mults) {
-        let (col, nv_col) = resolve(tracker, col)?;
-        let mult = mult.as_ref().map(|m| resolve(tracker, m)).transpose()?;
-        let nv_mult = mult.map(|(_, nv)| nv);
-        let stacked = match (col, mult) {
-            (Either::Left(col), None) => Some((col, None)),
-            (Either::Left(col), Some((Either::Left(mult), _))) => Some((col, Some(mult))),
-            _ => None,
-        };
-        match stacked {
-            Some((col, mult)) => {
-                let signature = (nv_col, nv_mult);
-                if !groups.contains_key(&signature) {
-                    slots.push(Slot::Group(signature));
-                }
-                let (group_cols, group_mults) = groups.entry(signature).or_default();
-                group_cols.push(col);
-                group_mults.extend(mult);
+    let mut groups: IndexMap<Signature, Group> = IndexMap::new();
+    for (relation, statement) in relations.iter().enumerate() {
+        let sides = [
+            (Side::F, &statement.fxs, &statement.mfxs),
+            (Side::G, &statement.gxs, &statement.mgxs),
+        ];
+        for (side, cols, mults) in sides {
+            if cols.len() != mults.len() {
+                return Err(format!(
+                    "keyed sum has {} columns but {} multiplicities",
+                    cols.len(),
+                    mults.len()
+                ));
             }
-            None => slots.push(Slot::Standalone(InstancePlan {
-                relation,
-                side,
-                claim_nv: nv_col.max(nv_mult.unwrap_or(0)),
-                stack_log: 0,
-                cols: standalone_operand(col, nv_col),
-                mults: mult.map(|(mult, nv)| standalone_operand(mult, nv)),
-            })),
+            for (col, mult) in cols.iter().zip(mults) {
+                let (col, nv_col) = resolve(tracker, col)?;
+                let mult = mult.as_ref().map(|m| resolve(tracker, m)).transpose()?;
+                let nv_mult = mult.map(|(_, nv)| nv);
+                let stacked = match (col, mult) {
+                    (Either::Left(col), None) => Some((col, None)),
+                    (Either::Left(col), Some((Either::Left(mult), _))) => Some((col, Some(mult))),
+                    _ => None,
+                };
+                match stacked {
+                    Some((col, mult)) => {
+                        let signature = (side, nv_col, nv_mult);
+                        if !groups.contains_key(&signature) {
+                            slots.push(Slot::Group(signature));
+                        }
+                        let group = groups.entry(signature).or_default();
+                        group.relations.push(relation);
+                        group.cols.push(col);
+                        group.mults.extend(mult);
+                    }
+                    None => slots.push(Slot::Standalone(InstancePlan {
+                        side,
+                        claim_nv: nv_col.max(nv_mult.unwrap_or(0)),
+                        stack_log: 0,
+                        relations: vec![relation],
+                        cols: standalone_operand(col, nv_col),
+                        mults: mult.map(|(mult, nv)| standalone_operand(mult, nv)),
+                    })),
+                }
+            }
         }
     }
 
+    let mut plan = Vec::new();
     for slot in slots {
-        let (nv_col, nv_mult) = match slot {
+        let (side, nv_col, nv_mult) = match slot {
             Slot::Standalone(instance) => {
                 plan.push(instance);
                 continue;
             }
             Slot::Group(signature) => signature,
         };
-        let (group_cols, group_mults) = &groups[&(nv_col, nv_mult)];
+        let group = &groups[&(side, nv_col, nv_mult)];
         let mut start = 0;
         for stack_log in (0..usize::BITS as usize).rev() {
             let size = 1usize << stack_log;
-            if group_cols.len() & size == 0 {
+            if group.cols.len() & size == 0 {
                 continue;
             }
             let stack = start..start + size;
             start += size;
             plan.push(InstancePlan {
-                relation,
                 side,
                 claim_nv: nv_col.max(nv_mult.unwrap_or(0)),
                 stack_log,
+                relations: group.relations[stack.clone()].to_vec(),
                 cols: Operand::Polys {
-                    ids: group_cols[stack.clone()].to_vec(),
+                    ids: group.cols[stack.clone()].to_vec(),
                     nv: nv_col,
                 },
                 mults: nv_mult.map(|nv| Operand::Polys {
-                    ids: group_mults[stack].to_vec(),
+                    ids: group.mults[stack].to_vec(),
                     nv,
                 }),
             });
         }
     }
-    Ok(())
-}
-
-/// The instances of a batch of relations: relations in order, the `f` side
-/// of each before its `g` side. A function of the statement and of the
-/// tracker's sizes only, so both sides arrive at the same list.
-pub(super) fn plan_instances<T: TrackerCore>(
-    tracker: &T,
-    relations: &[KeyedSumRelation<T::F>],
-) -> Result<Vec<InstancePlan<T::F>>, String> {
-    let mut plan = Vec::new();
-    for (index, relation) in relations.iter().enumerate() {
-        let sides = [
-            (Side::F, &relation.fxs, &relation.mfxs),
-            (Side::G, &relation.gxs, &relation.mgxs),
-        ];
-        for (side, cols, mults) in sides {
-            plan_side(tracker, index, side, cols, mults, &mut plan)?;
-        }
-    }
     Ok(plan)
 }
 
-/// Cuts a batch into consecutive GKR runs of at most `budget` each, so that
-/// the prover never holds more than one run's layers. Instances are taken in
-/// order and a run is closed when the next instance would not fit; an
-/// instance above the budget is a run of its own.
+/// One `gamma` per relation, in the order of the relations. They are drawn
+/// together, here, so that every column and multiplicity of the batch is
+/// fixed before any of them. A relation without entries has no denominator
+/// to take one off and draws none.
+fn draw_gammas<T: TrackerCore>(
+    tracker: &mut T,
+    relations: &[KeyedSumRelation<T::F>],
+) -> SnarkResult<Vec<T::F>> {
+    relations
+        .iter()
+        .map(|relation| {
+            if relation.fxs.is_empty() && relation.gxs.is_empty() {
+                Ok(T::F::zero())
+            } else {
+                tracker.get_and_append_challenge(b"gamma")
+            }
+        })
+        .collect()
+}
+
+/// Splits a batch into GKR runs of at most `budget` each, so that the
+/// prover never holds more than one run's layers. Instances are taken in
+/// order and each joins the first run that still has room for it; only when
+/// there is none does it open a run, so no instance is proved alone that a
+/// run before it could have taken. An instance above the budget fits in no
+/// run and leaves no room in its own: it is a run of its own.
 ///
-/// The cut depends on the plan and the shared configuration only, so both
-/// sides arrive at the same one. Should they not, the first run that differs
-/// has a different number of instances on the two sides, which the GKR
-/// verifier rejects.
-fn gkr_runs<F>(plan: &[InstancePlan<F>], budget: usize) -> Vec<Range<usize>> {
+/// The runs depend on the plan and the shared configuration only, so both
+/// sides arrive at the same ones. Under two different budgets, the first
+/// run that differs has other shapes on the two sides, which the GKR
+/// verifier rejects: where its two lists part, one side has an instance the
+/// other had no room for, and whatever that side has there instead is
+/// smaller.
+fn gkr_runs<F>(plan: &[InstancePlan<F>], budget: usize) -> Vec<Vec<usize>> {
     let budget = budget as u128;
-    let mut runs = Vec::new();
-    let mut start = 0;
-    let mut size = 0u128;
+    let mut runs: Vec<(u128, Vec<usize>)> = Vec::new();
     for (index, instance) in plan.iter().enumerate() {
-        let instance_size = instance.weighted_size();
-        if index > start && size.saturating_add(instance_size) > budget {
-            runs.push(start..index);
-            start = index;
-            size = 0;
+        let size = instance.weighted_size();
+        let with_room = runs
+            .iter_mut()
+            .find(|(held, _)| held.saturating_add(size) <= budget);
+        match with_room {
+            Some((held, run)) => {
+                *held += size;
+                run.push(index);
+            }
+            None => runs.push((size, vec![index])),
         }
-        size = size.saturating_add(instance_size);
     }
-    if start < plan.len() {
-        runs.push(start..plan.len());
-    }
-    runs
+    runs.into_iter().map(|(_, run)| run).collect()
 }
 
 /// `eq(point, i)` for every `i`, variable 0 being the lowest bit of `i`.
@@ -416,28 +451,29 @@ fn push_operand_claim<T: TrackerCore, P: Party<T>>(
 ///
 /// First one `eq(point[..nv], ·)` per distinct size `nv > 0` among the
 /// run's polynomials, ascending. Then, instance by instance, the column
-/// claim `sum_x eq(x)·(sum_i w_i·col_i(x)) = Q + gamma` followed, unless the
-/// numerators are 1, by the multiplicity claim
+/// claim `sum_x eq(x)·(sum_i w_i·col_i(x)) = Q + sum_i w_i·gamma_i`
+/// followed, unless the numerators are 1, by the multiplicity claim
 /// `sum_x eq(x)·(sum_i w_i·m_i(x)) = P`, where `(P, Q)` are the run's input
-/// claims and `w_i = eq(point[claim_nv..], i)` selects entry `i` of a stack.
+/// claims, `w_i = eq(point[claim_nv..], i)` selects entry `i` of a stack and
+/// `gamma_i` is the `gamma` of that entry's relation.
 ///
 /// The claims are raw: their sums are fixed here, on both sides, and are
 /// never read from the proof.
 pub(super) fn push_input_claims<T: TrackerCore, P: Party<T>>(
     tracker: &mut T,
     party: &P,
-    instances: &[InstancePlan<T::F>],
-    gamma: T::F,
+    batch: &Batch<T::F>,
+    run: usize,
     claims: &GkrClaims<T::F>,
 ) -> SnarkResult<()> {
-    let widest = instances.iter().map(InstancePlan::n_vars).max();
-    if claims.inputs.len() != instances.len() || Some(claims.point.len()) != widest {
+    let widest = batch.instances(run).map(InstancePlan::n_vars).max();
+    if claims.inputs.len() != batch.runs[run].len() || Some(claims.point.len()) != widest {
         return Err(party.reject("LogUp-GKR claims do not match their instances".to_string()));
     }
     let point = &claims.point;
 
-    let sizes: BTreeSet<usize> = instances
-        .iter()
+    let sizes: BTreeSet<usize> = batch
+        .instances(run)
         .flat_map(|instance| std::iter::once(&instance.cols).chain(&instance.mults))
         .filter_map(|operand| match operand {
             Operand::Polys { nv, .. } if *nv > 0 => Some(*nv),
@@ -449,10 +485,17 @@ pub(super) fn push_input_claims<T: TrackerCore, P: Party<T>>(
         eqs.insert(nv, tracker.track_eq_x_r(&point[..nv], nv)?);
     }
 
-    for (instance, [numerator, denominator]) in instances.iter().zip(&claims.inputs) {
+    for (instance, [numerator, denominator]) in batch.instances(run).zip(&claims.inputs) {
         let weights = selector_weights(&point[instance.claim_nv..instance.n_vars()]);
-        // The denominators are `col - gamma`.
-        let column = *denominator + gamma;
+        // The denominators of entry `i` are `col_i - gamma_i`, and the
+        // entries' constants are weighted like their columns.
+        let gammas = instance.relations.iter().map(|r| batch.gammas[*r]);
+        let shift: T::F = weights
+            .iter()
+            .zip(gammas)
+            .map(|(w, gamma)| *w * gamma)
+            .sum();
+        let column = *denominator + shift;
         push_operand_claim(tracker, party, &eqs, &instance.cols, &weights, column)?;
         if let Some(mults) = &instance.mults {
             push_operand_claim(tracker, party, &eqs, mults, &weights, *numerator)?;
@@ -461,54 +504,72 @@ pub(super) fn push_input_claims<T: TrackerCore, P: Party<T>>(
     Ok(())
 }
 
-/// Reduces `relations` to sumcheck claims under one `gamma`. Returns the
-/// instances with their roots; comparing those is left to the verifier, so
-/// that a prover on a false statement still produces a proof to reject.
+/// Reduces `relations` to sumcheck claims. Returns the instances with their
+/// roots; comparing those is left to the verifier, so that a prover on a
+/// false statement still produces a proof to reject.
 pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
     tracker: &mut T,
     party: &mut P,
     relations: &[KeyedSumRelation<T::F>],
 ) -> SnarkResult<Reduction<T::F>> {
     let plan = plan_instances(tracker, relations).map_err(|reason| party.reject(reason))?;
-    let mut roots = Vec::with_capacity(plan.len());
-    if plan.is_empty() {
-        return Ok(Reduction { plan, roots });
-    }
-    let gamma = tracker.get_and_append_challenge(b"gamma")?;
-    let budget = tracker.config().logup_gkr_run_budget;
-    for run in gkr_runs(&plan, budget) {
-        let claims = party.run(tracker, &plan, run.clone(), gamma)?;
-        if claims.roots.len() != run.len() {
+    let gammas = draw_gammas(tracker, relations)?;
+    let runs = gkr_runs(&plan, tracker.config().logup_gkr_run_budget);
+    let batch = Batch { plan, gammas, runs };
+    // Every instance is in one run, which sets its root. One left as it is
+    // here would fail the comparison of the sums.
+    let mut roots = vec![[T::F::zero(); 2]; batch.plan.len()];
+    for (run, instances) in batch.runs.iter().enumerate() {
+        let claims = party.run(tracker, &batch, run)?;
+        if claims.roots.len() != instances.len() {
             return Err(party.reject("LogUp-GKR roots do not match their instances".to_string()));
         }
-        push_input_claims(tracker, party, &plan[run], gamma, &claims)?;
-        roots.extend(claims.roots);
+        push_input_claims(tracker, party, &batch, run, &claims)?;
+        for (index, root) in instances.iter().zip(claims.roots) {
+            roots[*index] = root;
+        }
     }
-    Ok(Reduction { plan, roots })
+    Ok(Reduction {
+        plan: batch.plan,
+        roots,
+    })
 }
 
-/// Checks `sum_f P/Q == sum_g P/Q` for every relation. The sums are kept as
-/// fractions and compared by cross-multiplication.
-fn check_relation_sums<F: Field>(
-    reduction: &Reduction<F>,
-    n_relations: usize,
-) -> Result<(), String> {
-    let mut sums = vec![[(F::zero(), F::one()); 2]; n_relations];
+/// Checks `sum_f P/Q == sum_g P/Q` over the instances of the whole batch,
+/// whichever relations and runs they belong to. The sums are kept as
+/// fractions and compared by cross-multiplication, so nothing is inverted.
+///
+/// One comparison settles every relation because each has a `gamma` of its
+/// own. Let `D_r(X) = sum_f m/(f - X) - sum_g m/(g - X)` over the entries
+/// of relation `r`. The relation holds exactly when `D_r` is zero as a
+/// rational function, and with the roots tied to the columns by the input
+/// claims, the two sums differ by `sum_r D_r(gamma_r)`. Take a relation `r`
+/// that does not hold. The gammas are independent, so fix all the others:
+/// the difference vanishes only if `D_r(gamma_r) = c` for a `c` that does
+/// not depend on `gamma_r`. Write `D_r = N/M`, with `M` the product of
+/// `key - X` over the distinct keys of `r`. Every term of `D_r` vanishes at
+/// infinity, so `deg N < deg M`, and `N - c·M` is not the zero polynomial:
+/// it is `N` for `c = 0` and has the degree of `M` otherwise. `gamma_r` is
+/// drawn after the columns that fix `D_r`, and it is a root of `N - c·M`
+/// with probability at most `deg M / |F|`.
+///
+/// Under one `gamma` for all relations the difference would be
+/// `(sum_r D_r)(gamma)`, which is zero whenever the errors of false
+/// relations cancel.
+pub(super) fn check_batch_sums<F: Field>(reduction: &Reduction<F>) -> Result<(), String> {
+    let mut sums = [(F::zero(), F::one()); 2];
     for (instance, [p, q]) in reduction.plan.iter().zip(&reduction.roots) {
         // A zero denominator would make both products below vanish.
         if q.is_zero() {
             return Err("LogUp-GKR root has a zero denominator".to_string());
         }
-        let (num, den) = &mut sums[instance.relation][instance.side as usize];
+        let (num, den) = &mut sums[instance.side as usize];
         *num = *num * q + *p * *den;
         *den *= q;
     }
-    for (relation, [(f_num, f_den), (g_num, g_den)]) in sums.into_iter().enumerate() {
-        if f_num * g_den != g_num * f_den {
-            return Err(format!(
-                "the two sides of keyed sum {relation} have different sums"
-            ));
-        }
+    let [(f_num, f_den), (g_num, g_den)] = sums;
+    if f_num * g_den != g_num * f_den {
+        return Err("the two sides of the keyed sums have different sums".to_string());
     }
     Ok(())
 }
@@ -519,16 +580,16 @@ pub(super) struct ProvingParty<F> {
 }
 
 impl<F: Field> ProvingParty<F> {
-    /// The instances of `plan[run]` with `gamma` subtracted from the
-    /// columns. Reads every column once, however often it is used.
+    /// The instances of run `run`, every entry's column with the `gamma` of
+    /// its relation subtracted. Reads every column once, however often it
+    /// is used.
     pub(super) fn instances<B: SnarkBackend<F = F>>(
         &mut self,
         tracker: &mut ProverTracker<B>,
-        plan: &[InstancePlan<F>],
-        run: Range<usize>,
-        gamma: F,
+        batch: &Batch<F>,
+        run: usize,
     ) -> SnarkResult<Vec<FractionInstance<F>>> {
-        for instance in &plan[run.clone()] {
+        for instance in batch.instances(run) {
             if instance.n_vars() > MAX_GKR_VARS {
                 return Err(invalid_parameters(format!(
                     "LogUp-GKR instance of {} variables is too large",
@@ -555,34 +616,50 @@ impl<F: Field> ProvingParty<F> {
         }
 
         let evals = &self.evals;
-        let instances = cfg_iter!(plan[run.clone()])
+        let planned: Vec<&InstancePlan<F>> = batch.instances(run).collect();
+        let instances = cfg_iter!(planned)
             .map(|instance| {
                 let rows = 1usize << instance.n_vars();
-                let table = |operand: &Operand<F>, shift: F| match operand {
-                    Operand::Constant(value) => vec![*value - shift; rows],
+                // Row `j` is row `j mod 2^nv` of entry `j >> claim_nv`.
+                // `shifts[i]` is taken off every row of entry `i`.
+                let table = |operand: &Operand<F>, shifts: Option<&[F]>| match operand {
+                    // A constant is the one entry of its instance.
+                    Operand::Constant(value) => {
+                        vec![shifts.map_or(*value, |shifts| *value - shifts[0]); rows]
+                    }
                     Operand::Polys { ids, nv } => {
                         let entries: Vec<&[F]> = ids.iter().map(|id| &evals[id][..]).collect();
                         let row_mask = (1usize << nv) - 1;
                         cfg_into_iter!(0..rows)
-                            .map(|j| entries[j >> instance.claim_nv][j & row_mask] - shift)
+                            .map(|j| {
+                                let entry = j >> instance.claim_nv;
+                                let value = entries[entry][j & row_mask];
+                                shifts.map_or(value, |shifts| value - shifts[entry])
+                            })
                             .collect()
                     }
                 };
+                let gammas: Vec<F> = instance
+                    .relations
+                    .iter()
+                    .map(|relation| batch.gammas[*relation])
+                    .collect();
                 FractionInstance {
                     num: match &instance.mults {
                         None => Numerator::One,
-                        Some(mults) => Numerator::Values(table(mults, F::zero())),
+                        Some(mults) => Numerator::Values(table(mults, None)),
                     },
-                    den: table(&instance.cols, gamma),
+                    den: table(&instance.cols, Some(&gammas)),
                 }
             })
             .collect();
 
         // The instances hold their own copies; keep only what a later run
         // will read.
-        let later: BTreeSet<TrackerID> = plan[run.end..]
+        let later: BTreeSet<TrackerID> = batch.runs[run + 1..]
             .iter()
-            .flat_map(InstancePlan::poly_ids)
+            .flatten()
+            .flat_map(|index| batch.plan[*index].poly_ids())
             .collect();
         self.evals.retain(|id, _| later.contains(id));
         Ok(instances)
@@ -597,11 +674,10 @@ impl<B: SnarkBackend> Party<ProverTracker<B>> for ProvingParty<B::F> {
     fn run(
         &mut self,
         tracker: &mut ProverTracker<B>,
-        plan: &[InstancePlan<B::F>],
-        run: Range<usize>,
-        gamma: B::F,
+        batch: &Batch<B::F>,
+        run: usize,
     ) -> SnarkResult<GkrClaims<B::F>> {
-        let instances = self.instances(tracker, plan, run, gamma)?;
+        let instances = self.instances(tracker, batch, run)?;
         tracker.prove_logup_gkr(instances)
     }
 
@@ -623,11 +699,10 @@ impl<B: SnarkBackend> Party<VerifierTracker<B>> for VerifyingParty {
     fn run(
         &mut self,
         tracker: &mut VerifierTracker<B>,
-        plan: &[InstancePlan<B::F>],
-        run: Range<usize>,
-        _gamma: B::F,
+        batch: &Batch<B::F>,
+        run: usize,
     ) -> SnarkResult<GkrClaims<B::F>> {
-        let shape: Vec<GkrShape> = plan[run].iter().map(InstancePlan::shape).collect();
+        let shape: Vec<GkrShape> = batch.instances(run).map(InstancePlan::shape).collect();
         tracker.verify_logup_gkr(&shape)
     }
 
@@ -656,10 +731,8 @@ pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
 ) -> SnarkResult<()> {
     let tracker = verifier.tracker();
     let mut tracker = tracker.borrow_mut();
-    let checked =
-        reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations).and_then(|reduction| {
-            check_relation_sums(&reduction, relations.len()).map_err(VerifyingParty::check_failed)
-        });
+    let checked = reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations)
+        .and_then(|reduction| check_batch_sums(&reduction).map_err(VerifyingParty::check_failed));
     if checked.is_err() {
         // The roots and the constants are compared here and nowhere else.
         // The claims pushed up to the failure can all be true, and the

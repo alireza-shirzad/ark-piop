@@ -21,7 +21,8 @@ use crate::{
 /// v4: a LogUp-GKR run is one flat list of messages: the first layer of
 /// every instance in place of its root, two coefficients per sumcheck round
 /// in place of three evaluations, and each gate where its instance runs out
-/// of variables.
+/// of variables. The lookups and keyed sums of a batch share its instances,
+/// each under a `gamma` of its own.
 pub const PROOF_ENCODING_VERSION: u8 = 4;
 use crate::{
     pcs::PCS,
