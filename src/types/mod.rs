@@ -24,15 +24,25 @@ pub struct SharedArgConfig {
     /// otherwise. A batch over the limit is split into runs, each a subproof
     /// of its own, which bounds the prover's peak at the price of a longer
     /// proof. An instance joins the first run with room for it, so the runs
-    /// need not be consecutive stretches of the batch. The split is part of
-    /// the proof's shape.
+    /// need not be consecutive stretches of the batch.
     ///
-    /// Only whole instances are moved. Columns of one size on one side of a
-    /// batch are stacked into one instance a power of two of them at a time,
-    /// whichever lookups or keyed sums they belong to, and a stack above the
-    /// limit is not split but proved in a run of its own: `2^s`
-    /// unit-numerator columns of `2^n` rows hold `3 * 2^(n + s)` whatever
-    /// the limit, which is above the default from `n + s = 27` on.
+    /// Columns of one size on one side of a batch are stacked into one
+    /// instance a power of two of them at a time, whichever lookups or keyed
+    /// sums they belong to, and no more of them than the limit has room for:
+    /// `2^s` unit-numerator columns of `2^n` rows share an instance only
+    /// while `3 * 2^(n + s)` is within it, and a taller group becomes
+    /// several instances. So a run holds more than the limit only when it
+    /// is a single column that does so by itself, which is never cut and is
+    /// proved alone. Under the default that is a column of more than `2^26`
+    /// rows.
+    ///
+    /// The limit is on what a run builds. It does not bound the evaluations
+    /// of the columns themselves: those of a lookup are read out before the
+    /// first run, and each is held until the last run that reads it.
+    ///
+    /// Both the stacks and the runs are part of the proof's shape: a proof
+    /// made under a limit that gives another layout than the verifier's is
+    /// rejected.
     pub logup_gkr_run_budget: usize,
 }
 

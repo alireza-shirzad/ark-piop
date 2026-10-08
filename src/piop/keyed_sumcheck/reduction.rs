@@ -9,7 +9,7 @@
 //! Several relations are reduced together, each under a `gamma` of its own:
 //! 1. the entries of all relations are laid out as GKR instances
 //!    ([`plan_instances`]), entries of different relations side by side in
-//!    one instance where their sizes allow;
+//!    one instance where their sizes and the run budget allow;
 //! 2. one `gamma` is drawn per relation ([`draw_gammas`]) and taken off the
 //!    columns of its entries;
 //! 3. the instances are proved in one or more GKR runs ([`gkr_runs`]), each
@@ -138,11 +138,12 @@ impl<F> InstancePlan<F> {
     /// [`crate::types::SharedArgConfig::logup_gkr_run_budget`]. Saturates,
     /// which only happens far above the sizes either side accepts.
     fn weighted_size(&self) -> u128 {
-        let per_fraction: u128 = if self.mults.is_none() { 3 } else { 4 };
         u32::try_from(self.n_vars())
             .ok()
             .and_then(|n_vars| 1u128.checked_shl(n_vars))
-            .map_or(u128::MAX, |rows| rows.saturating_mul(per_fraction))
+            .map_or(u128::MAX, |rows| {
+                rows.saturating_mul(fraction_weight(self.mults.is_none()))
+            })
     }
 
     fn poly_ids(&self) -> impl Iterator<Item = TrackerID> + '_ {
@@ -188,6 +189,22 @@ pub(super) struct Reduction<F> {
     pub roots: Vec<[F; 2]>,
 }
 
+/// What a GKR run holds per input fraction of an instance, in the unit of
+/// [`crate::types::SharedArgConfig::logup_gkr_run_budget`].
+fn fraction_weight(unit_numerators: bool) -> u128 {
+    if unit_numerators { 3 } else { 4 }
+}
+
+/// The largest `s` for which a stack of `2^s` entries of `claim_nv`
+/// variables each is within `budget`. Zero as well when a single entry is
+/// above it already: an entry is never cut.
+pub(super) fn stack_log_within(budget: usize, claim_nv: usize, unit_numerators: bool) -> usize {
+    // An instance of `n` variables weighs `weight·2^n`.
+    (budget as u128 / fraction_weight(unit_numerators))
+        .checked_ilog2()
+        .map_or(0, |n_vars| (n_vars as usize).saturating_sub(claim_nv))
+}
+
 /// The size the tracker holds for `id`. Unknown ids are refused here because
 /// the tracker algebra below panics on them.
 fn tracked_nv<T: TrackerCore>(tracker: &T, id: TrackerID) -> Result<usize, String> {
@@ -215,15 +232,20 @@ fn standalone_operand<F>(term: Either<TrackerID, F>, nv: usize) -> Operand<F> {
     }
 }
 
-/// The instances of a batch of relations. A function of the statement and
-/// of the tracker's sizes only, so both sides arrive at the same list.
+/// The instances of a batch of relations. A function of the statement, of
+/// the tracker's sizes and of the run budget only, so both sides arrive at
+/// the same list.
 ///
 /// An entry with a constant column or multiplicity is an instance of its
 /// own. The others are grouped by side, column size and multiplicity size,
 /// across all relations, and each group is cut into stacks of `2^s` entries,
-/// largest first, by the binary digits of its size: one instance per stack,
-/// so a group of `S` entries costs `popcount(S)` instances instead of `S`,
-/// however many relations they come from.
+/// one instance per stack. A stack takes the largest power of two of the
+/// entries still to place that keeps it within `budget`, so that no run has
+/// to hold more than that for it; an entry above the budget by itself is a
+/// stack of one. A group of `S` entries that fits whole therefore costs
+/// `popcount(S)` instances instead of `S`, however many relations they
+/// come from, and one that does not is as many stacks of the tallest kind
+/// as it fills, then the rest by its binary digits.
 ///
 /// The entries are walked relation by relation, the `f` side of each before
 /// its `g` side. A group holds its entries in that order, and the instances
@@ -239,6 +261,7 @@ fn standalone_operand<F>(term: Either<TrackerID, F>, nv: usize) -> Operand<F> {
 pub(super) fn plan_instances<T: TrackerCore>(
     tracker: &T,
     relations: &[KeyedSumRelation<T::F>],
+    budget: usize,
 ) -> Result<Vec<InstancePlan<T::F>>, String> {
     type Signature = (Side, usize, Option<usize>);
     enum Slot<F> {
@@ -309,17 +332,18 @@ pub(super) fn plan_instances<T: TrackerCore>(
             Slot::Group(signature) => signature,
         };
         let group = &groups[&(side, nv_col, nv_mult)];
+        let claim_nv = nv_col.max(nv_mult.unwrap_or(0));
+        let tallest = stack_log_within(budget, claim_nv, nv_mult.is_none());
+        let entries = group.cols.len();
         let mut start = 0;
-        for stack_log in (0..usize::BITS as usize).rev() {
+        while start < entries {
+            let stack_log = tallest.min((entries - start).ilog2() as usize);
             let size = 1usize << stack_log;
-            if group.cols.len() & size == 0 {
-                continue;
-            }
             let stack = start..start + size;
             start += size;
             plan.push(InstancePlan {
                 side,
-                claim_nv: nv_col.max(nv_mult.unwrap_or(0)),
+                claim_nv,
                 stack_log,
                 relations: group.relations[stack.clone()].to_vec(),
                 cols: Operand::Polys {
@@ -361,14 +385,17 @@ fn draw_gammas<T: TrackerCore>(
 /// order and each joins the first run that still has room for it; only when
 /// there is none does it open a run, so no instance is proved alone that a
 /// run before it could have taken. An instance above the budget fits in no
-/// run and leaves no room in its own: it is a run of its own.
+/// run and leaves no room in its own: it is a run of its own. With the
+/// plan cut for the same budget, that is an entry too large by itself.
 ///
 /// The runs depend on the plan and the shared configuration only, so both
-/// sides arrive at the same ones. Under two different budgets, the first
-/// run that differs has other shapes on the two sides, which the GKR
-/// verifier rejects: where its two lists part, one side has an instance the
-/// other had no room for, and whatever that side has there instead is
-/// smaller.
+/// sides arrive at the same ones. Under two different budgets that give one
+/// plan, the first run that differs has other shapes on the two sides,
+/// which the GKR verifier rejects: where its two lists part, one side has
+/// an instance the other had no room for, and whatever that side has there
+/// instead is smaller. Under two that give different plans, one side's
+/// plan is the other's with some stacks cut further: it has more instances,
+/// so the runs do not have the same shapes throughout either.
 fn gkr_runs<F>(plan: &[InstancePlan<F>], budget: usize) -> Vec<Vec<usize>> {
     let budget = budget as u128;
     let mut runs: Vec<(u128, Vec<usize>)> = Vec::new();
@@ -520,9 +547,10 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
     party: &mut P,
     relations: &[KeyedSumRelation<T::F>],
 ) -> SnarkResult<Reduction<T::F>> {
-    let plan = plan_instances(tracker, relations).map_err(|reason| party.reject(reason))?;
+    let budget = tracker.config().logup_gkr_run_budget;
+    let plan = plan_instances(tracker, relations, budget).map_err(|reason| party.reject(reason))?;
     let gammas = draw_gammas(tracker, relations)?;
-    let runs = gkr_runs(&plan, tracker.config().logup_gkr_run_budget);
+    let runs = gkr_runs(&plan, budget);
     let batch = Batch { plan, gammas, runs };
     // Every instance is in one run, which sets its root. One left as it is
     // here would fail the comparison of the sums.

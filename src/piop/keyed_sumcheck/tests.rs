@@ -14,7 +14,7 @@ use super::{
     reduction::{
         Batch, ColumnEvals, InstancePlan, KeyedSumRelation, KeyedTerm, Operand, Party,
         ProvingParty, Reduction, Side, check_batch_sums, plan_instances, prove_keyed_sums,
-        reduce_keyed_sums, verify_keyed_sums,
+        reduce_keyed_sums, stack_log_within, verify_keyed_sums,
     },
 };
 use crate::{
@@ -183,6 +183,15 @@ fn assert_in_sync(prover: &ArgProver<B>, verifier: &ArgVerifier<B>) {
     );
 }
 
+/// The instances `tracker` lays `relations` out as, under its own budget.
+fn plan_of(
+    tracker: &ProverTracker<B>,
+    relations: &[KeyedSumRelation<F>],
+) -> Result<Vec<InstancePlan<F>>, String> {
+    let budget = TrackerCore::config(tracker).logup_gkr_run_budget;
+    plan_instances(tracker, relations, budget)
+}
+
 /// An entry of a keyed sum by column index: `(column, multiplicity)`.
 type Entry = (usize, Option<usize>);
 /// The `f` and `g` entries of one relation.
@@ -326,7 +335,7 @@ impl Session {
     }
 
     fn plan(&self) -> Vec<InstancePlan<F>> {
-        plan_instances(&*self.prover.tracker().borrow(), &self.relations).unwrap()
+        plan_of(&self.prover.tracker().borrow(), &self.relations).unwrap()
     }
 
     /// The instances of the batch as the GKR is told about them.
@@ -1194,7 +1203,9 @@ impl MixedColumns {
     ///
     /// Their instances, in order, with their weighted sizes: `a` 24, `b`
     /// stacked with `p` 192, `c` 32, the table of the first relation stacked
-    /// with that of the second 128, `d` 12, `q` 96.
+    /// with that of the second 128, `d` 12, `q` 96. A budget below 192 has
+    /// `b` and `p` apart, 96 each, and one below 128 the two tables, 64
+    /// each.
     fn session(&self, budgets: (usize, usize), counts_abc: &[F], counts_d: &[F]) -> Session {
         let columns = [
             self.table.clone(),
@@ -1236,30 +1247,29 @@ impl MixedColumns {
 }
 
 /// A batch above the budget is proved in several GKR runs, each a subproof
-/// with a point of its own: an instance joins the first run that has room
-/// for it. The two sides are still compared over the whole batch, and every
-/// run's claims are tied to the columns.
+/// with a point of its own: a stack is no taller than the budget has room
+/// for, and an instance joins the first run that has room for it. The two
+/// sides are still compared over the whole batch, and every run's claims
+/// are tied to the columns.
 #[test]
 fn gkr_batch_split_small_budget() {
     let columns = MixedColumns::new();
     let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
 
-    let mut session = columns.honest((100, 100));
-    let plan = session.plan();
+    let plan = columns.honest((195, 195)).plan();
     assert_eq!(weighted_sizes(&plan), [24, 192, 32, 128, 12, 96]);
     // Both stacks hold entries of two relations.
     assert_eq!(plan[1].relations, [0, 2]);
     assert_eq!(plan[3].relations, [0, 1]);
-    let shape = session.shape();
-    session.prove_with(ColumnEvals::new()).unwrap();
-    let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
-    let proof = session.prover.build_proof().unwrap();
-    // The stacks are above the budget, each a run of its own. `a`, `c` and
-    // `d` share the run opened before them, which has no room for `q`.
-    assert_runs(&proof, &shape, &[vec![0, 2, 4], vec![1], vec![3], vec![5]]);
-    let verifier = session.verify_reduction(&proof).unwrap();
-    assert_in_sync(&after_reduction, &verifier);
-    verifier.verify().unwrap();
+    // The stack of `b` and `p` is above a budget of 150 and is cut in two.
+    let plan = columns.honest((150, 150)).plan();
+    assert_eq!(weighted_sizes(&plan), [24, 96, 96, 32, 128, 12, 96]);
+    assert_eq!(plan[4].relations, [0, 1]);
+    // The stack of the tables is above one of 100 as well.
+    let plan = columns.honest((100, 100)).plan();
+    assert_eq!(weighted_sizes(&plan), [24, 96, 96, 32, 64, 64, 12, 96]);
+    let relations: Vec<&[usize]> = plan.iter().map(|i| &i.relations[..]).collect();
+    assert_eq!(relations, [[0], [0], [2], [0], [0], [1], [1], [2]]);
 
     for (budget, runs) in [
         (unsplit, vec![vec![0, 1, 2, 3, 4, 5]]),
@@ -1267,8 +1277,18 @@ fn gkr_batch_split_small_budget() {
         (196, vec![vec![0, 2, 3, 4], vec![1], vec![5]]),
         // One less and it opens a run, which `q` then joins.
         (195, vec![vec![0, 2, 3], vec![1], vec![4, 5]]),
+        // `a`, `b` and `d` share the first run, `p` and `c` the second.
+        // The stack of the tables has a run to itself, and so has `q`.
+        (150, vec![vec![0, 1, 5], vec![2, 3], vec![4], vec![6]]),
+        // `a`, `c` and `d` share the first run. No two of the others fit
+        // in one.
+        (
+            100,
+            vec![vec![0, 3, 6], vec![1], vec![2], vec![4], vec![5], vec![7]],
+        ),
     ] {
         let mut session = columns.honest((budget, budget));
+        let shape = session.shape();
         session.prove_with(ColumnEvals::new()).unwrap();
         let after_reduction =
             ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
@@ -1279,106 +1299,122 @@ fn gkr_batch_split_small_budget() {
         verifier.verify().unwrap();
     }
 
-    // A value outside the table in the first run, whose table is in a
-    // stack two runs later.
-    let mut bad = MixedColumns::new();
-    bad.a[5] = F::from(16u64);
-    let session = bad.session((100, 100), &columns.counts_abc(), &columns.counts_d());
-    assert_rejected_in_the_reduction(session.prove_and_verify());
+    // With both stacks whole, with that of the tables only, and with
+    // neither.
+    for budget in [195, 150, 100] {
+        let budgets = (budget, budget);
+        // A value outside the table in the first run. Under the two
+        // smaller budgets its table is in a later one.
+        let mut bad = MixedColumns::new();
+        bad.a[5] = F::from(16u64);
+        let session = bad.session(budgets, &columns.counts_abc(), &columns.counts_d());
+        assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // The same in the stack `b` shares with a column of another relation.
-    let mut bad = MixedColumns::new();
-    bad.b[5] = F::from(16u64);
-    let session = bad.session((100, 100), &columns.counts_abc(), &columns.counts_d());
-    assert_rejected_in_the_reduction(session.prove_and_verify());
+        // The same in `b`, stacked with a column of another relation or
+        // in an instance of its own.
+        let mut bad = MixedColumns::new();
+        bad.b[5] = F::from(16u64);
+        let session = bad.session(budgets, &columns.counts_abc(), &columns.counts_d());
+        assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // A miscounted table of the second relation, stacked with that of the
-    // first, two runs after `d`.
-    let mut counts_d = columns.counts_d();
-    counts_d[3] += F::one();
-    let session = columns.session((100, 100), &columns.counts_abc(), &counts_d);
-    assert_rejected_in_the_reduction(session.prove_and_verify());
+        // A miscounted table of the second relation, stacked with that of
+        // the first or in a run after it.
+        let mut counts_d = columns.counts_d();
+        counts_d[3] += F::one();
+        let session = columns.session(budgets, &columns.counts_abc(), &counts_d);
+        assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // The last run is not a permutation of `p`, which sits in the stack of
-    // the second run.
-    let mut bad = MixedColumns::new();
-    bad.q[31] = bad.q[30];
-    assert_rejected_in_the_reduction(bad.honest((100, 100)).prove_and_verify());
+        // `q` is not a permutation of `p`, which is in a run before it.
+        let mut bad = MixedColumns::new();
+        bad.q[31] = bad.q[30];
+        assert_rejected_in_the_reduction(bad.honest(budgets).prove_and_verify());
+    }
 }
 
 /// The input claims of every run are pushed, each at its run's point. A
 /// committed column is not what the other side counts and the prover runs
-/// the GKR on one that is: two columns of the first run, a multiplicity in
-/// the stack of tables, either column of the stack two relations share, and
-/// the column of the last run.
+/// the GKR on one that is: `a`, `d`, the multiplicities of the second
+/// table, `b`, `p` and `q`. Under the first budget `b` and `p` are one
+/// stack and so are the tables; under the second only the tables are; under
+/// the third every column is an instance, and they are spread over six
+/// runs.
 #[test]
 fn gkr_on_fake_leaves_in_any_run_is_rejected() {
     let columns = MixedColumns::new();
-    for column in [2, 7, 6, 3, 8, 9] {
-        let mut committed = MixedColumns::new();
-        let mut counts_d = columns.counts_d();
-        let fake = match column {
-            2 => {
-                committed.a[1] = F::from(16u64);
-                columns.a.clone()
-            }
-            7 => {
-                committed.d[1] = F::from(16u64);
-                columns.d.clone()
-            }
-            6 => {
-                counts_d[3] += F::one();
-                columns.counts_d()
-            }
-            3 => {
-                committed.b[1] = F::from(16u64);
-                columns.b.clone()
-            }
-            8 => {
-                committed.p[1] = F::from(999u64);
-                columns.p.clone()
-            }
-            _ => {
-                committed.q[1] = F::from(999u64);
-                columns.q.clone()
-            }
-        };
-        let session = committed.session((100, 100), &columns.counts_abc(), &counts_d);
-        let evals = BTreeMap::from([(session.ids[column], fake)]);
-        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+    for budget in [195, 150, 100] {
+        for column in [2, 7, 6, 3, 8, 9] {
+            let mut committed = MixedColumns::new();
+            let mut counts_d = columns.counts_d();
+            let fake = match column {
+                2 => {
+                    committed.a[1] = F::from(16u64);
+                    columns.a.clone()
+                }
+                7 => {
+                    committed.d[1] = F::from(16u64);
+                    columns.d.clone()
+                }
+                6 => {
+                    counts_d[3] += F::one();
+                    columns.counts_d()
+                }
+                3 => {
+                    committed.b[1] = F::from(16u64);
+                    columns.b.clone()
+                }
+                8 => {
+                    committed.p[1] = F::from(999u64);
+                    columns.p.clone()
+                }
+                _ => {
+                    committed.q[1] = F::from(999u64);
+                    columns.q.clone()
+                }
+            };
+            let session = committed.session((budget, budget), &columns.counts_abc(), &counts_d);
+            let evals = BTreeMap::from([(session.ids[column], fake)]);
+            assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+        }
     }
 }
 
 /// Two relations, each false, whose errors cancel over the batch. Each
-/// side is one stack of both relations and a run of its own.
+/// side is one stack of both relations that fills a run or, under a budget
+/// with room for one column only, two columns with a run each.
 #[test]
 fn relations_whose_errors_cancel_across_runs_are_rejected() {
     let columns = [fv(0..32), fv((0..32).map(|i| i + 100))];
     let entry = |column: usize| vec![(column, None)];
-    let budgets = (100, 100);
-    let runs = [vec![0], vec![1]];
+    for (budget, shape, runs) in [
+        (192, gkr_shape(&[(6, true); 2]), vec![vec![0], vec![1]]),
+        (
+            100,
+            gkr_shape(&[(5, true); 4]),
+            vec![vec![0], vec![1], vec![2], vec![3]],
+        ),
+    ] {
+        let budgets = (budget, budget);
+        let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
+        let mut session = Session::with_budgets(budgets, &columns, &[together]);
+        assert_eq!(session.shape(), shape);
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert_runs(&proof, &shape, &runs);
+        session.verify(&proof).unwrap();
 
-    let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
-    let mut session = Session::with_budgets(budgets, &columns, &[together]);
-    let shape = session.shape();
-    assert_eq!(shape, gkr_shape(&[(6, true), (6, true)]));
-    session.prove_with(ColumnEvals::new()).unwrap();
-    let proof = session.prover.build_proof().unwrap();
-    assert_runs(&proof, &shape, &runs);
-    session.verify(&proof).unwrap();
-
-    let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
-    let mut session = Session::with_budgets(budgets, &columns, &apart);
-    assert_eq!(session.shape(), shape);
-    session.prove_with(ColumnEvals::new()).unwrap();
-    let proof = session.prover.build_proof().unwrap();
-    assert_runs(&proof, &shape, &runs);
-    assert_rejected_in_the_reduction(session.verify(&proof));
+        let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
+        let mut session = Session::with_budgets(budgets, &columns, &apart);
+        assert_eq!(session.shape(), shape);
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert_runs(&proof, &shape, &runs);
+        assert_rejected_in_the_reduction(session.verify(&proof));
+    }
 }
 
 /// An instance above the budget is proved in a run of its own and closes
 /// no other: an instance after it still joins a run before it that has
-/// room. Down to a budget nothing fits in.
+/// room. Down to a budget no stack fits in, and to one nothing fits in.
 #[test]
 fn gkr_single_instance_over_budget() {
     let table = fv(0..8);
@@ -1419,9 +1455,14 @@ fn gkr_single_instance_over_budget() {
         // The big column is within the budget and still alone.
         (96, vec![vec![0, 1, 3], vec![2]]),
         (152, vec![vec![0, 1, 2], vec![3]]),
-        // Every instance is above the budget.
-        (23, vec![vec![0], vec![1], vec![2], vec![3]]),
-        (0, vec![vec![0], vec![1], vec![2], vec![3]]),
+        // A stack fills a run and the other instances are above the
+        // budget.
+        (24, vec![vec![0], vec![1], vec![2], vec![3]]),
+        // The stacks are above it too. Each is cut into its two columns,
+        // and no two of those fit in a run.
+        (23, (0..6).map(|instance| vec![instance]).collect()),
+        // Every column is above the budget, and still an instance.
+        (0, (0..6).map(|instance| vec![instance]).collect()),
         (usize::MAX, vec![vec![0, 1, 2, 3]]),
     ] {
         let mut honest = session(budget, &big);
@@ -1484,10 +1525,317 @@ fn gkr_instance_joins_the_first_of_the_runs_with_room() {
     session.verify(&proof).unwrap();
 }
 
-/// The split into runs is part of the statement the verifier checks: a
-/// proof split by another budget than the verifier's is rejected at the
-/// first run that differs, whichever side has the finer split. Budgets that
-/// give the same runs are the same statement.
+/// Lookups into two tables of 8 rows whose sub columns make groups taller
+/// than a small budget has room for: eleven unit-numerator columns of 8
+/// rows, six looked up in the first table and five in the second, and five
+/// weighted columns of 4 rows under weights of 8, looked up in the first.
+struct TallGroups {
+    tables: [Vec<F>; 2],
+    units: Vec<Vec<F>>,
+    weighted: Vec<Vec<F>>,
+    weights: Vec<Vec<F>>,
+}
+
+impl TallGroups {
+    /// How many of the unit columns, the first ones, are looked up in the
+    /// first table.
+    const FIRST_TABLE: usize = 6;
+
+    fn new() -> Self {
+        Self {
+            tables: [fv(0..8), fv(100..108)],
+            units: (0..11)
+                .map(|s| {
+                    let offset = if s < Self::FIRST_TABLE { 0 } else { 100 };
+                    let sub = in_table(3, 8, s as u64 + 1);
+                    sub.iter().map(|v| *v + F::from(offset as u64)).collect()
+                })
+                .collect(),
+            weighted: (0..5).map(|s| in_table(2, 8, s + 20)).collect(),
+            weights: (0..5).map(|s| fv((0..8).map(|i| 10 * s + i + 1))).collect(),
+        }
+    }
+
+    /// The multiplicities of the two tables for these columns.
+    fn counts(&self) -> [Vec<F>; 2] {
+        let (first, second) = self.units.split_at(Self::FIRST_TABLE);
+        let mut entries: Vec<(&[F], Option<&[F]>)> =
+            first.iter().map(|sub| (&sub[..], None)).collect();
+        entries.extend(
+            self.weighted
+                .iter()
+                .zip(&self.weights)
+                .map(|(col, weights)| (&col[..], Some(&weights[..]))),
+        );
+        let second: Vec<(&[F], Option<&[F]>)> = second.iter().map(|sub| (&sub[..], None)).collect();
+        [
+            tally(&self.tables[0], &entries),
+            tally(&self.tables[1], &second),
+        ]
+    }
+
+    /// The tables with `counts`, then the unit columns from 4 on, the
+    /// weighted ones from 15 and their weights from 20.
+    fn session(&self, budgets: (usize, usize), counts: &[Vec<F>; 2]) -> Session {
+        let mut columns = vec![
+            self.tables[0].clone(),
+            counts[0].clone(),
+            self.tables[1].clone(),
+            counts[1].clone(),
+        ];
+        columns.extend_from_slice(&self.units);
+        columns.extend_from_slice(&self.weighted);
+        columns.extend_from_slice(&self.weights);
+        let unit = |s: usize| (4 + s, None);
+        let mut first: Vec<Entry> = (0..Self::FIRST_TABLE).map(unit).collect();
+        first.extend((0..5).map(|s| (15 + s, Some(20 + s))));
+        let second = (Self::FIRST_TABLE..11).map(unit).collect();
+        let relations = [(first, vec![(0, Some(1))]), (second, vec![(2, Some(3))])];
+        Session::with_budgets(budgets, &columns, &relations)
+    }
+
+    fn honest(&self, budgets: (usize, usize)) -> Session {
+        self.session(budgets, &self.counts())
+    }
+}
+
+/// A group whose stack would be above the budget is cut into stacks of the
+/// tallest kind the budget has room for, and what is left over by its
+/// binary digits: no run holds more than the budget unless a single column
+/// is more. The entries keep their order and their relations, and a false
+/// entry is caught in whichever stack it lands.
+#[test]
+fn stack_above_the_run_budget_is_cut_into_stacks_within_it() {
+    let columns = TallGroups::new();
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+    let alone = |instances: usize| (0..instances).map(|i| vec![i]).collect::<Vec<_>>();
+
+    for (budget, stack_logs, sizes, runs) in [
+        // Eleven unit columns as 8 + 2 + 1, five weighted ones as 4 + 1,
+        // and the two tables.
+        (
+            unsplit,
+            vec![3, 1, 0, 2, 0, 1],
+            vec![192, 48, 24, 128, 32, 64],
+            vec![vec![0, 1, 2, 3, 4, 5]],
+        ),
+        // Room for four unit columns or for two weighted ones.
+        (
+            100,
+            vec![2, 2, 1, 0, 1, 1, 0, 1],
+            vec![96, 96, 48, 24, 64, 64, 32, 64],
+            vec![vec![0], vec![1], vec![2, 3], vec![4, 6], vec![5], vec![7]],
+        ),
+        // Room for two unit columns, and for one weighted column or table.
+        (
+            48,
+            [vec![1; 5], vec![0; 8]].concat(),
+            [vec![48; 5], vec![24], vec![32; 7]].concat(),
+            alone(13),
+        ),
+        // Room for no column: each is an instance and a run.
+        (
+            20,
+            vec![0; 18],
+            [vec![24; 11], vec![32; 7]].concat(),
+            alone(18),
+        ),
+    ] {
+        let mut session = columns.honest((budget, budget));
+        let plan = session.plan();
+        let logs: Vec<usize> = plan.iter().map(|instance| instance.stack_log).collect();
+        assert_eq!(logs, stack_logs, "budget {budget}");
+        assert_eq!(weighted_sizes(&plan), sizes);
+        // Above the budget there are single columns only.
+        for (instance, size) in plan.iter().zip(&sizes) {
+            assert!(*size <= budget || instance.stack_log == 0);
+        }
+        // Cut or not, the entries are the same ones in the same order.
+        let entries =
+            |plan: &[InstancePlan<F>]| -> Vec<(Side, usize, TrackerID, Option<TrackerID>)> {
+                let ids = |operand: &Operand<F>| match operand {
+                    Operand::Polys { ids, .. } => ids.clone(),
+                    Operand::Constant(_) => panic!("no entry here is a constant"),
+                };
+                let mut entries = Vec::new();
+                for instance in plan {
+                    let cols = ids(&instance.cols);
+                    let mults = instance.mults.as_ref().map(ids);
+                    for (at, (col, relation)) in cols.iter().zip(&instance.relations).enumerate() {
+                        let mult = mults.as_ref().map(|mults| mults[at]);
+                        entries.push((instance.side, *relation, *col, mult));
+                    }
+                }
+                entries
+            };
+        assert_eq!(
+            entries(&plan),
+            entries(&columns.honest((unsplit, unsplit)).plan())
+        );
+
+        let shape = session.shape();
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let after_reduction =
+            ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
+        let proof = session.prover.build_proof().unwrap();
+        assert_runs(&proof, &shape, &runs);
+        let verifier = session.verify_reduction(&proof).unwrap();
+        assert_in_sync(&after_reduction, &verifier);
+        verifier.verify().unwrap();
+    }
+
+    // The second stack of unit columns holds entries of both lookups.
+    let plan = columns.honest((100, 100)).plan();
+    let relations: Vec<&[usize]> = plan[..4].iter().map(|i| &i.relations[..]).collect();
+    assert_eq!(relations, [&[0; 4][..], &[0, 0, 1, 1], &[1, 1], &[1]]);
+
+    let counts = columns.counts();
+    for budget in [100, 48] {
+        let budgets = (budget, budget);
+        // Every unit column in turn holds a value of neither table, then a
+        // value of the other one.
+        for at in 0..11 {
+            let other_table = if at < TallGroups::FIRST_TABLE { 100 } else { 0 };
+            for value in [50u64, other_table] {
+                let mut bad = TallGroups::new();
+                bad.units[at][5] = F::from(value);
+                assert_rejected_in_the_reduction(bad.session(budgets, &counts).prove_and_verify());
+            }
+        }
+        // Every weighted column in turn has a value outside its table, then
+        // a weight that is off.
+        for at in 0..5 {
+            let mut bad = TallGroups::new();
+            bad.weighted[at][1] = F::from(50u64);
+            assert_rejected_in_the_reduction(bad.session(budgets, &counts).prove_and_verify());
+            let mut bad = TallGroups::new();
+            bad.weights[at][6] += F::one();
+            assert_rejected_in_the_reduction(bad.session(budgets, &counts).prove_and_verify());
+        }
+        // Either table is miscounted.
+        for table in 0..2 {
+            let mut counts = counts.clone();
+            counts[table][3] += F::one();
+            let session = columns.session(budgets, &counts);
+            assert_rejected_in_the_reduction(session.prove_and_verify());
+        }
+    }
+}
+
+/// Every stack a group is cut into has its claims pushed: a committed
+/// column that is off, or a weight, with the GKR run on the true one, in
+/// the first and the last entry of every stack.
+#[test]
+fn gkr_on_fake_leaves_of_any_stack_cut_for_the_budget_is_rejected() {
+    let columns = TallGroups::new();
+    let counts = columns.counts();
+    // The unit columns are in stacks of 4, 4, 2 and 1, the weighted ones in
+    // stacks of 2, 2 and 1.
+    for at in [0, 3, 4, 7, 8, 9, 10] {
+        let mut committed = TallGroups::new();
+        committed.units[at][2] = F::from(50u64);
+        let session = committed.session((100, 100), &counts);
+        let evals = BTreeMap::from([(session.ids[4 + at], columns.units[at].clone())]);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+    }
+    for at in 0..5 {
+        let mut committed = TallGroups::new();
+        committed.weighted[at][2] = F::from(50u64);
+        let session = committed.session((100, 100), &counts);
+        let evals = BTreeMap::from([(session.ids[15 + at], columns.weighted[at].clone())]);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+
+        let mut committed = TallGroups::new();
+        committed.weights[at][2] += F::one();
+        let session = committed.session((100, 100), &counts);
+        let evals = BTreeMap::from([(session.ids[20 + at], columns.weights[at].clone())]);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+    }
+}
+
+/// Two sides that cut their stacks for different budgets hold different
+/// statements, and the proof of one is refused by the other, whichever has
+/// the taller stacks.
+#[test]
+fn stacks_cut_for_another_budget_than_the_verifiers_are_rejected() {
+    let columns = TallGroups::new();
+    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+    for budgets in [
+        (100, unsplit),
+        (unsplit, 100),
+        (100, 48),
+        (48, 100),
+        (48, 20),
+        (20, 48),
+        (20, unsplit),
+        (unsplit, 20),
+    ] {
+        let mut session = columns.honest(budgets);
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert_rejected_in_the_reduction(session.verify(&proof));
+    }
+}
+
+/// How tall a stack may be: as many doublings of one entry as stay within
+/// the budget, at 3 field elements per fraction with unit numerators and 4
+/// otherwise, and none for an entry that is above the budget by itself.
+#[test]
+fn stack_height_is_what_the_budget_has_room_for() {
+    // 32 rows: 96 with unit numerators, 128 without.
+    assert_eq!(stack_log_within(95, 5, true), 0);
+    assert_eq!(stack_log_within(96, 5, true), 0);
+    assert_eq!(stack_log_within(191, 5, true), 0);
+    assert_eq!(stack_log_within(192, 5, true), 1);
+    assert_eq!(stack_log_within(383, 5, true), 1);
+    assert_eq!(stack_log_within(384, 5, true), 2);
+    assert_eq!(stack_log_within(255, 5, false), 0);
+    assert_eq!(stack_log_within(256, 5, false), 1);
+    assert_eq!(stack_log_within(511, 5, false), 1);
+    assert_eq!(stack_log_within(512, 5, false), 2);
+    // One row.
+    for (budget, unit, weighted) in [(0, 0, 0), (2, 0, 0), (3, 0, 0), (6, 1, 0), (8, 1, 1)] {
+        assert_eq!(stack_log_within(budget, 0, true), unit);
+        assert_eq!(stack_log_within(budget, 0, false), weighted);
+    }
+    // Sizes no budget and no machine has room for.
+    for unit in [true, false] {
+        assert_eq!(stack_log_within(usize::MAX, usize::MAX, unit), 0);
+        assert_eq!(stack_log_within(0, usize::MAX, unit), 0);
+        let most = (usize::MAX / if unit { 3 } else { 4 }).ilog2() as usize;
+        assert_eq!(stack_log_within(usize::MAX, 0, unit), most);
+    }
+}
+
+/// The default budget has room for an instance of 2^26 fractions of either
+/// kind and no more, so it cuts a stack only there. Nothing in these tests
+/// comes near: their layouts under the default are those under no budget
+/// at all.
+#[test]
+fn default_run_budget_cuts_stacks_above_2_pow_26_fractions_only() {
+    let default = SharedArgConfig::default().logup_gkr_run_budget;
+    for unit in [true, false] {
+        for claim_nv in 0..=26 {
+            assert_eq!(stack_log_within(default, claim_nv, unit), 26 - claim_nv);
+        }
+        assert_eq!(stack_log_within(default, 27, unit), 0);
+    }
+
+    let sessions = [
+        TallGroups::new().honest((default, default)),
+        MixedColumns::new().honest((default, default)),
+    ];
+    for session in sessions {
+        let tracker = session.prover.tracker();
+        let unbounded = plan_instances(&*tracker.borrow(), &session.relations, usize::MAX);
+        assert_eq!(session.plan(), unbounded.unwrap());
+    }
+}
+
+/// The layout a budget gives, stacks and runs, is part of the statement the
+/// verifier checks: a proof laid out by another budget than the verifier's
+/// is rejected at the first run that differs, whichever side has the finer
+/// layout. Budgets that give the same layout are the same statement.
 #[test]
 fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
     let columns = MixedColumns::new();
@@ -1500,21 +1848,32 @@ fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
     };
 
     for budgets in [
+        // The stacks cut on one side and whole on the other.
         (100, unsplit),
         (unsplit, 100),
-        // `d` in the first run or in a later one.
+        // The stack of the tables cut on one side only.
+        (100, 128),
+        (128, 100),
+        // That of `b` and `p`.
+        (191, 192),
+        (192, 191),
+        // The same instances from here on. `d` in the first run or in a
+        // later one.
         (196, 195),
         (195, 196),
-        // `q` in the first run or in the last.
-        (100, 164),
-        (164, 100),
+        // `b` in the first run or in one of its own.
+        (100, 120),
+        (120, 100),
         (0, 100),
         (100, 0),
     ] {
         assert_rejected_in_the_reduction(run(budgets));
     }
-    run((100, 163)).unwrap();
+    // All columns apart, then the tables stacked, then everything in one
+    // run.
+    run((100, 119)).unwrap();
     run((100, 68)).unwrap();
+    run((132, 151)).unwrap();
     run((unsplit, usize::MAX)).unwrap();
 }
 
@@ -1522,7 +1881,7 @@ fn gkr_budget_mismatch_between_prover_and_verifier_is_rejected() {
 /// which the budget splits like any other: a stack of two sub columns, the
 /// wider sub column stacked with one side of a permutation, the table, and
 /// the other side of the permutation, with weighted sizes 48, 192, 64 and
-/// 96.
+/// 96. A budget below 192 has the wide sub column and its neighbour apart.
 #[test]
 fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     let table = fv(0..16);
@@ -1530,10 +1889,18 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     let p = fv((0..32).map(|i| i + 100));
     let q = fv((0..32).map(|i| (i * 13 + 5) % 32 + 100));
     let shape = gkr_shape(&[(4, true), (6, true), (4, false), (5, true)]);
-    // Were the wide sub column and its neighbour of the permutation not in
-    // one instance, the batch would have five and a longer proof.
-    let apart = gkr_shape(&[(4, true), (5, true), (4, false), (5, true), (5, true)]);
+    // With the wide sub column and its neighbour of the permutation not in
+    // one instance, the batch has five and a longer proof.
+    let apart = gkr_shape(&[(4, true), (5, true), (5, true), (4, false), (5, true)]);
     assert!(proof_len(&shape) < proof_len(&apart));
+    let columns = gkr_shape(&[
+        (3, true),
+        (3, true),
+        (5, true),
+        (5, true),
+        (4, false),
+        (5, true),
+    ]);
 
     let run = |budget: usize, subs: &[Vec<F>; 3], q: &[F]| -> SnarkResult<SNARKProof<B>> {
         let (mut prover, mut verifier) = setup_with_budgets(budget, budget);
@@ -1576,18 +1943,22 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     };
 
     let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
-    for (budget, runs) in [
-        (unsplit, vec![vec![0, 1, 2, 3]]),
+    for (budget, shape, runs) in [
+        (unsplit, &shape, vec![vec![0, 1, 2, 3]]),
         // The table has no room beside the two stacks, by one element.
-        (303, vec![vec![0, 1], vec![2, 3]]),
+        (303, &shape, vec![vec![0, 1], vec![2, 3]]),
         // The stack of the two relations opens a run and the instances
         // after it go back to the first.
-        (239, vec![vec![0, 2, 3], vec![1]]),
-        (200, vec![vec![0, 2], vec![1], vec![3]]),
-        (0, vec![vec![0], vec![1], vec![2], vec![3]]),
+        (239, &shape, vec![vec![0, 2, 3], vec![1]]),
+        (200, &shape, vec![vec![0, 2], vec![1], vec![3]]),
+        // That stack is above the budget and cut in two. The table fills
+        // the first run.
+        (112, &apart, vec![vec![0, 3], vec![1], vec![2], vec![4]]),
+        // Nothing fits, and every column is an instance and a run.
+        (0, &columns, (0..6).map(|instance| vec![instance]).collect()),
     ] {
         let proof = run(budget, &subs, &q).unwrap();
-        assert_runs(&proof, &shape, &runs);
+        assert_runs(&proof, shape, &runs);
 
         // A value outside the table in either stack, whichever run its
         // table is in, and a `q` that repeats a row.
@@ -1857,7 +2228,7 @@ fn keyed_e2e(
         gxs: gxs.iter().map(KeyedTerm::from).collect(),
         mgxs: mgxs.iter().map(|m| m.as_ref().map(Into::into)).collect(),
     };
-    let plan = plan_instances(&*prover.tracker().borrow(), &[relation]).unwrap();
+    let plan = plan_of(&prover.tracker().borrow(), &[relation]).unwrap();
     KeyedSumcheck::<B>::prove(
         &mut prover,
         KeyedSumcheckProverInput {
@@ -3055,7 +3426,7 @@ fn multiplicities_chosen_after_gamma_are_rejected() {
         {
             let tracker = prover.tracker();
             let mut tracker = tracker.borrow_mut();
-            let plan = plan_instances(&*tracker, &[relation]).unwrap();
+            let plan = plan_of(&tracker, &[relation]).unwrap();
             let batch = Batch {
                 runs: vec![(0..plan.len()).collect()],
                 plan,
@@ -3141,7 +3512,7 @@ fn gammas_are_drawn_per_relation_in_order_after_every_multiplicity() {
         {
             let tracker = prover.tracker();
             let mut tracker = tracker.borrow_mut();
-            let plan = plan_instances(&*tracker, &relations).unwrap();
+            let plan = plan_of(&tracker, &relations).unwrap();
             // Both instances hold entries of both relations.
             assert_eq!(plan[0].relations, [0, 0, 1, 1]);
             assert_eq!(plan[1].relations, [0, 1]);
@@ -3339,7 +3710,7 @@ fn keyed_sum_naming_an_untracked_polynomial_is_refused() {
         gxs: vec![KeyedTerm::Poly(session.ids[1])],
         mgxs: vec![None],
     };
-    assert!(plan_instances(&*session.prover.tracker().borrow(), &[relation]).is_err());
+    assert!(plan_of(&session.prover.tracker().borrow(), &[relation]).is_err());
 }
 
 /// A weighted column that stands alone on the `f` side has a claim on the
