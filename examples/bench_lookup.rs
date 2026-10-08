@@ -3,7 +3,15 @@
 //!
 //! Run with:
 //!     cargo run --release --example bench_lookup --features test-utils -- \
-//!         [--header] [--reps N] <shape> <table_log> <sub_log> <n_subs> <mode>
+//!         [--header] [--reps N] [--protocol P] \
+//!         <shape> <table_log> <sub_log> <n_subs> <mode>
+//!
+//! Protocols (`--protocol`), for both sides:
+//!   gkr       LogUp-GKR.
+//!   logup     LogUp with committed helpers.
+//! Without the option the protocol is that of a default configuration: the
+//! one `ARK_PIOP_LOOKUP_PROTOCOL` names, and LogUp-GKR when it is not set.
+//! The option decides when both are given.
 //!
 //! Shapes:
 //!   material  the table `0..2^table_log` is committed; every sub is a
@@ -22,8 +30,9 @@
 //!             committed column and no lookup, so `lookup - control` is the
 //!             cost of the lookups themselves.
 //!
-//! Prints one tab-separated line; `--header` prints the column names first
-//! (alone, when no configuration is given). `build_proof_ms` and `verify_ms`
+//! Prints one tab-separated line, which ends in the protocol the proofs
+//! were made with; `--header` prints the column names first (alone, when no
+//! configuration is given). `build_proof_ms` and `verify_ms`
 //! are minima over the repetitions; a repetition whose `build_proof` took
 //! 30 s or more is the last one. Input commitments are computed once, outside
 //! the timed region. The verifier checks every proof.
@@ -38,7 +47,7 @@ use ark_piop::{
     pcs::PCS,
     prover::{ArgProver, structs::polynomial::TrackedPoly},
     setup::KeyGenerator,
-    types::{CommitmentBinding, TrackerID, artifact::Artifact},
+    types::{CommitmentBinding, LookupProtocol, SharedArgConfig, TrackerID, artifact::Artifact},
     verifier::{
         ArgVerifier,
         structs::oracle::{Oracle, TrackedOracle},
@@ -51,7 +60,7 @@ type F = <B as SnarkBackend>::F;
 type Commitment = <<B as SnarkBackend>::MvPCS as PCS<F>>::Commitment;
 
 const COLUMNS: &str = "shape\ttable_log\tsub_log\tn_subs\tthreads\tmode\tbuild_proof_ms\tverify_ms\t\
-                       proof_bytes\tmv_commitments\tgkr_bytes\tpeak_rss_mb";
+                       proof_bytes\tmv_commitments\tgkr_bytes\tpeak_rss_mb\tprotocol";
 /// A slower `build_proof` is measured once.
 const REPEAT_BELOW_MS: f64 = 30_000.0;
 
@@ -74,6 +83,7 @@ struct Config {
     n_subs: usize,
     mode: Mode,
     reps: usize,
+    protocol: LookupProtocol,
 }
 
 /// A committed input column. The commitment is computed once and handed to
@@ -95,8 +105,10 @@ struct Inputs {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: bench_lookup [--header] [--reps N] <material|tt> <table_log> <sub_log> <n_subs> \
-         <lookup|control>"
+        "usage: bench_lookup [--header] [--reps N] [--protocol <logup|gkr>] <material|tt> \
+         <table_log> <sub_log> <n_subs> <lookup|control>\n\
+         without --protocol, the lookup protocol is the one ARK_PIOP_LOOKUP_PROTOCOL names, and \
+         gkr when it is not set"
     );
     exit(2)
 }
@@ -104,6 +116,7 @@ fn usage() -> ! {
 fn parse_args() -> (bool, Option<Config>) {
     let mut header = false;
     let mut reps = 3;
+    let mut protocol = None;
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -115,6 +128,13 @@ fn parse_args() -> (bool, Option<Config>) {
                     .and_then(|v| v.parse().ok())
                     .filter(|&n: &usize| n > 0)
                     .unwrap_or_else(|| usage())
+            }
+            "--protocol" => {
+                protocol = Some(
+                    args.next()
+                        .and_then(|v| v.parse::<LookupProtocol>().ok())
+                        .unwrap_or_else(|| usage()),
+                )
             }
             _ => positional.push(arg),
         }
@@ -141,6 +161,7 @@ fn parse_args() -> (bool, Option<Config>) {
             _ => usage(),
         },
         reps,
+        protocol: protocol.unwrap_or_else(|| SharedArgConfig::default().lookup_protocol),
     };
     if config.n_subs == 0 {
         usage()
@@ -408,8 +429,21 @@ fn main() {
         status_mb("VmRSS:")
     );
 
+    // An unknown protocol in the environment stops the run here, with or
+    // without `--protocol`.
+    let arg_config = SharedArgConfig {
+        lookup_protocol: config.protocol,
+        ..SharedArgConfig::default()
+    };
+    let prover = || {
+        ArgProver::new_from_pk_with_config(pk.clone(), arg_config.clone()).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            exit(2)
+        })
+    };
+
     let start = Instant::now();
-    let inputs = build_inputs(&config, &ArgProver::new_from_pk(pk.clone()));
+    let inputs = build_inputs(&config, &prover());
     eprintln!(
         "inputs: {} commitments in {:.1} s, rss {} MiB",
         inputs.shared.len() + inputs.data.len(),
@@ -422,8 +456,9 @@ fn main() {
         let run = run_once(
             &config,
             &inputs,
-            ArgProver::new_from_pk(pk.clone()),
-            ArgVerifier::new_from_vk(vk.clone()),
+            prover(),
+            ArgVerifier::new_from_vk_with_config(vk.clone(), arg_config.clone())
+                .expect("the prover was given this configuration"),
         );
         eprintln!(
             "rep {rep}: build_proof {:.1} ms, verify {:.1} ms",
@@ -445,7 +480,7 @@ fn main() {
     let best = best.expect("at least one repetition");
 
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{:.1}\t{:.1}\t{}\t{}\t{}\t{}\t{}",
         match config.shape {
             Shape::Material => "material",
             Shape::Tt => "tt",
@@ -464,5 +499,9 @@ fn main() {
         best.mv_commitments,
         best.gkr_bytes,
         status_mb("VmHWM:"),
+        match config.protocol {
+            LookupProtocol::LogUp => "logup",
+            LookupProtocol::LogUpGkr => "gkr",
+        },
     );
 }
