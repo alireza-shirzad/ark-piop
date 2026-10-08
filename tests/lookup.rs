@@ -764,6 +764,34 @@ fn keyed_sumcheck_constant_columns_and_multiplicities() {
     });
 }
 
+/// A constant column under a constant multiplicity, and under weights with
+/// fewer rows than it has. The term runs over the larger of the two: the
+/// column's value is counted once per row of that, with the weight the row
+/// has as the weights repeat.
+#[test]
+fn keyed_sumcheck_constant_column_under_constant_and_narrower_multiplicities() {
+    under_each_protocol(|_| {
+        let table = |sevens: u64| {
+            let counts = fv((0..16).map(|i| if i == 7 { sevens } else { 0 }));
+            [(fv(0..16), Some(counts))]
+        };
+        // `rows` sevens, weighed 3 on each of `weight_rows` rows.
+        for (rows, weight_rows) in [(8, 8), (8, 16), (16, 8), (1, 4), (4, 1)] {
+            let column = [(fv(vec![7; rows]), Some(fv(vec![3; weight_rows])))];
+            let weight = 3 * rows.max(weight_rows) as u64;
+            assert_accepted(keyed_e2e(&column, &table(weight)));
+            for other in [3 * rows as u64 - 1, 3 * weight_rows as u64 + 1, 2 * weight] {
+                assert_rejected(keyed_e2e(&column, &table(other)));
+            }
+        }
+
+        // 16 sevens under 8 weights that add up to 36, each used twice.
+        let column = [(fv([7; 16]), Some(fv(1..9)))];
+        assert_accepted(keyed_e2e(&column, &table(72)));
+        assert_rejected(keyed_e2e(&column, &table(36)));
+    });
+}
+
 /// As `lookup_constant_sub_wider_than_every_commitment`, through the PIOP.
 #[test]
 fn keyed_sumcheck_constant_column_wider_than_every_commitment() {
@@ -2644,6 +2672,7 @@ fn proof_bytes_with_a_flipped_protocol_tag_do_not_decode() {
     let (mut prover, _) = setup_under(LookupProtocol::LogUpGkr, LookupProtocol::LogUpGkr);
     let bytes = prover.build_proof().unwrap().to_bytes().unwrap();
     let tag = *bytes.last().unwrap();
+    assert_eq!(tag, 1);
     assert!(SNARKProof::<B>::from_bytes(&bytes).is_ok());
     for flipped in [tag ^ 1, tag ^ 2, 0xff] {
         let mut bytes = bytes.clone();
@@ -2754,6 +2783,7 @@ fn logup_proof_with_a_flipped_protocol_tag_is_rejected() {
         // their table, and for each side of the keyed sum.
         assert_eq!(logup_sums(proof).len(), 4);
         let tag_at = bytes.len() - 1 - 8 - 32 * 4;
+        assert_eq!(bytes[tag_at], 0);
         match to {
             Some(to) => bytes[tag_at] = to,
             None => bytes[tag_at] ^= 1,

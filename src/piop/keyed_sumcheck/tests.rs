@@ -10,7 +10,7 @@ use std::{cell::Cell, collections::BTreeMap, sync::Arc};
 
 use ark_ff::{Field, One, Zero};
 use ark_poly::Polynomial;
-use ark_serialize::{CanonicalSerialize, Compress};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
 use either::Either;
 use indexmap::IndexMap;
 
@@ -46,6 +46,7 @@ use crate::{
         structs::{SNARKPk, SNARKVk},
     },
     tracker_core::TrackerCore,
+    transcript::Tr,
     types::{
         CommitmentBinding, LookupMessages, LookupProtocol, SharedArgConfig, SumcheckSubproof,
         TrackerID, artifact::Artifact, claim::TrackerZerocheckClaim,
@@ -3846,6 +3847,191 @@ fn logup_gamma_among_the_rows_of_a_column_is_a_prover_error() {
     }
 }
 
+/// The count of sums read belongs to one proof: handed a proof again, by
+/// reference or by value, the verifier reads its sums from the first, and
+/// one that had verified has read none of them.
+#[test]
+fn setting_a_proof_starts_the_logup_sums_over() {
+    // The constant column is wider than its weights here.
+    let mut session = five_sum_session(2);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    let first = proof.lookup_messages.sums()[0];
+
+    for by_value in [false, true] {
+        let mut verifier = session.verify_reduction(&proof).unwrap();
+        let next_sum = |verifier: &ArgVerifier<B>| verifier.tracker().borrow_mut().next_logup_sum();
+        assert_verifier_error(next_sum(&verifier).unwrap_err());
+        if by_value {
+            verifier.set_proof(proof.clone());
+        } else {
+            verifier.set_proof_ref(&proof);
+        }
+        assert_eq!(next_sum(&verifier).unwrap(), first);
+    }
+
+    let mut verifier = session.verify_reduction(&proof).unwrap();
+    verifier.fork().verify().unwrap();
+    verifier.set_proof_ref(&proof);
+    assert_verifier_error(verifier.verify().unwrap_err());
+}
+
+/// As [`multiplicities_chosen_after_gamma_are_rejected`], under LogUp: the
+/// prover draws `gamma`, commits to multiplicities that balance a sub
+/// column outside the table under it, and then to the helpers. Its helpers
+/// are those of its columns and its sums those of its helpers; it is
+/// consistent with a verifier that would draw `gamma` before absorbing the
+/// multiplicities.
+#[test]
+fn logup_multiplicities_chosen_after_gamma_are_rejected() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let table = fv(0..8);
+    // The lookup reduced by hand: the multiplicities committed before or
+    // after `gamma`, then the term of the sub column and the table's.
+    let run = |sub: &[F], gamma_first: bool| -> SnarkResult<()> {
+        let (mut prover, mut verifier) = setup();
+        let table_id = commit(&mut prover, &table).id();
+        let sub_id = commit(&mut prover, sub).id();
+        let (gamma, counts_id) = if gamma_first {
+            let gamma = prover.get_and_append_challenge(b"gamma")?;
+            let sub_side: F = sub.iter().map(|v| (*v - gamma).inverse().unwrap()).sum();
+            let mut counts = vec![F::zero(); table.len()];
+            counts[0] = sub_side * (table[0] - gamma);
+            (gamma, commit(&mut prover, &counts).id())
+        } else {
+            let counts = commit(&mut prover, &tally(&table, &[(sub, None)])).id();
+            (prover.get_and_append_challenge(b"gamma")?, counts)
+        };
+        {
+            let tracker = prover.tracker();
+            let mut tracker = tracker.borrow_mut();
+            let mut party = logup::ProvingParty {
+                evals: ColumnEvals::new(),
+            };
+            let terms = [
+                logup::Term::Single {
+                    col: (Either::Left(sub_id), 3),
+                    mult: None,
+                },
+                logup::Term::Single {
+                    col: (Either::Left(table_id), 3),
+                    mult: Some((Either::Left(counts_id), 3)),
+                },
+            ];
+            let [sub_sum, table_sum] =
+                terms.map(|term| logup::reduce_term(&mut *tracker, &mut party, &term, gamma));
+            // The two sides balance under this `gamma`.
+            assert_eq!(sub_sum?, table_sum?);
+        }
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(table_id)?;
+        verifier.track_mv_com_by_id(sub_id)?;
+        verifier.add_mv_lookup_claim(table_id, sub_id)?;
+        verifier.verify()
+    };
+
+    let inside = in_table(3, 8, 1);
+    let mut outside = inside.clone();
+    outside[2] = F::from(100u64);
+    assert_verifier_error(run(&outside, true).unwrap_err());
+    // Done by hand in the verifier's order, the reduction is the real one.
+    run(&inside, false).unwrap();
+}
+
+/// Under LogUp a relation draws its `gamma` when its turn comes: after the
+/// multiplicities of every relation, and after the helpers and sums of the
+/// relations before it. Two lookups reduced by hand in that order are the
+/// real reduction. They are not with both gammas drawn ahead of the first
+/// helper, which is where LogUp-GKR draws them, in either order, or with
+/// the first drawn before the second table's multiplicities are committed.
+#[test]
+fn logup_gammas_are_drawn_per_relation_in_turn_after_every_multiplicity() {
+    #[derive(Clone, Copy)]
+    enum Order {
+        AsTheVerifier,
+        BothAhead,
+        BothAheadExchanged,
+        BetweenTheMultiplicities,
+    }
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let columns = {
+        let subs = two_lookup_subs();
+        two_lookup_columns(&subs, &subs)
+    };
+    let run = |order: Order| -> SnarkResult<()> {
+        let (mut prover, mut verifier) = setup();
+        let mut commit_column = |at: usize| commit(&mut prover, &columns[at]).id();
+        let tables = [0, 2].map(&mut commit_column);
+        let subs = [4, 5, 6, 7].map(&mut commit_column);
+        let first_counts = commit(&mut prover, &columns[1]).id();
+        // The gammas drawn before their turn, by relation.
+        let mut ahead = Vec::new();
+        if matches!(order, Order::BetweenTheMultiplicities) {
+            ahead.push(prover.get_and_append_challenge(b"gamma")?);
+        }
+        let counts = [first_counts, commit(&mut prover, &columns[3]).id()];
+        if matches!(order, Order::BothAhead | Order::BothAheadExchanged) {
+            ahead.push(prover.get_and_append_challenge(b"gamma")?);
+            ahead.push(prover.get_and_append_challenge(b"gamma")?);
+        }
+        if matches!(order, Order::BothAheadExchanged) {
+            ahead.swap(0, 1);
+        }
+        let relations: Vec<KeyedSumRelation<F>> = (0..2)
+            .map(|r| KeyedSumRelation {
+                fxs: subs[2 * r..2 * r + 2]
+                    .iter()
+                    .map(|sub| KeyedTerm::Poly(*sub))
+                    .collect(),
+                mfxs: vec![None; 2],
+                gxs: vec![KeyedTerm::Poly(tables[r])],
+                mgxs: vec![Some(KeyedTerm::Poly(counts[r]))],
+            })
+            .collect();
+        {
+            let tracker = prover.tracker();
+            let mut tracker = tracker.borrow_mut();
+            let tracker = &mut *tracker;
+            let plan = logup::plan_relations(tracker, &relations).unwrap();
+            let mut party = logup::ProvingParty {
+                evals: ColumnEvals::new(),
+            };
+            for (relation, sides) in plan.iter().enumerate() {
+                let gamma = match ahead.get(relation) {
+                    Some(gamma) => *gamma,
+                    None => tracker.get_and_append_challenge(b"gamma")?,
+                };
+                // The two sub columns share a helper; the table has its own.
+                assert_eq!((sides[0].len(), sides[1].len()), (1, 1));
+                for term in sides.iter().flatten() {
+                    logup::reduce_term(tracker, &mut party, term, gamma)?;
+                }
+            }
+        }
+        let proof = prover.build_proof()?;
+
+        verifier.set_proof_ref(&proof);
+        for id in tables.iter().chain(&subs) {
+            verifier.track_mv_com_by_id(*id)?;
+        }
+        for (r, sub) in subs.iter().enumerate() {
+            verifier.add_mv_lookup_claim(tables[r / 2], *sub)?;
+        }
+        verifier.verify()
+    };
+
+    run(Order::AsTheVerifier).unwrap();
+    for order in [
+        Order::BothAhead,
+        Order::BothAheadExchanged,
+        Order::BetweenTheMultiplicities,
+    ] {
+        assert_verifier_error(run(order).unwrap_err());
+    }
+}
+
 /// Which columns share a helper: two neighbours of one size on one side,
 /// neither with a multiplicity, each column in one pair at most. The proof
 /// carries a sum per helper.
@@ -3991,6 +4177,51 @@ fn logup_gkr_proof_is_the_one_from_before_the_protocol_was_a_choice() {
         .unwrap();
     assert_eq!(bound.len(), bytes.len());
     assert_ne!(bound, bytes);
+}
+
+/// The byte that stands for a protocol in a proof and in the transcript:
+/// 0 for LogUp, 1 for LogUp-GKR. Proofs and challenges depend on the two
+/// values, not only on their being different. In a proof the byte is all
+/// LogUp-GKR has there, and LogUp follows it with its sums, their number
+/// first.
+#[test]
+fn lookup_protocol_is_the_byte_0_for_logup_and_1_for_gkr() {
+    let challenge = |transcript: &mut Tr<F>| transcript.get_and_append_challenge(b"probe");
+    for (protocol, tag) in [(LookupProtocol::LogUp, 0), (LookupProtocol::LogUpGkr, 1)] {
+        assert_eq!(protocol.tag(), tag);
+        let (mut bound, mut by_hand) = (Tr::<F>::new(b"tags"), Tr::<F>::new(b"tags"));
+        protocol.bind(&mut bound).unwrap();
+        by_hand.append_message(b"lookup protocol", &[tag]).unwrap();
+        assert_eq!(
+            challenge(&mut bound).unwrap(),
+            challenge(&mut by_hand).unwrap()
+        );
+    }
+
+    let encoded = |messages: &LookupMessages<F>| {
+        let mut bytes = Vec::new();
+        messages.serialize_compressed(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), messages.serialized_size(Compress::Yes));
+        bytes
+    };
+    let decoded = |bytes: &[u8]| LookupMessages::<F>::deserialize_compressed(bytes);
+    let sums = fv([5, 6]);
+    let mut two_sums = vec![0, 2, 0, 0, 0, 0, 0, 0, 0];
+    for sum in &sums {
+        sum.serialize_compressed(&mut two_sums).unwrap();
+    }
+    assert_eq!(two_sums.len(), 1 + 8 + 2 * 32);
+    let cases = [
+        (LookupMessages::LogUpGkr, vec![1]),
+        (LookupMessages::LogUp { sums: Vec::new() }, [0; 9].to_vec()),
+        (LookupMessages::LogUp { sums }, two_sums),
+    ];
+    for (messages, bytes) in cases {
+        assert_eq!(encoded(&messages), bytes);
+        assert_eq!(decoded(&bytes).unwrap(), messages);
+    }
+    assert!(decoded(&[2]).is_err());
+    assert!(decoded(&[]).is_err());
 }
 
 // ─── Proof plumbing ──────────────────────────────────────────────────────
