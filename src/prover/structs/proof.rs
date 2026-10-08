@@ -17,7 +17,12 @@ use crate::{
 /// v3: `SNARKProof.logup_gkr_subproofs` carries the LogUp-GKR runs. Their
 /// message shapes are part of the format: changing what a
 /// [`LogupGkrProof`] holds per round or per layer is another bump.
-pub const PROOF_ENCODING_VERSION: u8 = 3;
+///
+/// v4: a LogUp-GKR run is one flat list of messages: the first layer of
+/// every instance in place of its root, two coefficients per sumcheck round
+/// in place of three evaluations, and each gate where its instance runs out
+/// of variables.
+pub const PROOF_ENCODING_VERSION: u8 = 4;
 use crate::{
     pcs::PCS,
     piop::logup_gkr::LogupGkrProof,

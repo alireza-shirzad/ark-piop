@@ -24,7 +24,7 @@ use crate::{
     piop::{
         PIOP,
         logup_gkr::{
-            GkrClaims,
+            GkrClaims, GkrShape, proof_len,
             tests::{Deviation, Fault, naive_prove_batch},
         },
         lookup_check::multiplicities_by_sorting,
@@ -329,6 +329,11 @@ impl Session {
         plan_instances(&*self.prover.tracker().borrow(), &self.relations).unwrap()
     }
 
+    /// The instances of the batch as the GKR is told about them.
+    fn shape(&self) -> Vec<GkrShape> {
+        self.plan().iter().map(InstancePlan::shape).collect()
+    }
+
     /// Mirrors the statement and the reduction of `proof` on a copy of the
     /// verifier, so that several proofs can be put to the same statement.
     /// Returns the copy as the reduction left it.
@@ -460,19 +465,25 @@ fn gkr_on_fake_numerators_with_true_multiplicity_claim_is_rejected() {
     assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
 }
 
-/// The masks of the last iteration are the GKR's claims on the input
-/// layers, and nothing inside the GKR checks them. The prover moves one of
-/// them along a direction that keeps its layer check true and carries on
-/// honestly from there. A unit-numerator instance sends two values there,
-/// the others four.
+/// The masks of the input layers are the GKR's claims on them, and nothing
+/// inside the GKR checks them. The prover moves one of them along a
+/// direction that keeps its layer check true and carries on honestly from
+/// there. A unit-numerator instance sends two values there, the others
+/// four.
 #[test]
 fn tampered_last_mask_of_a_gkr_subproof_is_rejected() {
     let table = fv(0..8);
-    for sub_nv in [3, 2] {
+    // Three iterations, of 0, 1 and 2 rounds of two coefficients, and four
+    // values per layer for the table. The sub column sends four per layer
+    // but its last.
+    for (sub_nv, messages) in [(3, 6 + 12 + 10), (2, 6 + 12 + 6)] {
         let sub = in_table(sub_nv, 8, 1);
-        for (instance, mask_len) in [(0, 2), (1, 4)] {
+        for instance in [0, 1] {
             let subs = std::slice::from_ref(&sub);
             let session = lookup_session(&table, subs, subs);
+            let shape = session.shape();
+            assert_eq!((shape[0].n_vars, shape[0].numerator_is_one), (sub_nv, true));
+            assert_eq!((shape[1].n_vars, shape[1].numerator_is_one), (3, false));
             // Every instance reaches its input layer in the last iteration.
             let deviation = Deviation::Mask {
                 iteration: 2,
@@ -483,10 +494,43 @@ fn tampered_last_mask_of_a_gkr_subproof_is_rejected() {
                 session.prove_deviating(deviation)
             });
             if let Some(proof) = proof {
-                let masks = proof.logup_gkr_subproofs[0].masks.last().unwrap();
-                assert_eq!(masks[instance].len(), mask_len);
+                assert_eq!(proof.logup_gkr_subproofs[0].messages.len(), messages);
             }
         }
+    }
+}
+
+/// The root of an instance is not sent: the verifier works it out from the
+/// instance's first layer. For two fractions that layer is the input, and
+/// a prover can send another pair of fractions with the same sum. The roots
+/// then balance as they should, and the forged pair is the GKR's claim on
+/// the input, which nothing inside the GKR checks.
+#[test]
+fn forged_first_layer_of_a_two_row_instance_is_rejected() {
+    let table = fv(0..8);
+    let keys = fv([5, 2]);
+    // Without weights the instance has unit numerators and its first layer
+    // is the two denominators; with weights it is two whole fractions.
+    for weights in [None, Some(fv([3, 4]))] {
+        let entries = [(&keys[..], weights.as_deref())];
+        let mut columns = vec![table.clone(), tally(&table, &entries), keys.clone()];
+        columns.extend(weights.clone());
+        let f = vec![(2, weights.as_ref().map(|_| 3))];
+        let session = || Session::new(&columns, &[], &[(f.clone(), vec![(0, Some(1))])]);
+        let shape = session().shape();
+        assert_eq!(
+            (shape[0].n_vars, shape[0].numerator_is_one),
+            (1, weights.is_none())
+        );
+        session().prove_and_verify().unwrap();
+
+        // The instance joins in the last of the table's three iterations.
+        let deviation = Deviation::Mask {
+            iteration: 2,
+            instance: 0,
+            delta: F::from(5u64),
+        };
+        assert_stopped_by_the_input_claims(session(), |session| session.prove_deviating(deviation));
     }
 }
 
@@ -581,7 +625,9 @@ fn named_all_ones_multiplicity_is_still_a_values_instance() {
     assert!(session.plan()[0].mults.is_some());
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(proof.logup_gkr_subproofs[0].masks[2][0].len(), 4);
+    // Four values on each of the three layers of both instances; without
+    // numerators of its own the first would send two less.
+    assert_eq!(proof.logup_gkr_subproofs[0].messages.len(), 6 + 12 + 12);
     session.verify(&proof).unwrap();
 }
 
@@ -738,13 +784,37 @@ fn weighted_sizes(plan: &[InstancePlan<F>]) -> Vec<usize> {
         .collect()
 }
 
-/// How many instances each GKR subproof of `proof` covers.
-fn run_lengths(proof: &SNARKProof<B>) -> Vec<usize> {
-    proof
+/// The statement of a GKR batch from `(variables, numerators are one)` per
+/// instance.
+fn gkr_shape(batch: &[(usize, bool)]) -> Vec<GkrShape> {
+    batch
+        .iter()
+        .map(|&(n_vars, numerator_is_one)| GkrShape {
+            n_vars,
+            numerator_is_one,
+        })
+        .collect()
+}
+
+/// How many instances each GKR subproof of `proof` covers, the batch being
+/// the instances `shape` in order. A subproof is its messages and nothing
+/// else, and there are more of them with every instance a run takes in, so
+/// their number tells where a run ends.
+fn run_lengths(proof: &SNARKProof<B>, shape: &[GkrShape]) -> Vec<usize> {
+    let mut rest = shape;
+    let lengths = proof
         .logup_gkr_subproofs
         .iter()
-        .map(|subproof| subproof.roots.len())
-        .collect()
+        .map(|subproof| {
+            let run = (1..=rest.len())
+                .find(|run| proof_len(&rest[..*run]) == Some(subproof.messages.len()))
+                .expect("a subproof that is no run of the batch");
+            rest = &rest[run..];
+            run
+        })
+        .collect();
+    assert!(rest.is_empty(), "instances without a subproof");
+    lengths
 }
 
 fn assert_rejected_in_the_reduction(res: Result<(), Rejected>) {
@@ -841,12 +911,13 @@ fn gkr_batch_split_small_budget() {
         weighted_sizes(&session.plan()),
         [24, 96, 32, 64, 12, 64, 96, 96]
     );
+    let shape = session.shape();
     session.prove_with(ColumnEvals::new()).unwrap();
     let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
     let proof = session.prover.build_proof().unwrap();
     // `c` and the first table fill a run exactly; `d` shares one with the
     // second table.
-    assert_eq!(run_lengths(&proof), [1, 1, 2, 2, 1, 1]);
+    assert_eq!(run_lengths(&proof, &shape), [1, 1, 2, 2, 1, 1]);
     let verifier = session.verify_reduction(&proof).unwrap();
     assert_in_sync(&after_reduction, &verifier);
     verifier.verify().unwrap();
@@ -861,7 +932,7 @@ fn gkr_batch_split_small_budget() {
         let mut session = columns.honest((budget, budget));
         session.prove_with(ColumnEvals::new()).unwrap();
         let proof = session.prover.build_proof().unwrap();
-        assert_eq!(run_lengths(&proof), runs);
+        assert_eq!(run_lengths(&proof, &shape), runs);
         session.verify(&proof).unwrap();
     }
 
@@ -925,16 +996,18 @@ fn relations_whose_errors_cancel_across_runs_are_rejected() {
 
     let together = (vec![(0, None), (1, None)], vec![(1, None), (0, None)]);
     let mut session = Session::with_budgets(budgets, &columns, &[together]);
+    let shape = session.shape();
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof), [1, 1]);
+    assert_eq!(run_lengths(&proof, &shape), [1, 1]);
     session.verify(&proof).unwrap();
 
     let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
     let mut session = Session::with_budgets(budgets, &columns, &apart);
+    let shape = session.shape();
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof), [1, 1, 1, 1]);
+    assert_eq!(run_lengths(&proof, &shape), [1, 1, 1, 1]);
     assert_rejected_in_the_reduction(session.verify(&proof));
 }
 
@@ -980,10 +1053,11 @@ fn gkr_single_instance_over_budget() {
         (usize::MAX, vec![6]),
     ] {
         let mut honest = session(budget, &big);
+        let shape = honest.shape();
         honest.prove_with(ColumnEvals::new()).unwrap();
         let after_reduction = ArgProver::new_from_tracker(honest.prover.tracker().borrow().clone());
         let proof = honest.prover.build_proof().unwrap();
-        assert_eq!(run_lengths(&proof), runs, "budget {budget}");
+        assert_eq!(run_lengths(&proof, &shape), runs, "budget {budget}");
         let verifier = honest.verify_reduction(&proof).unwrap();
         assert_in_sync(&after_reduction, &verifier);
         verifier.verify().unwrap();
@@ -1032,6 +1106,7 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     let subs = [in_table(3, 16, 1), in_table(3, 16, 2), in_table(5, 16, 3)];
     let p = fv((0..32).map(|i| i + 100));
     let q = fv((0..32).map(|i| (i * 13 + 5) % 32 + 100));
+    let shape = gkr_shape(&[(4, true), (5, true), (4, false), (5, true), (5, true)]);
 
     let run = |budget: usize, subs: &[Vec<F>; 3], q: &[F]| -> SnarkResult<Vec<usize>> {
         let (mut prover, mut verifier) = setup_with_budgets(budget, budget);
@@ -1070,7 +1145,7 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
         verifier.reduce_lookup_claims()?;
         assert_in_sync(&reduced, &verifier);
         verifier.verify()?;
-        Ok(run_lengths(&proof))
+        Ok(run_lengths(&proof, &shape))
     };
 
     let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
@@ -1131,11 +1206,16 @@ fn same_size_columns_are_stacked_by_binary_decomposition() {
     for n_subs in [1usize, 2, 3, 5, 8, 13] {
         let subs: Vec<Vec<F>> = (0..n_subs).map(|s| in_table(3, 16, s as u64)).collect();
         let proof = lookup_e2e(&table, &subs).unwrap();
-        assert_eq!(proof.logup_gkr_subproofs.len(), 1);
-        assert_eq!(
-            proof.logup_gkr_subproofs[0].roots.len(),
-            n_subs.count_ones() as usize + 1
-        );
+        // A stack of 2^s columns of 8 rows for every binary digit s of
+        // `n_subs`, the largest first, and the table.
+        let mut batch: Vec<(usize, bool)> = (0..usize::BITS as usize)
+            .rev()
+            .filter(|s| n_subs >> s & 1 == 1)
+            .map(|s| (3 + s, true))
+            .collect();
+        batch.push((4, false));
+        assert_eq!(batch.len(), n_subs.count_ones() as usize + 1);
+        assert_eq!(run_lengths(&proof, &gkr_shape(&batch)), [batch.len()]);
 
         // The first and the last column of the largest stack, and the
         // first and the last of the smallest.
@@ -1278,7 +1358,8 @@ fn mixed_signatures_on_one_side_are_grouped_in_order_of_appearance() {
             (Side::G, 4, 0, false, false, false),
         ]
     );
-    assert_eq!(proof.logup_gkr_subproofs[0].roots.len(), plan.len());
+    let shape: Vec<GkrShape> = plan.iter().map(InstancePlan::shape).collect();
+    assert_eq!(run_lengths(&proof, &shape), [plan.len()]);
 
     // One value outside the table, or one weight off, in every group.
     let bad_value = |fs: &mut Vec<KeyedCol>, at: usize| fs[at].0[1] = F::from(16u64);
@@ -1330,7 +1411,8 @@ fn constant_entries_stand_alone_among_stacked_ones() {
             (Side::G, 4, 0, false, false, false),
         ]
     );
-    assert_eq!(proof.logup_gkr_subproofs[0].roots.len(), plan.len());
+    let shape: Vec<GkrShape> = plan.iter().map(InstancePlan::shape).collect();
+    assert_eq!(run_lengths(&proof, &shape), [plan.len()]);
 
     for (constant, weighted_constant, constant_weight) in [(16, 11, 4), (7, 16, 4), (7, 11, 5)] {
         let fs = fs(constant, weighted_constant, constant_weight);
@@ -1645,8 +1727,24 @@ fn both_sides_are_in_step_after_reducing_their_lookup_claims() {
         .unwrap();
     prover.reduce_lookup_claims().unwrap();
     // Three tables: one batch, with the sub columns of each in stacks.
+    // The first table has a pair and a single of 16 rows, a column of 64
+    // and one of 4; the second a pair of 8 rows; the third one column.
     assert_eq!(proof.logup_gkr_subproofs.len(), 3);
-    assert_eq!(proof.logup_gkr_subproofs[2].roots.len(), 5 + 2 + 2);
+    let batch = [
+        (5, true),
+        (4, true),
+        (6, true),
+        (2, true),
+        (4, false),
+        (4, true),
+        (3, false),
+        (5, true),
+        (5, false),
+    ];
+    assert_eq!(
+        Some(proof.logup_gkr_subproofs[2].messages.len()),
+        proof_len(&gkr_shape(&batch))
+    );
 
     verifier.set_proof_ref(&proof);
     let oracles: Vec<TrackedOracle<B>> = committed
@@ -1760,18 +1858,34 @@ fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
         .build_proof()
         .unwrap();
     prover.reduce_lookup_claims().unwrap();
-    assert_eq!(run_lengths(&proof), [3 + 2 + 2]);
-    // The last masks come in instance order, two values where the
-    // numerators are 1 and four otherwise: the two subs and their table,
-    // then the permutation, then the weighted keys.
-    let last_masks: Vec<usize> = proof.logup_gkr_subproofs[0]
-        .masks
-        .last()
-        .unwrap()
-        .iter()
-        .map(Vec::len)
+    // One batch: the two subs and their table, then the permutation, then
+    // the weighted keys, with numerators of their own where a multiplicity
+    // is named.
+    let shape = gkr_shape(&[
+        (4, true),
+        (6, true),
+        (4, false),
+        (5, true),
+        (5, true),
+        (3, false),
+        (3, false),
+    ]);
+    assert_eq!(run_lengths(&proof, &shape), [3 + 2 + 2]);
+    // The subproof opens with the first layer of every instance in instance
+    // order, four values each at these sizes, and a first layer gives its
+    // instance's root. Each relation balances on the roots at its own
+    // places and on no others.
+    let roots: Vec<[F; 2]> = proof.logup_gkr_subproofs[0].messages[..4 * shape.len()]
+        .chunks(4)
+        .map(|mask| [mask[0] * mask[3] + mask[1] * mask[2], mask[2] * mask[3]])
         .collect();
-    assert_eq!(last_masks, [2, 2, 4, 2, 2, 4, 4]);
+    let total = |roots: &[[F; 2]]| roots.iter().map(|[p, q]| *p / q).sum::<F>();
+    assert_eq!(total(&roots[..2]), total(&roots[2..3]));
+    assert_eq!(total(&roots[3..4]), total(&roots[4..5]));
+    assert_eq!(total(&roots[5..6]), total(&roots[6..]));
+    assert_ne!(total(&roots[..1]), total(&roots[2..3]));
+    assert_ne!(total(&roots[2..3]), total(&roots[3..4]));
+    assert_ne!(total(&roots[4..5]), total(&roots[5..6]));
 
     verifier.set_proof_ref(&proof);
     let oracles: Vec<TrackedOracle<B>> = ids
@@ -2003,7 +2117,7 @@ fn proof_with_a_lookup_carries_its_gkr_subproof_through_a_roundtrip() {
     session.prove_with(ColumnEvals::new()).unwrap();
     let proof = session.prover.build_proof().unwrap();
     assert_eq!(proof.logup_gkr_subproofs.len(), 1);
-    assert!(!proof.logup_gkr_subproofs[0].masks.is_empty());
+    assert!(!proof.logup_gkr_subproofs[0].messages.is_empty());
 
     let bytes = proof.to_bytes().unwrap();
     let decoded = SNARKProof::<B>::from_bytes(&bytes).unwrap();
@@ -2313,10 +2427,11 @@ fn gkr_run_budget_counts_a_stack_at_its_full_height() {
     let mut session = Session::with_budgets((100, 100), &columns, &relations);
     assert_eq!(session.plan()[0].stack_log, 2);
     assert_eq!(weighted_sizes(&session.plan()), [96, 32]);
+    let shape = session.shape();
     session.prove_with(ColumnEvals::new()).unwrap();
     let after_reduction = ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
     let proof = session.prover.build_proof().unwrap();
-    assert_eq!(run_lengths(&proof), [1, 1]);
+    assert_eq!(run_lengths(&proof, &shape), [1, 1]);
     let verifier = session.verify_reduction(&proof).unwrap();
     assert_in_sync(&after_reduction, &verifier);
     verifier.verify().unwrap();

@@ -2,7 +2,7 @@
 //! the protocol definition alone (dense evaluation of every layer MLE,
 //! brute-force round polynomials) and shares no code with `prover.rs`.
 
-use std::time::Instant;
+use std::{collections::BTreeMap, ops::Range, time::Instant};
 
 use ark_bn254::Fr;
 use ark_ff::{Field, One, UniformRand, Zero};
@@ -69,25 +69,14 @@ fn mle_eval(table: &[Fr], point: &[Fr]) -> Fr {
         .sum()
 }
 
-fn eq_points(a: &[Fr], b: &[Fr]) -> Fr {
-    assert_eq!(a.len(), b.len());
-    a.iter()
-        .zip(b)
-        .map(|(a, b)| *a * b + (Fr::one() - a) * (Fr::one() - b))
-        .product()
+fn eq_coordinate(a: Fr, b: Fr) -> Fr {
+    a * b + (Fr::one() - a) * (Fr::one() - b)
 }
 
-/// The polynomial of degree below `ys.len()` through `(i, ys[i])`, at `x`.
-fn lagrange_eval(ys: &[Fr], x: Fr) -> Fr {
-    (0..ys.len())
-        .map(|i| {
-            let basis: Fr = (0..ys.len())
-                .filter(|j| *j != i)
-                .map(|j| (x - Fr::from(j as u64)) / (Fr::from(i as u64) - Fr::from(j as u64)))
-                .product();
-            ys[i] * basis
-        })
-        .sum()
+fn eq_points(a: &[Fr], b: &[Fr]) -> Fr {
+    assert_eq!(a.len(), b.len());
+    let coordinates = a.iter().zip(b);
+    coordinates.map(|(a, b)| eq_coordinate(*a, *b)).product()
 }
 
 /// The input claims the statement `shape` over `instances` implies at
@@ -117,33 +106,119 @@ fn root_sum(roots: &[[Fr; 2]]) -> Fr {
     roots.iter().map(|[p, q]| *p / q).sum()
 }
 
+// ─── Layout of a proof ───────────────────────────────────────────────────
+
+/// Where each message sits in the proof of a batch, worked out from the
+/// protocol description in the module docs and not by the code under test.
+struct Layout {
+    /// Per instance, its first layer.
+    first: Vec<Range<usize>>,
+    /// `[iteration][round]`: where the two coefficients of the round start.
+    rounds: Vec<Vec<usize>>,
+    /// `(iteration, instance)`: the mask the instance sends in the
+    /// iteration's sumcheck.
+    masks: BTreeMap<(usize, usize), Range<usize>>,
+    len: usize,
+}
+
+fn layout(shape: &[GkrShape]) -> Layout {
+    let n_max = shape.iter().map(|s| s.n_vars).max().unwrap();
+    let mut len = 0;
+    let mut next = |values: usize| {
+        len += values;
+        len - values..len
+    };
+    let first = shape
+        .iter()
+        .map(|s| match (s.n_vars, s.numerator_is_one) {
+            // The root, and the input layer of two unit-numerator fractions.
+            (0, _) | (1, true) => next(2),
+            _ => next(4),
+        })
+        .collect();
+    let mut rounds = vec![Vec::new()];
+    let mut masks = BTreeMap::new();
+    for t in 1..n_max {
+        let mut starts = Vec::new();
+        for round in 0..t {
+            starts.push(next(2).start);
+            for (i, s) in shape.iter().enumerate() {
+                // The instance is on a layer of `round + 1` variables and
+                // sends the mask of the layer below.
+                if s.n_vars + t == n_max + round + 1 {
+                    let input = round + 2 == s.n_vars;
+                    masks.insert(
+                        (t, i),
+                        next(if input && s.numerator_is_one { 2 } else { 4 }),
+                    );
+                }
+            }
+        }
+        rounds.push(starts);
+    }
+    Layout {
+        first,
+        rounds,
+        masks,
+        len,
+    }
+}
+
+/// The roots a proof gives, read off its first layers.
+fn roots_in(shape: &[GkrShape], proof: &LogupGkrProof<Fr>) -> Vec<[Fr; 2]> {
+    let layout = layout(shape);
+    shape
+        .iter()
+        .zip(&layout.first)
+        .map(|(s, range)| match proof.messages[range.clone()] {
+            [p, q] if s.n_vars == 0 => [p, q],
+            [q0, q1] => [q0 + q1, q0 * q1],
+            [p0, p1, q0, q1] => [p0 * q1 + p1 * q0, q0 * q1],
+            _ => unreachable!(),
+        })
+        .collect()
+}
+
 // ─── Reference prover ────────────────────────────────────────────────────
 
 /// Where a cheating reference prover leaves the protocol.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Deviation {
-    /// The root of `instance` is sent as the equal fraction
+    /// The first layer of `instance` is sent with one fraction written as
+    /// `(scale·p)/(scale·q)`, so that its root is the equal fraction
     /// `(scale·P, scale·Q)`.
     ScaleRoot { instance: usize, scale: Fr },
-    /// The roots of two instances are exchanged, which keeps their sum.
+    /// The first layers of two instances are exchanged, and with them the
+    /// roots, which keeps their sum.
     SwapRoots { a: usize, b: usize },
-    /// `delta·X(X-1)` is added to one round polynomial: it keeps
-    /// `s(0) + s(1)` and changes the polynomial everywhere else.
+    /// `delta` is added to the two coefficients of one round message. The
+    /// constant coefficient is the verifier's to derive, so the polynomial
+    /// still sums to the running claim and is wrong everywhere else.
     RoundPoly {
         iteration: usize,
         round: usize,
+        delta: [Fr; 2],
+    },
+    /// The mask `instance` sends in `iteration` is moved by `delta` along a
+    /// direction that keeps its gate value. In the iteration the instance
+    /// joins in, that mask is its first layer and the move keeps the root.
+    Mask {
+        iteration: usize,
+        instance: usize,
         delta: Fr,
     },
-    /// The mask of `instance` in `iteration` is moved by `delta` along a
-    /// direction that keeps the value of its gate.
-    Mask {
+    /// `delta` is added to one entry of the first fraction of the mask
+    /// `instance` sends in `iteration`, which changes its gate value (and,
+    /// for a first layer, the root).
+    MaskValue {
         iteration: usize,
         instance: usize,
         delta: Fr,
     },
     /// `instance` has arbitrary numerators but is run as a unit-numerator
     /// instance: declared so in the transcript and with its input-layer
-    /// mask (or, on zero variables, its root) sent in that format.
+    /// mask sent without numerators (on zero variables its root is sent as
+    /// it is).
     DeclareOne { instance: usize },
 }
 
@@ -153,9 +228,10 @@ pub(crate) enum Deviation {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Fault {
     pub(crate) deviation: Deviation,
-    /// In every iteration before this one the cheater bends one mask so
-    /// that the layer check passes, carrying its false claim one layer
-    /// down. From this iteration on it sends true masks again.
+    /// In every iteration before this one the cheater bends the first mask
+    /// sent after the last round so that the layer check passes, carrying
+    /// its false claim one layer down. From this iteration on it sends true
+    /// masks again.
     pub(crate) patch_until: usize,
 }
 
@@ -200,9 +276,38 @@ fn gate([p0, p1, q0, q1]: [Fr; 4], lambda: Fr) -> Fr {
     p0 * q1 + p1 * q0 + lambda * q0 * q1
 }
 
+/// A mask as it is sent: without its numerators when the statement says
+/// they are one.
+fn sent(mask: [Fr; 4], short: bool) -> Vec<Fr> {
+    mask[if short { 2 } else { 0 }..].to_vec()
+}
+
+/// The verifier's claim after a round whose message is `[b, c]`: the round
+/// polynomial is `2^free·done + eq(z, X)·(a + b·X + c·X^2)` with `free`
+/// variables still summed over, `a` is what makes its values at 0 and 1 add
+/// up to `claim`, and the new claim is its value at `r`.
+fn claim_after_round(claim: Fr, done: Fr, free: usize, z: Fr, [b, c]: [Fr; 2], r: Fr) -> Fr {
+    let constant = Fr::from(2u64).pow([free as u64]) * done;
+    let a = claim - constant - constant - z * (b + c);
+    constant + eq_coordinate(z, r) * (a + b * r + c * r * r)
+}
+
+/// Adds `need` to the gate value of `mask` by changing one entry of its
+/// second fraction, the denominator when the numerators are not sent
+/// (`short`).
+fn bend_mask(mask: [Fr; 4], short: bool, need: Fr, lambda: Fr) -> [Fr; 4] {
+    let [p0, p1, q0, q1] = mask;
+    if short {
+        let target = gate(mask, lambda) + need;
+        [p0, p1, q0, (target - q0) / (Fr::one() + lambda * q0)]
+    } else {
+        [p0, p1 + need / q0, q0, q1]
+    }
+}
+
 /// Reference prover. With `fault = None` it is the honest prover and also
-/// asserts, by brute force, the identities the protocol rests on (every
-/// round polynomial sums to the running claim, every layer check holds).
+/// asserts, by brute force, the identities the protocol rests on (the shape
+/// of every round polynomial and its sum, every layer check).
 pub(crate) fn naive_prove_batch(
     instances: &[FractionInstance<Fr>],
     tr: &mut Tr<Fr>,
@@ -220,8 +325,13 @@ pub(crate) fn naive_prove_batch(
                 || matches!(deviation, Some(Deviation::DeclareOne { instance }) if instance == i)
         })
         .collect();
+    // Whether instance `i` sends its layer of `vars` variables without
+    // numerators.
+    let short = |i: usize, vars: usize| declared_one[i] && vars == sizes[i];
+    // The iteration an instance joins in.
+    let joins = |i: usize| n_max - sizes[i];
 
-    tr.append_message(DOMAIN_LABEL, b"v1").unwrap();
+    tr.append_message(DOMAIN_LABEL, b"v2").unwrap();
     tr.append_serializable_element(COUNT_LABEL, &(instances.len() as u64))
         .unwrap();
     for (n, one) in sizes.iter().zip(&declared_one) {
@@ -230,178 +340,251 @@ pub(crate) fn naive_prove_batch(
     }
 
     let layers: Vec<_> = instances.iter().map(naive_layers).collect();
-    let mut roots: Vec<[Fr; 2]> = layers
-        .iter()
-        .map(|layers| [layers[0].0[0], layers[0].1[0]])
+    // The first layers as they are sent: the root alone on zero variables.
+    let mut first: Vec<Vec<Fr>> = (0..instances.len())
+        .map(|i| {
+            if sizes[i] == 0 {
+                vec![layers[i][0].0[0], layers[i][0].1[0]]
+            } else {
+                sent(children(&layers[i][1], &[]), short(i, 1))
+            }
+        })
         .collect();
     match deviation {
-        Some(Deviation::ScaleRoot { instance, scale }) => {
-            roots[instance] = roots[instance].map(|value| value * scale);
+        Some(Deviation::ScaleRoot { instance, scale }) => match first[instance][..] {
+            [p, q] if sizes[instance] == 0 => first[instance] = vec![scale * p, scale * q],
+            [p0, p1, q0, q1] => first[instance] = vec![scale * p0, p1, scale * q0, q1],
+            _ => panic!("a first layer without numerators has none to scale"),
+        },
+        Some(Deviation::SwapRoots { a, b }) => {
+            assert_eq!(first[a].len(), first[b].len());
+            assert_eq!(sizes[a].min(1), sizes[b].min(1));
+            first.swap(a, b);
         }
-        Some(Deviation::SwapRoots { a, b }) => roots.swap(a, b),
-        _ => {}
-    }
-    tr.append_serializable_element(ROOTS_LABEL, &roots).unwrap();
-
-    // The claims the verifier holds, which stop being true once the prover
-    // has deviated.
-    let mut claims = roots.clone();
-    let mut point: Vec<Fr> = Vec::new();
-    let mut round_polys = Vec::new();
-    let mut masks = Vec::new();
-    for t in 0..n_max {
-        let lambda = tr.get_and_append_challenge(LAMBDA_LABEL).unwrap();
-        let alpha = tr.get_and_append_challenge(ALPHA_LABEL).unwrap();
-        // (instance, variables of its claimed layer)
-        let active: Vec<(usize, usize)> = (0..instances.len())
-            .filter(|i| sizes[*i] + t >= n_max)
-            .map(|i| (i, sizes[i] + t - n_max))
-            .collect();
-        let weights: Vec<Fr> = active.iter().map(|(i, _)| alpha.pow([*i as u64])).collect();
-        // The batched polynomial G of iteration t at a point of F^t.
-        let g = |y: &[Fr]| -> Fr {
-            active
-                .iter()
-                .zip(&weights)
-                .map(|(&(i, k), weight)| {
-                    let gate = gate(children(&layers[i][k + 1], &y[..k]), lambda);
-                    *weight * eq_points(&point[..k], &y[..k]) * gate
-                })
-                .sum()
-        };
-
-        let mut claim: Fr = active
-            .iter()
-            .zip(&weights)
-            .map(|(&(i, k), weight)| {
-                *weight * Fr::from(1u64 << (t - k)) * (claims[i][0] + lambda * claims[i][1])
-            })
-            .sum();
-        let mut rho: Vec<Fr> = Vec::new();
-        let mut rounds = Vec::new();
-        for j in 0..t {
-            let free = t - 1 - j;
-            let s = |x: u64| -> Fr {
-                (0..1u64 << free)
-                    .map(|bits| {
-                        let mut y = rho.clone();
-                        y.push(Fr::from(x));
-                        y.extend((0..free).map(|bit| Fr::from((bits >> bit) & 1)));
-                        g(&y)
-                    })
-                    .sum()
-            };
-            let mut evals = [s(0), s(2), s(3)];
-            if fault.is_none() {
-                assert_eq!(s(0) + s(1), claim, "round {j} of iteration {t}");
-            }
-            if let Some(Deviation::RoundPoly {
-                iteration,
-                round,
-                delta,
-            }) = deviation
-                && (iteration, round) == (t, j)
-            {
-                // delta·X(X-1) at X = 2 and X = 3.
-                evals[1] += delta * Fr::from(2u64);
-                evals[2] += delta * Fr::from(6u64);
-            }
-            tr.append_serializable_element(ROUND_LABEL, &evals).unwrap();
-            let r = tr.get_and_append_challenge(RHO_LABEL).unwrap();
-            claim = lagrange_eval(&[evals[0], claim - evals[0], evals[1], evals[2]], r);
-            rho.push(r);
-            rounds.push(evals);
-        }
-
-        // The masks as the verifier will read them: on the input layer of a
-        // declared unit-numerator instance it supplies p0 = p1 = 1 itself.
-        let short: Vec<bool> = active
-            .iter()
-            .map(|&(i, k)| declared_one[i] && k + 1 == sizes[i])
-            .collect();
-        let mut gates: Vec<[Fr; 4]> = active
-            .iter()
-            .zip(&short)
-            .map(|(&(i, k), short)| {
-                let [p0, p1, q0, q1] = children(&layers[i][k + 1], &rho[..k]);
-                if *short {
-                    [Fr::one(), Fr::one(), q0, q1]
-                } else {
-                    [p0, p1, q0, q1]
-                }
-            })
-            .collect();
-        if let Some(Deviation::Mask {
+        Some(Deviation::Mask {
             iteration,
             instance,
             delta,
-        }) = deviation
-            && iteration == t
-        {
-            let slot = active.iter().position(|(i, _)| *i == instance).unwrap();
-            let [p0, p1, q0, q1] = gates[slot];
-            gates[slot] = if short[slot] {
-                // Keeps q0 + q1 + lambda·q0·q1.
-                let moved = q0 + delta;
-                let other = (gate(gates[slot], lambda) - moved) / (Fr::one() + lambda * moved);
-                [p0, p1, moved, other]
-            } else {
+        }) if sizes[instance] > 0 && iteration == joins(instance) => {
+            first[instance] = match first[instance][..] {
                 // Keeps p0·q1 + p1·q0, and the denominators.
-                [p0 + delta * q0, p1 - delta * q1, q0, q1]
+                [p0, p1, q0, q1] => vec![p0 + delta * q0, p1 - delta * q1, q0, q1],
+                // The only other pair with this sum and this product.
+                [q0, q1] if !delta.is_zero() => vec![q1, q0],
+                _ => first[instance].clone(),
             };
         }
-        let expected = |gates: &[[Fr; 4]]| -> Fr {
-            active
-                .iter()
-                .zip(&weights)
-                .zip(gates)
-                .map(|((&(_, k), weight), mask)| {
-                    *weight * eq_points(&point[..k], &rho[..k]) * gate(*mask, lambda)
-                })
-                .sum()
-        };
-        if fault.is_none() {
-            assert_eq!(expected(&gates), claim, "layer check of iteration {t}");
-        }
-        if t < patch_until && expected(&gates) != claim {
-            // Bend the first active mask until the layer check passes.
-            let k = active[0].1;
-            let need =
-                (claim - expected(&gates)) / (weights[0] * eq_points(&point[..k], &rho[..k]));
-            let [p0, p1, q0, q1] = gates[0];
-            gates[0] = if short[0] {
-                let target = gate(gates[0], lambda) + need;
-                [p0, p1, (target - q1) / (Fr::one() + lambda * q1), q1]
+        Some(Deviation::MaskValue {
+            iteration,
+            instance,
+            delta,
+        }) if sizes[instance] > 0 && iteration == joins(instance) => first[instance][0] += delta,
+        _ => {}
+    }
+    let mut messages = first.concat();
+    tr.append_serializable_element(FIRST_LAYERS_LABEL, &messages)
+        .unwrap();
+
+    // Per instance, the mask it sent last as the verifier reads it, and the
+    // claim the verifier holds: both stop being true once the prover has
+    // deviated.
+    let mut gates: Vec<[Fr; 4]> = first
+        .iter()
+        .map(|message| match message[..] {
+            [p0, p1, q0, q1] => [p0, p1, q0, q1],
+            [q0, q1] => [Fr::one(), Fr::one(), q0, q1],
+            _ => unreachable!(),
+        })
+        .collect();
+    let roots: Vec<[Fr; 2]> = (0..instances.len())
+        .map(|i| {
+            let [p0, p1, q0, q1] = gates[i];
+            if sizes[i] == 0 {
+                [first[i][0], first[i][1]]
             } else {
-                [p0 + need / q1, p1, q0, q1]
+                [p0 * q1 + p1 * q0, q0 * q1]
+            }
+        })
+        .collect();
+    let mut claims = roots.clone();
+    let mut point: Vec<Fr> = Vec::new();
+    for t in 0..n_max {
+        let mut rho: Vec<Fr> = Vec::new();
+        if t > 0 {
+            let lambda = tr.get_and_append_challenge(LAMBDA_LABEL).unwrap();
+            let alpha = tr.get_and_append_challenge(ALPHA_LABEL).unwrap();
+            // (instance, variables of its claimed layer, alpha^instance) of
+            // the instances that joined before this iteration.
+            let running: Vec<(usize, usize, Fr)> = (0..instances.len())
+                .filter(|i| joins(*i) < t)
+                .map(|i| (i, t - joins(i), alpha.pow([i as u64])))
+                .collect();
+            // One instance's term of the batched polynomial at a point of
+            // F^t, with the eq factor of variable `without` left out.
+            let term = |&(i, k, weight): &(usize, usize, Fr), y: &[Fr], without: Option<usize>| {
+                let eq: Fr = (0..k)
+                    .filter(|l| Some(*l) != without)
+                    .map(|l| eq_coordinate(point[l], y[l]))
+                    .product();
+                weight * eq * gate(children(&layers[i][k + 1], &y[..k]), lambda)
             };
-            assert_eq!(expected(&gates), claim);
+
+            let mut claim: Fr = running
+                .iter()
+                .map(|&(i, k, weight)| {
+                    weight * Fr::from(1u64 << (t - k)) * (claims[i][0] + lambda * claims[i][1])
+                })
+                .sum();
+            // What the masks sent so far in this iteration come to, as the
+            // verifier computes it.
+            let mut done = Fr::zero();
+            for j in 0..t {
+                let free = t - 1 - j;
+                // `f` at `(rho, x, b)`, summed over the boolean `b`.
+                let sum_at = |f: &dyn Fn(&[Fr]) -> Fr, x: u64| -> Fr {
+                    (0..1u64 << free)
+                        .map(|bits| {
+                            let mut y = rho.clone();
+                            y.push(Fr::from(x));
+                            y.extend((0..free).map(|bit| Fr::from((bits >> bit) & 1)));
+                            f(&y)
+                        })
+                        .sum()
+                };
+                // The quadratic of the round: the instances that still
+                // have a variable, without the eq factor of this one.
+                let live = |y: &[Fr]| -> Fr {
+                    let live = running.iter().filter(|(_, k, _)| *k > j);
+                    live.map(|instance| term(instance, y, Some(j))).sum()
+                };
+                let quadratic = [0, 1, 2].map(|x| sum_at(&live, x));
+                let c =
+                    (quadratic[2] - quadratic[1] - quadratic[1] + quadratic[0]) / Fr::from(2u64);
+                let mut message = [quadratic[1] - quadratic[0] - c, c];
+                if fault.is_none() {
+                    let all = |y: &[Fr]| -> Fr {
+                        running.iter().map(|instance| term(instance, y, None)).sum()
+                    };
+                    let constant = Fr::from(1u64 << free) * done;
+                    for x in 0..4 {
+                        let at = Fr::from(x);
+                        let inner = quadratic[0] + message[0] * at + c * at * at;
+                        assert_eq!(
+                            sum_at(&all, x),
+                            constant + eq_coordinate(point[j], at) * inner,
+                            "round {j} of iteration {t} at {x}"
+                        );
+                    }
+                    assert_eq!(
+                        sum_at(&all, 0) + sum_at(&all, 1),
+                        claim,
+                        "round {j} of iteration {t}"
+                    );
+                }
+                if let Some(Deviation::RoundPoly {
+                    iteration,
+                    round,
+                    delta,
+                }) = deviation
+                    && (iteration, round) == (t, j)
+                {
+                    message[0] += delta[0];
+                    message[1] += delta[1];
+                }
+                tr.append_serializable_element(ROUND_LABEL, &message)
+                    .unwrap();
+                let r = tr.get_and_append_challenge(RHO_LABEL).unwrap();
+                claim = claim_after_round(claim, done, free, point[j], message, r);
+                rho.push(r);
+                messages.extend(message);
+
+                // The instances whose last variable this was send the mask
+                // of the layer below.
+                let finished: Vec<&(usize, usize, Fr)> =
+                    running.iter().filter(|(_, k, _)| *k == j + 1).collect();
+                let bound = eq_points(&point[..j + 1], &rho);
+                for &&(i, k, _) in &finished {
+                    let short = short(i, k + 1);
+                    let [p0, p1, q0, q1] = children(&layers[i][k + 1], &rho[..k]);
+                    // On the input layer of a declared unit-numerator
+                    // instance the verifier supplies p0 = p1 = 1 itself.
+                    gates[i] = if short {
+                        [Fr::one(), Fr::one(), q0, q1]
+                    } else {
+                        [p0, p1, q0, q1]
+                    };
+                    match deviation {
+                        Some(Deviation::Mask {
+                            iteration,
+                            instance,
+                            delta,
+                        }) if (iteration, instance) == (t, i) => {
+                            gates[i] = if short {
+                                // Keeps q0 + q1 + lambda·q0·q1.
+                                let moved = q0 + delta;
+                                let other =
+                                    (gate(gates[i], lambda) - moved) / (Fr::one() + lambda * moved);
+                                [Fr::one(), Fr::one(), moved, other]
+                            } else {
+                                // Keeps p0·q1 + p1·q0, and the denominators.
+                                [p0 + delta * q0, p1 - delta * q1, q0, q1]
+                            };
+                        }
+                        Some(Deviation::MaskValue {
+                            iteration,
+                            instance,
+                            delta,
+                        }) if (iteration, instance) == (t, i) => {
+                            gates[i][if short { 2 } else { 0 }] += delta;
+                        }
+                        _ => {}
+                    }
+                }
+                let total = |gates: &[[Fr; 4]]| -> Fr {
+                    let finished = finished.iter();
+                    done + finished
+                        .map(|&&(i, _, weight)| weight * bound * gate(gates[i], lambda))
+                        .sum::<Fr>()
+                };
+                // After the last round every instance is finished and the
+                // gate values of the masks have to add up to the claim.
+                if free == 0 {
+                    if fault.is_none() {
+                        assert_eq!(total(&gates), claim, "layer check of iteration {t}");
+                    }
+                    if t < patch_until && total(&gates) != claim {
+                        // The largest instance is in every iteration, so
+                        // there is always a mask to bend here.
+                        let &&(i, k, weight) = &finished[0];
+                        let need = (claim - total(&gates)) / (weight * bound);
+                        gates[i] = bend_mask(gates[i], short(i, k + 1), need, lambda);
+                        assert_eq!(total(&gates), claim);
+                    }
+                }
+                done = total(&gates);
+                let group: Vec<Fr> = finished
+                    .iter()
+                    .flat_map(|&&(i, k, _)| sent(gates[i], short(i, k + 1)))
+                    .collect();
+                if !group.is_empty() {
+                    tr.append_serializable_element(MASKS_LABEL, &group).unwrap();
+                    messages.extend(group);
+                }
+            }
         }
 
-        let iteration_masks: Vec<Vec<Fr>> = gates
-            .iter()
-            .zip(&short)
-            .map(|(mask, short)| mask[if *short { 2 } else { 0 }..].to_vec())
-            .collect();
-        tr.append_serializable_element(MASKS_LABEL, &iteration_masks)
-            .unwrap();
         let mu = tr.get_and_append_challenge(MU_LABEL).unwrap();
-        for (&(i, _), [p0, p1, q0, q1]) in active.iter().zip(&gates) {
+        for i in (0..instances.len()).filter(|i| joins(*i) <= t) {
+            let [p0, p1, q0, q1] = gates[i];
             claims[i] = [
                 (Fr::one() - mu) * p0 + mu * p1,
                 (Fr::one() - mu) * q0 + mu * q1,
             ];
         }
         point = std::iter::once(mu).chain(rho).collect();
-        round_polys.push(rounds);
-        masks.push(iteration_masks);
     }
 
-    let proof = LogupGkrProof {
-        roots: roots.clone(),
-        round_polys,
-        masks,
-    };
+    let proof = LogupGkrProof { messages };
     let claims = GkrClaims {
         point,
         roots,
@@ -650,6 +833,67 @@ fn logup_gkr_proof_roundtrip() {
     }
 }
 
+// ─── Proof size ──────────────────────────────────────────────────────────
+
+/// A proof is `N(N-1)` round coefficients, four values per instance and
+/// layer from the first on, two less where the input numerators are one,
+/// and two for an instance of one fraction. Nothing else is serialized but
+/// one length.
+#[test]
+fn proof_length_follows_the_statement() {
+    let batches: [&[(usize, bool)]; 8] = [
+        &[(0, true)],
+        &[(0, false), (0, true)],
+        &[(1, true)],
+        &[(1, false), (1, true), (0, false)],
+        &[(5, true)],
+        &[(5, false)],
+        &[
+            (6, false),
+            (6, true),
+            (3, true),
+            (3, false),
+            (1, true),
+            (0, true),
+        ],
+        &[(2, true), (4, false), (4, true), (1, false)],
+    ];
+    for (seed, batch) in batches.into_iter().enumerate() {
+        let n_max = batch.iter().map(|(n, _)| *n).max().unwrap();
+        let expected: usize = n_max * n_max.saturating_sub(1)
+            + batch
+                .iter()
+                .map(|&(n, one)| match (n, one) {
+                    (0, _) => 2,
+                    (n, true) => 4 * n - 2,
+                    (n, false) => 4 * n,
+                })
+                .sum::<usize>();
+        let shape = shapes(batch);
+        assert_eq!(proof_len(&shape), Some(expected), "{batch:?}");
+        assert_eq!(layout(&shape).len, expected, "{batch:?}");
+
+        let instances = random_batch(batch, seed as u64);
+        let (proof, _) = prove_batch(instances.clone(), &mut transcript()).unwrap();
+        let (reference, _) = naive_prove_batch(&instances, &mut transcript(), None);
+        assert_eq!(proof.messages.len(), expected, "{batch:?}");
+        assert_eq!(reference.messages.len(), expected, "{batch:?}");
+        assert_eq!(proof.compressed_size(), 8 + 32 * expected, "{batch:?}");
+    }
+
+    // The batch the timing test proves: 4 unit-numerator instances and a
+    // general one of 2^18 fractions.
+    let timing = shapes(&[(18, true), (18, true), (18, true), (18, true), (18, false)]);
+    assert_eq!(proof_len(&timing), Some(18 * 17 + 4 * 70 + 72));
+
+    // No count for the empty batch, nor for sizes that have none.
+    assert_eq!(proof_len(&[]), None);
+    for n_vars in [usize::MAX, usize::MAX / 2, 1 << 40] {
+        assert_eq!(proof_len(&shapes(&[(n_vars, false), (3, true)])), None);
+        assert_eq!(proof_len(&shapes(&[(3, true), (n_vars, true)])), None);
+    }
+}
+
 // ─── Cheating provers ────────────────────────────────────────────────────
 
 /// How a transcript produced by the reference prover fares.
@@ -696,10 +940,11 @@ fn outcome(instances: &[FractionInstance<Fr>], shape: &[GkrShape], fault: Fault)
     outcome_of(instances, shape, &proof)
 }
 
-/// What every fault below comes to, by how long the cheater keeps patching:
+/// What every fault below comes to, by how long the cheater keeps patching,
+/// provided the lie is told at least one layer above the input:
 /// - it stops before the last iteration: the first iteration that gets true
-///   masks while the running claim is false fails its LAYER CHECK (step e,
-///   claim against the gate of the absorbed masks);
+///   masks while a claim is false fails its LAYER CHECK (the claim left by
+///   the last round against the masks sent);
 /// - it never stops: `verify_batch` accepts, since each layer check was made
 ///   to pass, and the lie ends in an input claim. Only the CALLER'S OPENING
 ///   of the input layers catches that.
@@ -719,7 +964,8 @@ fn cheating_prover_is_rejected_at_root() {
     );
     let shape = shape_of(&instances);
     let n_max = 3;
-    let (honest, _) = naive_prove_batch(&instances, &mut transcript(), None);
+    let (honest, honest_claims) = naive_prove_batch(&instances, &mut transcript(), None);
+    assert_eq!(roots_in(&shape, &honest), honest_claims.roots);
 
     // The identity deviation is the honest prover: the fault plumbing
     // itself does not cause the rejections below.
@@ -737,11 +983,12 @@ fn cheating_prover_is_rejected_at_root() {
     assert_eq!(outcome(&instances, &shape, identity), Outcome::Accepted);
 
     // An equal fraction, and two roots swapped: neither changes the sum of
-    // the roots, so the caller's relation on the roots cannot see them. The
-    // false root enters the claim of the iteration in which the instance
-    // joins (0 for the size-3 instances, 1 for the size-2 ones), and the
-    // layer check of that iteration, or of the first later one the cheater
-    // does not patch, rejects.
+    // the roots, so the caller's relation on the roots cannot see them. A
+    // root is only ever what a first layer gives, so the lie is in a first
+    // layer, and it becomes a false claim when `mu` folds that layer in the
+    // iteration the instance joins in (0 for the size-3 instances, 1 for
+    // the size-2 ones). The layer check of the next iteration, or of the
+    // first later one the cheater does not patch, rejects.
     let mut deviations: Vec<Deviation> = (0..4)
         .map(|instance| Deviation::ScaleRoot {
             instance,
@@ -755,9 +1002,35 @@ fn cheating_prover_is_rejected_at_root() {
                 deviation,
                 patch_until,
             };
-            let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
-            assert_ne!(proof.roots, honest.roots);
-            assert_eq!(root_sum(&proof.roots), root_sum(&honest.roots));
+            let (proof, claims) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+            assert_eq!(roots_in(&shape, &proof), claims.roots);
+            assert_ne!(claims.roots, honest_claims.roots);
+            assert_eq!(root_sum(&claims.roots), root_sum(&honest_claims.roots));
+            assert_eq!(
+                outcome_of(&instances, &shape, &proof),
+                expected_outcome(patch_until, n_max),
+                "{fault:?}"
+            );
+        }
+    }
+
+    // A root off by more than its representation, which the caller's
+    // relation may or may not see: inside the batch it fares the same.
+    for instance in 0..4 {
+        for patch_until in 0..=n_max {
+            let fault = Fault {
+                deviation: Deviation::MaskValue {
+                    iteration: n_max - shape[instance].n_vars,
+                    instance,
+                    delta: Fr::from(5u64),
+                },
+                patch_until,
+            };
+            let (proof, claims) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+            assert_ne!(
+                root_sum(&claims.roots[instance..=instance]),
+                root_sum(&honest_claims.roots[instance..=instance])
+            );
             assert_eq!(
                 outcome_of(&instances, &shape, &proof),
                 expected_outcome(patch_until, n_max),
@@ -779,55 +1052,112 @@ fn cheating_prover_is_rejected_at_root() {
     assert_eq!(outcome(&instances, &shape, fault), Outcome::FalseInputs);
 }
 
+/// The root is not sent, so a prover can choose a first layer that is not
+/// the tree's and still gives the tree's root: the relation the caller
+/// checks on the roots holds, and nothing is wrong at the top. What is wrong
+/// is every claim folded from that layer.
+#[test]
+fn forged_first_layer_with_the_true_root_is_caught_below_it() {
+    let batch = [
+        (3, false),
+        (3, true),
+        (2, false),
+        (2, true),
+        (1, false),
+        (1, true),
+    ];
+    let instances = random_batch(&batch, 77);
+    let shape = shape_of(&instances);
+    let n_max = 3;
+    let (honest, honest_claims) = naive_prove_batch(&instances, &mut transcript(), None);
+    let layout = layout(&shape);
+
+    for (instance, &(n, _)) in batch.iter().enumerate() {
+        for patch_until in 0..=n_max {
+            let fault = Fault {
+                deviation: Deviation::Mask {
+                    iteration: n_max - n,
+                    instance,
+                    delta: Fr::from(9u64),
+                },
+                patch_until,
+            };
+            let (proof, claims) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+            let first = layout.first[instance].clone();
+            assert_ne!(proof.messages[first.clone()], honest.messages[first]);
+            // Not an equal fraction: the very same root.
+            assert_eq!(claims.roots, honest_claims.roots);
+            assert_eq!(roots_in(&shape, &proof), honest_claims.roots);
+
+            let expected = if n == 1 {
+                // The first layer is the input layer. No layer check is
+                // left to fail: `verify_batch` ACCEPTS whatever the cheater
+                // does next, and the forged values are the instance's input
+                // claim, which the CALLER'S OPENING refutes.
+                Outcome::FalseInputs
+            } else {
+                // The LAYER CHECK of the iteration after the instance
+                // joined fails, or of the first later one that is not
+                // patched; patched to the end, the lie is an input claim.
+                expected_outcome(patch_until, n_max)
+            };
+            assert_eq!(
+                outcome_of(&instances, &shape, &proof),
+                expected,
+                "{fault:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn cheating_prover_is_rejected_at_round_poly() {
     let instances = random_batch(&[(4, false), (4, true), (2, true), (1, false)], 71);
     let shape = shape_of(&instances);
     let n_max = 4;
     let (honest, _) = naive_prove_batch(&instances, &mut transcript(), None);
+    let layout = layout(&shape);
 
     for iteration in 1..n_max {
         for round in 0..iteration {
-            let identity = Fault {
+            let fault = |delta: [u64; 2], patch_until: usize| Fault {
                 deviation: Deviation::RoundPoly {
                     iteration,
                     round,
-                    delta: Fr::zero(),
+                    delta: delta.map(Fr::from),
                 },
-                patch_until: n_max,
+                patch_until,
             };
-            assert_eq!(outcome(&instances, &shape, identity), Outcome::Accepted);
+            assert_eq!(
+                outcome(&instances, &shape, fault([0, 0], n_max)),
+                Outcome::Accepted
+            );
 
-            // The altered polynomial still has s(0) + s(1) equal to the
-            // claim (the verifier derives s(1), so that much is free), but
-            // its value at the challenge is not the true partial sum. The
-            // remaining rounds cannot repair that, so the LAYER CHECK at the
-            // end of the same iteration fails; a cheater that patches the
-            // mask there is caught one iteration later, and so on.
-            for patch_until in 0..=n_max {
-                let fault = Fault {
-                    deviation: Deviation::RoundPoly {
-                        iteration,
-                        round,
-                        delta: Fr::from(7u64),
-                    },
-                    patch_until,
-                };
-                let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
-                assert_eq!(proof.roots, honest.roots);
-                assert_eq!(
-                    proof.round_polys[iteration][round][0],
-                    honest.round_polys[iteration][round][0]
-                );
-                assert_ne!(
-                    proof.round_polys[iteration][round],
-                    honest.round_polys[iteration][round]
-                );
-                assert_eq!(
-                    outcome_of(&instances, &shape, &proof),
-                    expected_outcome(patch_until, n_max),
-                    "{fault:?}"
-                );
+            // Whatever two coefficients are sent, the round polynomial the
+            // verifier builds from them sums to its claim: the constant
+            // coefficient is derived for that. But its value at the
+            // challenge is not the true partial sum. The remaining rounds
+            // cannot repair that, so the LAYER CHECK at the end of the same
+            // iteration fails; a cheater that patches a mask there is
+            // caught one iteration later, and so on.
+            for delta in [[7, 0], [0, 7], [3, 5]] {
+                for patch_until in 0..=n_max {
+                    let fault = fault(delta, patch_until);
+                    let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+                    let at = layout.rounds[iteration][round];
+                    assert_eq!(proof.messages[..at], honest.messages[..at]);
+                    for (coefficient, delta) in delta.into_iter().enumerate() {
+                        assert_eq!(
+                            proof.messages[at + coefficient],
+                            honest.messages[at + coefficient] + Fr::from(delta)
+                        );
+                    }
+                    assert_eq!(
+                        outcome_of(&instances, &shape, &proof),
+                        expected_outcome(patch_until, n_max),
+                        "{fault:?}"
+                    );
+                }
             }
         }
     }
@@ -875,15 +1205,90 @@ fn cheating_prover_is_rejected_at_mask() {
     }
 }
 
+/// An instance smaller than the largest runs out of variables before the
+/// iteration's sumcheck ends and sends its mask at that point. From then on
+/// the verifier subtracts the mask's gate value, doubled per variable still
+/// summed over, from its claim. A mask that is not what the tables fold to
+/// therefore bends every later round of the iteration, although the cheater
+/// goes on sending the round messages of the true tables.
+#[test]
+fn cheating_prover_is_rejected_at_early_mask() {
+    let batch = [(4, false), (4, true), (3, true), (3, false), (2, false)];
+    let instances = random_batch(&batch, 78);
+    let shape = shape_of(&instances);
+    let n_max = 4;
+    let (honest, _) = naive_prove_batch(&instances, &mut transcript(), None);
+    let layout = layout(&shape);
+
+    let mut early = 0;
+    for iteration in 1..n_max {
+        for (instance, &(n, one)) in batch.iter().enumerate() {
+            // Out of variables after round `k - 1` of `iteration` rounds.
+            let Some(k) = (n + iteration).checked_sub(n_max).filter(|k| *k > 0) else {
+                continue;
+            };
+            let fault = |delta: u64, patch_until: usize| Fault {
+                deviation: Deviation::MaskValue {
+                    iteration,
+                    instance,
+                    delta: Fr::from(delta),
+                },
+                patch_until,
+            };
+            assert_eq!(
+                outcome(&instances, &shape, fault(0, n_max)),
+                Outcome::Accepted
+            );
+            let mask = layout.masks[&(iteration, instance)].clone();
+            let input = iteration + 1 == n_max;
+            assert_eq!(mask.len(), if input && one { 2 } else { 4 });
+            if k < iteration {
+                // Rounds of the iteration come after this mask.
+                assert!(mask.end <= layout.rounds[iteration][k]);
+                early += 1;
+            }
+
+            // Not patched in its own iteration, the mask fails that
+            // iteration's LAYER CHECK: the masks sent no longer come to
+            // the claim the rounds arrive at. Patched there, by a mask of
+            // a largest instance sent after the last round, both masks
+            // fold into false claims and the next iteration's check fails;
+            // patched to the end, the lie is an input claim.
+            for patch_until in 0..=n_max {
+                let fault = fault(9, patch_until);
+                let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+                // The mask bent to patch the iteration is sent with the
+                // last ones, and may come before this one among them.
+                if k < iteration || patch_until <= iteration {
+                    assert_eq!(proof.messages[..mask.start], honest.messages[..mask.start]);
+                }
+                assert_ne!(proof.messages[mask.clone()], honest.messages[mask.clone()]);
+                assert_eq!(
+                    outcome_of(&instances, &shape, &proof),
+                    expected_outcome(patch_until, n_max),
+                    "{fault:?}"
+                );
+            }
+        }
+    }
+    // The two instances of size 3 in iterations 2 and 3, the one of size 2
+    // in iteration 3.
+    assert_eq!(early, 5);
+}
+
 #[test]
 fn cheating_prover_is_rejected_at_final_mask() {
     let instances = random_batch(&[(3, false), (3, true), (2, true), (1, false)], 73);
     let shape = shape_of(&instances);
     let n_max = 3;
     let (honest, honest_claims) = naive_prove_batch(&instances, &mut transcript(), None);
+    let layout = layout(&shape);
 
-    // Both the four-value mask of a general instance and the two-value mask
-    // of a unit-numerator one can be moved without changing their gate.
+    // The mask each instance sends on its input layer: after the last round
+    // for the two largest, after the first round for the third, and as its
+    // first layer for the smallest. Both the four-value mask of a general
+    // instance and the two-value mask of a unit-numerator one can be moved
+    // without changing their value.
     for instance in 0..instances.len() {
         let fault = Fault {
             deviation: Deviation::Mask {
@@ -894,10 +1299,19 @@ fn cheating_prover_is_rejected_at_final_mask() {
             patch_until: 0,
         };
         let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
-        // The proof differs from the honest one in that single mask.
-        assert_eq!(proof.roots, honest.roots);
-        assert_eq!(proof.round_polys, honest.round_polys);
-        assert_eq!(proof.masks[..n_max - 1], honest.masks[..n_max - 1]);
+        // The proof is the honest one up to that mask. The masks of the
+        // largest instances are the last thing sent, so there it differs in
+        // nothing else.
+        let mask = match shape[instance].n_vars {
+            1 => layout.first[instance].clone(),
+            _ => layout.masks[&(n_max - 1, instance)].clone(),
+        };
+        assert_eq!(proof.messages[..mask.start], honest.messages[..mask.start]);
+        assert_ne!(proof.messages[mask.clone()], honest.messages[mask.clone()]);
+        if shape[instance].n_vars == n_max {
+            assert_eq!(proof.messages[mask.end..], honest.messages[mask.end..]);
+        }
+        assert_eq!(roots_in(&shape, &proof), honest_claims.roots);
 
         // There is no later layer check to fail: `verify_batch` ACCEPTS, and
         // the input claim of that instance is false. This is the case that
@@ -926,7 +1340,7 @@ fn values_instance_proved_but_shape_says_one_is_rejected() {
 
         // The honest proof of the true statement has a four-value input
         // mask where the statement allows two: rejected by the LENGTH
-        // CHECKS, before anything is absorbed. The converse likewise.
+        // CHECK, before anything is absorbed. The converse likewise.
         let (proof, _) = prove_batch(instances.clone(), &mut transcript()).unwrap();
         assert_eq!(outcome_of(&instances, &shape, &proof), Outcome::Rejected);
         let mut converse = shape_of(&instances);
@@ -980,7 +1394,10 @@ fn one_instance_nv0_root_numerator_must_be_one() {
         let mut shape = shape_of(&instances);
         shape[0] = one;
         let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
-        assert_eq!(proof.roots[0], [Fr::from(3u64), Fr::from(11u64)]);
+        assert_eq!(
+            roots_in(&shape, &proof)[0],
+            [Fr::from(3u64), Fr::from(11u64)]
+        );
         assert_eq!(outcome_of(&instances, &shape, &proof), Outcome::Rejected);
 
         // With the root numerator at 1 the same batch is fine.
@@ -1007,7 +1424,10 @@ fn one_instance_nv0_root_numerator_must_be_one_at_every_position() {
             patch_until: 3,
         };
         let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
-        assert_eq!(proof.roots[position], [Fr::from(3u64), Fr::from(11u64)]);
+        assert_eq!(
+            roots_in(&shape, &proof)[position],
+            [Fr::from(3u64), Fr::from(11u64)]
+        );
         assert_eq!(
             outcome_of(&instances, &shape, &proof),
             Outcome::Rejected,
@@ -1021,10 +1441,12 @@ fn zero_denominator_root_is_rejected() {
     // With a zero denominator the root is 0/0 whatever the other fractions
     // are, so the root says nothing about the sum. The honest prover does
     // not refuse such a statement; the verifier's ROOT DENOMINATOR CHECK
-    // does.
+    // does, on the root it works out from the first layer.
     for (batch, instance, index) in [
         (vec![(3, false)], 0, 5),
         (vec![(2, true)], 0, 0),
+        (vec![(1, true)], 0, 1),
+        (vec![(1, false)], 0, 0),
         (vec![(0, false)], 0, 0),
         (vec![(0, true)], 0, 0),
         (vec![(3, true), (2, false), (0, false)], 1, 3),
@@ -1033,8 +1455,9 @@ fn zero_denominator_root_is_rejected() {
         let mut instances = random_batch(&batch, 76);
         let shape = shape_of(&instances);
         instances[instance].den[index] = Fr::zero();
-        let (proof, _) = prove_batch(instances.clone(), &mut transcript()).unwrap();
-        assert!(proof.roots[instance][1].is_zero());
+        let (proof, claims) = prove_batch(instances.clone(), &mut transcript()).unwrap();
+        assert!(claims.roots[instance][1].is_zero());
+        assert_eq!(roots_in(&shape, &proof), claims.roots);
         assert_eq!(outcome_of(&instances, &shape, &proof), Outcome::Rejected);
     }
 }
@@ -1048,78 +1471,26 @@ fn malformed_proof_returns_error_not_panic() {
     let (honest, _) = prove_batch(instances, &mut transcript()).unwrap();
     assert!(verify_batch(&shape, &honest, &mut transcript()).is_ok());
     let filler = Fr::from(2u64);
+    let len = honest.messages.len();
+    assert_eq!(len, 3 * 2 + 12 + 10 + 2 + 2);
 
-    type Proof = LogupGkrProof<Fr>;
-    type Mutation = Box<dyn Fn(&mut Proof)>;
-    let mut mutations: Vec<Mutation> = vec![
-        Box::new(|p: &mut Proof| *p = LogupGkrProof::default()),
-        Box::new(|p: &mut Proof| p.roots.clear()),
-        Box::new(|p: &mut Proof| p.roots.truncate(3)),
-        Box::new(move |p: &mut Proof| p.roots.push([filler; 2])),
-        Box::new(|p: &mut Proof| p.round_polys.clear()),
-        Box::new(|p: &mut Proof| p.round_polys.truncate(2)),
-        Box::new(move |p: &mut Proof| p.round_polys.push(vec![[filler; 3]; 3])),
-        Box::new(|p: &mut Proof| p.masks.clear()),
-        Box::new(|p: &mut Proof| p.masks.truncate(2)),
-        Box::new(move |p: &mut Proof| p.masks.push(vec![vec![filler; 4]; 2])),
-        Box::new(|p: &mut Proof| {
-            p.round_polys.truncate(2);
-            p.masks.truncate(2);
-        }),
-        Box::new(move |p: &mut Proof| {
-            p.round_polys.push(vec![[filler; 3]; 3]);
-            p.masks.push(vec![vec![filler; 4]; 2]);
-        }),
-    ];
-    for t in 0..3 {
-        mutations.push(Box::new(move |p: &mut Proof| {
-            p.round_polys[t].push([filler; 3])
-        }));
-        mutations.push(Box::new(move |p: &mut Proof| p.round_polys[t].clear()));
-        mutations.push(Box::new(move |p: &mut Proof| {
-            p.round_polys[t].pop();
-        }));
-        mutations.push(Box::new(move |p: &mut Proof| p.masks[t].clear()));
-        mutations.push(Box::new(move |p: &mut Proof| {
-            p.masks[t].pop();
-        }));
-        mutations.push(Box::new(move |p: &mut Proof| {
-            p.masks[t].push(vec![filler; 4])
-        }));
-        mutations.push(Box::new(move |p: &mut Proof| {
-            p.masks[t].push(vec![filler; 2])
-        }));
-        for i in 0..2 {
-            mutations.push(Box::new(move |p: &mut Proof| p.masks[t][i].clear()));
-            mutations.push(Box::new(move |p: &mut Proof| p.masks[t][i].truncate(1)));
-            mutations.push(Box::new(move |p: &mut Proof| {
-                p.masks[t][i].pop();
-            }));
-            mutations.push(Box::new(move |p: &mut Proof| p.masks[t][i].push(filler)));
-            mutations.push(Box::new(move |p: &mut Proof| {
-                p.masks[t][i].extend([filler; 2])
-            }));
-            mutations.push(Box::new(move |p: &mut Proof| {
-                p.masks[t][i].extend([filler; 60])
-            }));
-        }
-    }
-    let mut rejected = 0;
-    for mutate in &mutations {
-        let mut proof = honest.clone();
-        mutate(&mut proof);
-        // Popping from an empty list changes nothing; everything else must
-        // be rejected.
-        if proof != honest {
+    // Nothing in a proof says where a message ends, so its one length is
+    // all there is to get wrong: every length but the statement's is
+    // refused, cut short or padded, at either end.
+    for wrong in (0..len).chain(len + 1..=len + 64) {
+        let mut padded = honest.messages.clone();
+        padded.resize(wrong, filler);
+        let mut shifted = vec![filler; wrong.saturating_sub(len)];
+        shifted.extend(&honest.messages[len.saturating_sub(wrong)..]);
+        for messages in [padded, shifted, vec![filler; wrong]] {
+            assert_eq!(messages.len(), wrong);
             assert!(is_check_failure(&verify_batch(
                 &shape,
-                &proof,
+                &LogupGkrProof { messages },
                 &mut transcript()
             )));
-            rejected += 1;
         }
     }
-    assert!(rejected >= mutations.len() - 3);
 
     // Statements the verifier must refuse whatever the proof says.
     let with_size = |n_vars: usize| GkrShape {
@@ -1146,7 +1517,7 @@ fn malformed_proof_returns_error_not_panic() {
         }
     }
     // The bound itself is a legal size: the proof is rejected for its
-    // lengths, not the statement for its size.
+    // length, not the statement for its size.
     let at_bound = [with_size(MAX_GKR_VARS)];
     assert!(is_check_failure(&verify_batch(
         &at_bound,
@@ -1155,23 +1526,67 @@ fn malformed_proof_returns_error_not_panic() {
     )));
 }
 
+/// The length is checked against the statement before anything is read: a
+/// proof one value short or long is refused with the transcript untouched,
+/// whatever its values, and the right length is read to the last value.
+#[test]
+fn proof_length_is_validated_before_the_transcript_is_touched() {
+    let untouched = |tr: &mut Tr<Fr>| {
+        // A transcript nothing was absorbed into refuses to give challenges.
+        tr.get_and_append_challenge(b"probe").is_err()
+    };
+    for (seed, batch) in [
+        vec![(4, false), (4, true), (2, true), (1, false), (0, true)],
+        vec![(1, true)],
+        vec![(0, false)],
+        vec![(2, false), (5, true)],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let instances = random_batch(&batch, 82 + seed as u64);
+        let shape = shape_of(&instances);
+        let (honest, _) = prove_batch(instances, &mut transcript()).unwrap();
+        assert_eq!(Some(honest.messages.len()), proof_len(&shape));
+
+        for change in [-2i64, -1, 1, 2, 4] {
+            let mut proof = honest.clone();
+            let len = (proof.messages.len() as i64 + change).max(0) as usize;
+            proof.messages.resize(len, Fr::from(2u64));
+            let mut tr = Tr::default();
+            assert!(is_check_failure(&verify_batch(&shape, &proof, &mut tr)));
+            assert!(untouched(&mut tr), "{batch:?} {change}");
+        }
+
+        // Every value is read: changing any one of them changes the
+        // outcome or the claims.
+        let claims = verify_batch(&shape, &honest, &mut transcript()).unwrap();
+        for at in 0..honest.messages.len() {
+            let mut proof = honest.clone();
+            proof.messages[at] += Fr::one();
+            let result = verify_batch(&shape, &proof, &mut transcript());
+            assert!(result.is_err() || result.unwrap() != claims, "value {at}");
+        }
+    }
+}
+
 // ─── Self-consistent malformed proofs ────────────────────────────────────
 
 /// How a simulated transcript departs from the format the statement dictates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Malformation {
     None,
-    /// One root more than there are instances.
-    ExtraRoot,
+    /// One first layer more than there are instances.
+    ExtraFirstLayer,
     /// The input mask of the first unit-numerator instance is sent as
     /// `[1, 1, q0, q1]`.
     LongInputMask,
-    /// The first four-value mask of `iteration` has unit numerators and is
-    /// sent as `[q0, q1]`.
+    /// The first four-value mask sent in the sumcheck of `iteration` has
+    /// unit numerators and is sent as `[q0, q1]`.
     ShortMask {
         iteration: usize,
     },
-    /// One mask more than there are active instances in `iteration`.
+    /// One mask more after the last round of `iteration`.
     ExtraMask {
         iteration: usize,
     },
@@ -1180,148 +1595,154 @@ enum Malformation {
 /// A prover without a witness: every message is random except one mask value
 /// per iteration, which is solved so that the layer check passes.
 /// `verify_batch` opens nothing, so it accepts such a transcript; only the
-/// caller's openings would not. That makes it the right probe for the format
-/// checks: an honest proof edited after the fact derails every later
-/// challenge and is rejected by the layer check whatever the format checks
-/// do, whereas here the malformed message is absorbed like any other and
-/// nothing but the format check itself can reject. It also reaches sizes no
-/// honest prover can.
+/// caller's openings would not. That makes it the right probe for the length
+/// check: an honest proof edited after the fact derails every later
+/// challenge and is rejected by the layer check whatever the length check
+/// does, whereas here the surplus or missing values are absorbed like any
+/// other by the prover that sends them, and where they come last nothing
+/// but the length check itself can reject. It also reaches sizes no honest
+/// prover can.
 fn simulate_batch(shape: &[GkrShape], seed: u64, malformation: Malformation) -> LogupGkrProof<Fr> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut tr = transcript();
     let n_max = shape.iter().map(|s| s.n_vars).max().unwrap();
+    let joins = |i: usize| n_max - shape[i].n_vars;
 
-    tr.append_message(DOMAIN_LABEL, b"v1").unwrap();
+    tr.append_message(DOMAIN_LABEL, b"v2").unwrap();
     tr.append_serializable_element(COUNT_LABEL, &(shape.len() as u64))
         .unwrap();
     for s in shape {
         tr.append_serializable_element(SHAPE_LABEL, &(s.n_vars as u64, s.numerator_is_one as u8))
             .unwrap();
     }
-    let mut roots: Vec<[Fr; 2]> = shape
-        .iter()
-        .map(|s| {
+
+    // A random mask for a slot the statement wants in two values (`short`)
+    // or in four, with whether its numerators are one and whether it goes
+    // out in two values. The two differ from `short` for the one mask this
+    // run sends in the other format, if any.
+    let mut reformatted = false;
+    let mut random_mask = |rng: &mut StdRng, short: bool, sumcheck_of: Option<usize>| {
+        let reformat = !reformatted
+            && match malformation {
+                Malformation::LongInputMask => short,
+                Malformation::ShortMask { iteration } => !short && sumcheck_of == Some(iteration),
+                _ => false,
+            };
+        reformatted |= reformat;
+        let unit = short || reformat;
+        let numerator = |rng: &mut StdRng| if unit { Fr::one() } else { Fr::rand(rng) };
+        let (p0, p1) = (numerator(rng), numerator(rng));
+        let gate = [p0, p1, Fr::rand(rng), Fr::rand(rng)];
+        (gate, unit, short != reformat)
+    };
+
+    let mut gates = vec![[Fr::zero(); 4]; shape.len()];
+    let mut claims = vec![[Fr::zero(); 2]; shape.len()];
+    let mut messages = Vec::new();
+    for (i, s) in shape.iter().enumerate() {
+        if s.n_vars == 0 {
             // The root of a zero-variable instance is its input claim.
-            let numerator = if s.numerator_is_one && s.n_vars == 0 {
+            let numerator = if s.numerator_is_one {
                 Fr::one()
             } else {
                 Fr::rand(&mut rng)
             };
-            [numerator, Fr::rand(&mut rng)]
-        })
-        .collect();
-    let mut claims = roots.clone();
-    if malformation == Malformation::ExtraRoot {
-        roots.push([Fr::rand(&mut rng), Fr::rand(&mut rng)]);
+            claims[i] = [numerator, Fr::rand(&mut rng)];
+            messages.extend(claims[i]);
+        } else {
+            let short = s.numerator_is_one && s.n_vars == 1;
+            let (gate, _, two_values) = random_mask(&mut rng, short, None);
+            gates[i] = gate;
+            messages.extend(sent(gate, two_values));
+        }
     }
-    tr.append_serializable_element(ROOTS_LABEL, &roots).unwrap();
+    if malformation == Malformation::ExtraFirstLayer {
+        messages.extend([Fr::rand(&mut rng), Fr::rand(&mut rng)]);
+    }
+    tr.append_serializable_element(FIRST_LAYERS_LABEL, &messages)
+        .unwrap();
 
     let mut point: Vec<Fr> = Vec::new();
-    let mut round_polys = Vec::new();
-    let mut masks = Vec::new();
     for t in 0..n_max {
-        let lambda = tr.get_and_append_challenge(LAMBDA_LABEL).unwrap();
-        let alpha = tr.get_and_append_challenge(ALPHA_LABEL).unwrap();
-        let active: Vec<(usize, usize)> = (0..shape.len())
-            .filter(|i| shape[*i].n_vars + t >= n_max)
-            .map(|i| (i, shape[i].n_vars + t - n_max))
-            .collect();
-        let weights: Vec<Fr> = active.iter().map(|(i, _)| alpha.pow([*i as u64])).collect();
-
-        let mut claim: Fr = active
-            .iter()
-            .zip(&weights)
-            .map(|(&(i, k), weight)| {
-                *weight
-                    * Fr::from(2u64).pow([(t - k) as u64])
-                    * (claims[i][0] + lambda * claims[i][1])
-            })
-            .sum();
         let mut rho: Vec<Fr> = Vec::new();
-        let mut rounds = Vec::new();
-        for _ in 0..t {
-            let evals = [Fr::rand(&mut rng), Fr::rand(&mut rng), Fr::rand(&mut rng)];
-            tr.append_serializable_element(ROUND_LABEL, &evals).unwrap();
-            let r = tr.get_and_append_challenge(RHO_LABEL).unwrap();
-            claim = lagrange_eval(&[evals[0], claim - evals[0], evals[1], evals[2]], r);
-            rho.push(r);
-            rounds.push(evals);
-        }
-
-        // Masks the statement wants in two values, and the one this run
-        // sends in the other format.
-        let short: Vec<bool> = active
-            .iter()
-            .map(|(i, _)| shape[*i].numerator_is_one && t + 1 == n_max)
-            .collect();
-        let reformatted = match malformation {
-            Malformation::LongInputMask if t + 1 == n_max => short.iter().position(|short| *short),
-            Malformation::ShortMask { iteration } if iteration == t => {
-                short.iter().position(|short| !*short)
-            }
-            _ => None,
-        };
-        let unit = |slot: usize| short[slot] || reformatted == Some(slot);
-        let mut gates: Vec<[Fr; 4]> = (0..active.len())
-            .map(|slot| {
-                let numerator =
-                    |rng: &mut StdRng| if unit(slot) { Fr::one() } else { Fr::rand(rng) };
-                let (p0, p1) = (numerator(&mut rng), numerator(&mut rng));
-                [p0, p1, Fr::rand(&mut rng), Fr::rand(&mut rng)]
-            })
-            .collect();
-        let expected = |gates: &[[Fr; 4]]| -> Fr {
-            active
+        if t > 0 {
+            let lambda = tr.get_and_append_challenge(LAMBDA_LABEL).unwrap();
+            let alpha = tr.get_and_append_challenge(ALPHA_LABEL).unwrap();
+            let running: Vec<(usize, usize, Fr)> = (0..shape.len())
+                .filter(|i| joins(*i) < t)
+                .map(|i| (i, t - joins(i), alpha.pow([i as u64])))
+                .collect();
+            let mut claim: Fr = running
                 .iter()
-                .zip(&weights)
-                .zip(gates)
-                .map(|((&(_, k), weight), mask)| {
-                    *weight * eq_points(&point[..k], &rho[..k]) * gate(*mask, lambda)
+                .map(|&(i, k, weight)| {
+                    weight
+                        * Fr::from(2u64).pow([(t - k) as u64])
+                        * (claims[i][0] + lambda * claims[i][1])
                 })
-                .sum()
-        };
-        // The largest instance is active in every iteration, so there is
-        // always a first mask to solve for.
-        let k = active[0].1;
-        let need = (claim - expected(&gates)) / (weights[0] * eq_points(&point[..k], &rho[..k]));
-        let [p0, p1, q0, q1] = gates[0];
-        gates[0] = if unit(0) {
-            let target = gate(gates[0], lambda) + need;
-            [p0, p1, (target - q1) / (Fr::one() + lambda * q1), q1]
-        } else {
-            [p0 + need / q1, p1, q0, q1]
-        };
-        assert_eq!(expected(&gates), claim);
+                .sum();
+            let mut done = Fr::zero();
+            for j in 0..t {
+                let message = [Fr::rand(&mut rng), Fr::rand(&mut rng)];
+                tr.append_serializable_element(ROUND_LABEL, &message)
+                    .unwrap();
+                let r = tr.get_and_append_challenge(RHO_LABEL).unwrap();
+                claim = claim_after_round(claim, done, t - 1 - j, point[j], message, r);
+                rho.push(r);
+                messages.extend(message);
 
-        let mut iteration_masks: Vec<Vec<Fr>> = gates
-            .iter()
-            .enumerate()
-            .map(|(slot, mask)| {
-                let two_values = short[slot] != (reformatted == Some(slot));
-                mask[if two_values { 2 } else { 0 }..].to_vec()
-            })
-            .collect();
-        if malformation == (Malformation::ExtraMask { iteration: t }) {
-            iteration_masks.push((0..4).map(|_| Fr::rand(&mut rng)).collect());
+                let finished: Vec<&(usize, usize, Fr)> =
+                    running.iter().filter(|(_, k, _)| *k == j + 1).collect();
+                let bound = eq_points(&point[..j + 1], &rho);
+                // Per finished instance, whether its mask has unit
+                // numerators and whether it goes out in two values.
+                let mut formats = Vec::new();
+                for &&(i, k, _) in &finished {
+                    let short = shape[i].numerator_is_one && k + 1 == shape[i].n_vars;
+                    let (gate, unit, two_values) = random_mask(&mut rng, short, Some(t));
+                    gates[i] = gate;
+                    formats.push((unit, two_values));
+                }
+                let total = |gates: &[[Fr; 4]]| -> Fr {
+                    let finished = finished.iter();
+                    done + finished
+                        .map(|&&(i, _, weight)| weight * bound * gate(gates[i], lambda))
+                        .sum::<Fr>()
+                };
+                if j + 1 == t {
+                    // The largest instance is in every iteration, so after
+                    // the last round there is always a first mask to solve.
+                    let &&(i, _, weight) = &finished[0];
+                    let need = (claim - total(&gates)) / (weight * bound);
+                    gates[i] = bend_mask(gates[i], formats[0].0, need, lambda);
+                    assert_eq!(total(&gates), claim);
+                }
+                done = total(&gates);
+                let mut group: Vec<Fr> = finished
+                    .iter()
+                    .zip(&formats)
+                    .flat_map(|(&&(i, _, _), (_, two_values))| sent(gates[i], *two_values))
+                    .collect();
+                if malformation == (Malformation::ExtraMask { iteration: t }) && j + 1 == t {
+                    group.extend((0..4).map(|_| Fr::rand(&mut rng)));
+                }
+                if !group.is_empty() {
+                    tr.append_serializable_element(MASKS_LABEL, &group).unwrap();
+                    messages.extend(group);
+                }
+            }
         }
-        tr.append_serializable_element(MASKS_LABEL, &iteration_masks)
-            .unwrap();
+
         let mu = tr.get_and_append_challenge(MU_LABEL).unwrap();
-        for (&(i, _), [p0, p1, q0, q1]) in active.iter().zip(&gates) {
+        for i in (0..shape.len()).filter(|i| joins(*i) <= t) {
+            let [p0, p1, q0, q1] = gates[i];
             claims[i] = [
                 (Fr::one() - mu) * p0 + mu * p1,
                 (Fr::one() - mu) * q0 + mu * q1,
             ];
         }
         point = std::iter::once(mu).chain(rho).collect();
-        round_polys.push(rounds);
-        masks.push(iteration_masks);
     }
-    LogupGkrProof {
-        roots,
-        round_polys,
-        masks,
-    }
+    LogupGkrProof { messages }
 }
 
 fn shapes(batch: &[(usize, bool)]) -> Vec<GkrShape> {
@@ -1334,15 +1755,16 @@ fn shapes(batch: &[(usize, bool)]) -> Vec<GkrShape> {
         .collect()
 }
 
-/// The number of roots and the format of every mask are dictated by the
-/// statement: a transcript that is consistent in itself but sends a root too
-/// many, or a mask in the other format, is refused for that alone.
+/// The number of first layers and the format of every mask are dictated by
+/// the statement: a transcript that is consistent in itself but sends a
+/// first layer too many, or a mask in the other format, is refused for that
+/// alone.
 #[test]
 fn self_consistent_malformed_proof_is_rejected_by_the_length_checks() {
     let shape = shapes(&[(3, false), (3, true), (1, true), (0, false), (0, true)]);
     let n_max = 3;
-    let mut malformations = vec![Malformation::ExtraRoot, Malformation::LongInputMask];
-    for iteration in 0..n_max {
+    let mut malformations = vec![Malformation::ExtraFirstLayer, Malformation::LongInputMask];
+    for iteration in 1..n_max {
         malformations.push(Malformation::ShortMask { iteration });
         malformations.push(Malformation::ExtraMask { iteration });
     }
@@ -1351,11 +1773,15 @@ fn self_consistent_malformed_proof_is_rejected_by_the_length_checks() {
         let proof = simulate_batch(&shape, seed, Malformation::None);
         let claims = verify_batch(&shape, &proof, &mut transcript()).unwrap();
         assert_eq!(claims.point.len(), n_max);
-        assert_eq!(claims.roots, proof.roots);
+        assert_eq!(claims.roots, roots_in(&shape, &proof));
 
         for malformation in &malformations {
             let malformed = simulate_batch(&shape, seed, *malformation);
-            assert_ne!(malformed, proof, "{malformation:?}");
+            assert_ne!(
+                malformed.messages.len(),
+                proof.messages.len(),
+                "{malformation:?}"
+            );
             assert!(
                 is_check_failure(&verify_batch(&shape, &malformed, &mut transcript())),
                 "{malformation:?}"
@@ -1384,6 +1810,7 @@ fn size_bound_rejects_a_proof_that_would_otherwise_verify() {
             shapes(&[(2, true), (MAX_GKR_VARS + 1, one), (0, false)]),
         ] {
             let proof = simulate_batch(&above, 81, Malformation::None);
+            assert_eq!(Some(proof.messages.len()), proof_len(&above));
             assert!(is_check_failure(&verify_batch(
                 &above,
                 &proof,
@@ -1393,123 +1820,41 @@ fn size_bound_rejects_a_proof_that_would_otherwise_verify() {
     }
 }
 
-/// A proof with exactly the lengths `shape` dictates and random values.
+/// A proof with exactly the length `shape` dictates and random values.
 /// Returns `None` for shapes no proof can match.
 fn well_formed_random_proof(shape: &[GkrShape], rng: &mut StdRng) -> Option<LogupGkrProof<Fr>> {
     let n_max = shape.iter().map(|s| s.n_vars).max()?;
     if n_max > MAX_GKR_VARS {
         return None;
     }
-    let roots = shape
-        .iter()
-        .map(|_| [Fr::rand(rng), Fr::rand(rng)])
-        .collect();
-    let mut round_polys = Vec::new();
-    let mut masks = Vec::new();
-    for t in 0..n_max {
-        round_polys.push(
-            (0..t)
-                .map(|_| [Fr::rand(rng), Fr::rand(rng), Fr::rand(rng)])
-                .collect(),
-        );
-        let mut iteration = Vec::new();
-        for s in shape.iter().filter(|s| s.n_vars + t >= n_max) {
-            let len = if s.numerator_is_one && t + 1 == n_max {
-                2
-            } else {
-                4
-            };
-            iteration.push((0..len).map(|_| Fr::rand(rng)).collect());
-        }
-        masks.push(iteration);
-    }
     Some(LogupGkrProof {
-        roots,
-        round_polys,
-        masks,
+        messages: (0..layout(shape).len).map(|_| Fr::rand(rng)).collect(),
     })
 }
 
-/// A proof whose every length is random.
+/// A proof of random length.
 fn shapeless_random_proof(rng: &mut StdRng) -> LogupGkrProof<Fr> {
-    let iterations = rng.gen_range(0..8);
     LogupGkrProof {
-        roots: (0..rng.gen_range(0..8))
-            .map(|_| [Fr::rand(rng), Fr::rand(rng)])
-            .collect(),
-        round_polys: (0..iterations)
-            .map(|t| {
-                let rounds = if rng.gen_bool(0.7) {
-                    t
-                } else {
-                    rng.gen_range(0..8)
-                };
-                (0..rounds)
-                    .map(|_| [Fr::rand(rng), Fr::rand(rng), Fr::rand(rng)])
-                    .collect()
-            })
-            .collect(),
-        masks: (0..if rng.gen_bool(0.7) {
-            iterations
-        } else {
-            rng.gen_range(0..8)
-        })
-            .map(|_| {
-                (0..rng.gen_range(0..6))
-                    .map(|_| (0..rng.gen_range(0..6)).map(|_| Fr::rand(rng)).collect())
-                    .collect()
-            })
-            .collect(),
+        messages: (0..rng.gen_range(0..200)).map(|_| Fr::rand(rng)).collect(),
     }
 }
 
-/// Changes one length or one value of `proof` at random.
+/// Changes the length or one value of `proof` at random.
 fn mutate_randomly(proof: &mut LogupGkrProof<Fr>, rng: &mut StdRng) {
     let value = Fr::rand(rng);
-    let iterations = proof.masks.len().min(proof.round_polys.len());
-    let t = if iterations == 0 {
-        0
-    } else {
-        rng.gen_range(0..iterations)
-    };
-    match rng.gen_range(0..10) {
+    let messages = &mut proof.messages;
+    match rng.gen_range(0..6) {
         0 => {
-            proof.roots.pop();
+            messages.pop();
         }
-        1 => proof.roots.push([value; 2]),
-        2 => {
-            if let Some(root) = proof.roots.last_mut() {
-                root[rng.gen_range(0..2)] = if rng.gen_bool(0.5) { value } else { Fr::zero() };
-            }
+        1 => messages.push(value),
+        2 => messages.truncate(rng.gen_range(0..=messages.len())),
+        3 => messages.extend(vec![value; rng.gen_range(1..8)]),
+        choice if !messages.is_empty() => {
+            let at = rng.gen_range(0..messages.len());
+            messages[at] = if choice == 4 { value } else { Fr::zero() };
         }
-        3 => {
-            proof.round_polys.pop();
-        }
-        4 => {
-            proof.masks.pop();
-        }
-        5 if iterations > 0 => proof.round_polys[t].push([value; 3]),
-        6 if iterations > 0 => {
-            if let Some(round) = proof.round_polys[t].last_mut() {
-                round[rng.gen_range(0..3)] = value;
-            }
-        }
-        7 if iterations > 0 => proof.masks[t].push(vec![value; rng.gen_range(0..6)]),
-        8 if iterations > 0 => {
-            if let Some(mask) = proof.masks[t].last_mut() {
-                if rng.gen_bool(0.5) {
-                    mask.pop();
-                } else {
-                    mask.push(value);
-                }
-            }
-        }
-        _ if iterations > 0 => {
-            if let Some(slot) = proof.masks[t].last_mut().and_then(|mask| mask.last_mut()) {
-                *slot = value;
-            }
-        }
-        _ => proof.masks.push(vec![vec![value; 4]]),
+        _ => messages.push(Fr::zero()),
     }
 }
 
@@ -1525,9 +1870,9 @@ fn fuzz_shape_strategy() -> impl Strategy<Value = Vec<(usize, bool)>> {
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// Random statements against random proofs: wrong lengths everywhere,
-    /// right lengths with random values, and honest proofs with one length
-    /// or value changed. Any outcome is fine except a panic.
+    /// Random statements against random proofs: wrong lengths, right
+    /// lengths with random values, and honest proofs with their length or
+    /// one value changed. Any outcome is fine except a panic.
     #[test]
     fn verify_batch_never_panics_on_random_proofs(
         shape in fuzz_shape_strategy(),

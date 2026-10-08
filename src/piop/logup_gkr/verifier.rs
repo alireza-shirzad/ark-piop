@@ -3,8 +3,8 @@
 use ark_ff::PrimeField;
 
 use super::{
-    ALPHA_LABEL, CubicInterpolator, GkrClaims, GkrShape, LAMBDA_LABEL, LogupGkrProof, MASKS_LABEL,
-    MAX_GKR_VARS, MU_LABEL, RHO_LABEL, ROOTS_LABEL, ROUND_LABEL, absorb_shape, powers_of_two,
+    ALPHA_LABEL, FIRST_LAYERS_LABEL, GkrClaims, GkrShape, LAMBDA_LABEL, LogupGkrProof, MASKS_LABEL,
+    MAX_GKR_VARS, MU_LABEL, RHO_LABEL, ROUND_LABEL, absorb_shape, powers_of_two, proof_len,
 };
 use crate::{
     errors::{SnarkError, SnarkResult},
@@ -18,26 +18,8 @@ fn reject<T>(reason: impl Into<String>) -> SnarkResult<T> {
     ))
 }
 
-/// Whether an instance of `n_vars` variables takes part in iteration `t` of a
-/// batch whose largest instance has `n_max` variables. Instances join late
-/// so that all of them end on their input layer.
-fn is_active(n_vars: usize, t: usize, n_max: usize) -> bool {
-    n_vars + t >= n_max
-}
-
-/// Mask length the statement dictates: numerators of a unit-numerator
-/// instance are sent on every layer but its input layer, which all
-/// instances reach in the last iteration.
-fn mask_len(shape: &GkrShape, t: usize, n_max: usize) -> usize {
-    if shape.numerator_is_one && t + 1 == n_max {
-        2
-    } else {
-        4
-    }
-}
-
-/// Compares every length in the proof with the statement, so that the main
-/// loop can index without further checks. Returns `max n_i`.
+/// Compares the statement with the bounds and the proof with the length the
+/// statement dictates. Returns `max n_i`.
 fn check_lengths<F: PrimeField>(
     shape: &[GkrShape],
     proof: &LogupGkrProof<F>,
@@ -48,29 +30,37 @@ fn check_lengths<F: PrimeField>(
     if shape.iter().any(|s| s.n_vars > MAX_GKR_VARS) {
         return reject(format!("LogUp-GKR instance above {MAX_GKR_VARS} variables"));
     }
-    let n_max = shape.iter().map(|s| s.n_vars).max().unwrap_or(0);
-    if proof.roots.len() != shape.len() {
-        return reject("LogUp-GKR proof has the wrong number of roots");
+    if proof_len(shape) != Some(proof.messages.len()) {
+        return reject("LogUp-GKR proof has the wrong number of messages");
     }
-    if proof.round_polys.len() != n_max || proof.masks.len() != n_max {
-        return reject("LogUp-GKR proof has the wrong number of iterations");
+    Ok(shape.iter().map(|s| s.n_vars).max().unwrap_or(0))
+}
+
+/// The messages of a proof that are still to be read.
+struct Messages<'a, F>(&'a [F]);
+
+impl<'a, F: PrimeField> Messages<'a, F> {
+    /// The next `len` values. The total was compared with the statement up
+    /// front, so running out is not something a proof can cause; it is
+    /// reported like every other refusal all the same.
+    fn take(&mut self, len: usize) -> SnarkResult<&'a [F]> {
+        let Some((values, rest)) = self.0.split_at_checked(len) else {
+            return reject("LogUp-GKR proof ends early");
+        };
+        self.0 = rest;
+        Ok(values)
     }
-    for (t, (rounds, masks)) in proof.round_polys.iter().zip(&proof.masks).enumerate() {
-        if rounds.len() != t {
-            return reject(format!(
-                "LogUp-GKR iteration {t} has the wrong number of rounds"
-            ));
+
+    /// The next mask as `[p0, p1, q0, q1]`. It was sent in `len` values:
+    /// all four, or the denominators alone where the numerators are one by
+    /// the statement.
+    fn take_mask(&mut self, len: usize) -> SnarkResult<[F; 4]> {
+        match *self.take(len)? {
+            [p0, p1, q0, q1] => Ok([p0, p1, q0, q1]),
+            [q0, q1] => Ok([F::one(), F::one(), q0, q1]),
+            _ => reject("LogUp-GKR mask of unexpected length"),
         }
-        let mut expected = shape.iter().filter(|s| is_active(s.n_vars, t, n_max));
-        let masks_match = masks.len() == expected.clone().count()
-            && masks
-                .iter()
-                .all(|mask| expected.next().map(|s| mask_len(s, t, n_max)) == Some(mask.len()));
-        if !masks_match {
-            return reject(format!("LogUp-GKR iteration {t} has malformed masks"));
-        }
     }
-    Ok(n_max)
 }
 
 /// Verifies a batch against the statement `shape` and returns the claims the
@@ -85,84 +75,120 @@ pub(crate) fn verify_batch<F: PrimeField>(
     tr: &mut Tr<F>,
 ) -> SnarkResult<GkrClaims<F>> {
     let n_max = check_lengths(shape, proof)?;
+    let mut messages = Messages(&proof.messages);
+
+    let first_layers = messages.take(shape.iter().map(GkrShape::first_layer_len).sum())?;
+    let mut first_layers_left = Messages(first_layers);
+    // Per instance, the mask it sent last.
+    let mut gates = Vec::with_capacity(shape.len());
+    let mut roots = Vec::with_capacity(shape.len());
+    for s in shape {
+        if s.n_vars == 0 {
+            let [p, q] = *first_layers_left.take(2)? else {
+                return reject("LogUp-GKR root of unexpected length");
+            };
+            roots.push([p, q]);
+            // Never read: the instance is in no iteration.
+            gates.push([F::zero(); 4]);
+        } else {
+            let gate = first_layers_left.take_mask(s.first_layer_len())?;
+            let [p0, p1, q0, q1] = gate;
+            roots.push([p0 * q1 + p1 * q0, q0 * q1]);
+            gates.push(gate);
+        }
+    }
     // The root denominator is the product of the input denominators, so this
     // is what makes P/Q the sum of the fractions: with a zero among them the
     // root would be 0/0 whatever the other fractions are.
-    if proof.roots.iter().any(|root| root[1].is_zero()) {
+    if roots.iter().any(|root| root[1].is_zero()) {
         return reject("LogUp-GKR root with a zero denominator");
     }
 
-    // Not something a proof can cause, but reported like every other
-    // refusal, and before the transcript is touched.
-    let Some(cubic) = CubicInterpolator::new() else {
-        return reject("LogUp-GKR needs a field of characteristic above 3");
-    };
-
     absorb_shape(shape, tr)?;
-    tr.append_serializable_element(ROOTS_LABEL, &proof.roots)?;
+    tr.append_serializable_element(FIRST_LAYERS_LABEL, &first_layers)?;
 
     let pow2 = powers_of_two::<F>(n_max);
-    let mut claims = proof.roots.clone();
+    // A root is the claim on layer 0, and for an instance of one fraction
+    // the claim on its input.
+    let mut claims = roots.clone();
     let mut point: Vec<F> = Vec::with_capacity(n_max);
-    // (instance, alpha^instance, [p0, p1, q0, q1]) of the active instances.
-    let mut gates: Vec<(usize, F, [F; 4])> = Vec::with_capacity(shape.len());
+    let mut alpha_pows = vec![F::zero(); shape.len()];
 
     for t in 0..n_max {
-        let lambda = tr.get_and_append_challenge(LAMBDA_LABEL)?;
-        let alpha = tr.get_and_append_challenge(ALPHA_LABEL)?;
-
-        gates.clear();
-        let mut masks = proof.masks[t].iter();
-        let mut alpha_pow = F::one();
-        let mut claim = F::zero();
-        for (i, s) in shape.iter().enumerate() {
-            if is_active(s.n_vars, t, n_max) {
-                // An instance on k < t variables is constant in the other
-                // t - k = n_max - n_i sumcheck variables.
-                let weight = alpha_pow * pow2[n_max - s.n_vars];
-                claim += weight * (claims[i][0] + lambda * claims[i][1]);
-                let gate = match masks.next().map(Vec::as_slice) {
-                    Some(&[p0, p1, q0, q1]) => [p0, p1, q0, q1],
-                    Some(&[q0, q1]) => [F::one(), F::one(), q0, q1],
-                    _ => return reject("LogUp-GKR mask of unexpected length"),
-                };
-                gates.push((i, alpha_pow, gate));
-            }
-            alpha_pow *= alpha;
-        }
-
         let mut rho = Vec::with_capacity(t);
-        for evals in &proof.round_polys[t] {
-            tr.append_serializable_element(ROUND_LABEL, evals)?;
-            let r = tr.get_and_append_challenge(RHO_LABEL)?;
-            // s(1) is not sent: defining it as claim - s(0) is the round check.
-            claim = cubic.evaluate([evals[0], claim - evals[0], evals[1], evals[2]], r);
-            rho.push(r);
-        }
-        tr.append_serializable_element(MASKS_LABEL, &proof.masks[t])?;
+        // In the first iteration the largest instances join and no instance
+        // has a claim to reduce.
+        if t > 0 {
+            let lambda = tr.get_and_append_challenge(LAMBDA_LABEL)?;
+            let alpha = tr.get_and_append_challenge(ALPHA_LABEL)?;
 
-        // eq(point[..k], rho[..k]) for every prefix length k.
-        let mut eq_prefix = Vec::with_capacity(t + 1);
-        let mut eq = F::one();
-        eq_prefix.push(eq);
-        for (a, b) in point.iter().zip(&rho) {
-            let ab = *a * b;
-            eq *= ab + ab - a - b + F::one();
-            eq_prefix.push(eq);
-        }
+            let mut claim = F::zero();
+            let mut alpha_pow = F::one();
+            for ((s, instance_claim), slot) in shape.iter().zip(&claims).zip(&mut alpha_pows) {
+                // An instance that joins in this iteration brings its root,
+                // which is the gate value of its first layer by
+                // definition: there is nothing to check. The others are on
+                // k <= t variables and constant in the remaining t - k.
+                if let Some(k) = s.claimed_vars(t, n_max).filter(|k| *k > 0) {
+                    let [p, q] = *instance_claim;
+                    claim += alpha_pow * pow2[t - k] * (p + lambda * q);
+                }
+                *slot = alpha_pow;
+                alpha_pow *= alpha;
+            }
 
-        let mut expected = F::zero();
-        for (i, alpha_pow, [p0, p1, q0, q1]) in &gates {
-            let k = shape[*i].n_vars + t - n_max;
-            expected += *alpha_pow * eq_prefix[k] * (*p0 * q1 + *p1 * q0 + lambda * q0 * q1);
-        }
-        if expected != claim {
-            return reject(format!("LogUp-GKR layer check failed in iteration {t}"));
+            // Sum of alpha^idx · eq(point[..k], rho[..k]) · gate value over
+            // the instances that have bound all their k variables.
+            let mut done = F::zero();
+            // eq(point[..j], rho[..j]) after j rounds.
+            let mut bound = F::one();
+            for round in 0..t {
+                let [b, c] = *messages.take(2)? else {
+                    return reject("LogUp-GKR round of unexpected length");
+                };
+                tr.append_serializable_element(ROUND_LABEL, &[b, c])?;
+                let r = tr.get_and_append_challenge(RHO_LABEL)?;
+
+                // The round polynomial is
+                // 2^(t-1-round)·done + eq(z, X)·(a + b·X + c·X^2): each
+                // variable still summed over doubles what the finished
+                // instances contribute. Its values at 0 and 1 have to add
+                // up to the claim, which leaves one choice for `a`.
+                let z = point[round];
+                let a = claim - pow2[t - round] * done - z * (b + c);
+                let zr = z * r;
+                let eq = zr.double() - z - r + F::one();
+                claim = pow2[t - 1 - round] * done + eq * (a + r * (b + r * c));
+                bound *= eq;
+
+                // The masks of the instances that just bound their last
+                // variable come before the next round.
+                let unread = messages.0;
+                for ((s, gate), alpha_pow) in shape.iter().zip(&mut gates).zip(&alpha_pows) {
+                    let k = round + 1;
+                    if s.claimed_vars(t, n_max) == Some(k) {
+                        *gate = messages.take_mask(s.layer_len(k + 1))?;
+                        let [p0, p1, q0, q1] = *gate;
+                        done += *alpha_pow * bound * (p0 * q1 + p1 * q0 + lambda * q0 * q1);
+                    }
+                }
+                let sent = &unread[..unread.len() - messages.0.len()];
+                if !sent.is_empty() {
+                    tr.append_serializable_element(MASKS_LABEL, &sent)?;
+                }
+                rho.push(r);
+            }
+            // Every instance is finished, so nothing is left to sum over.
+            if claim != done {
+                return reject(format!("LogUp-GKR layer check failed in iteration {t}"));
+            }
         }
 
         let mu = tr.get_and_append_challenge(MU_LABEL)?;
-        for (i, _, [p0, p1, q0, q1]) in &gates {
-            claims[*i] = [*p0 + mu * (*p1 - p0), *q0 + mu * (*q1 - q0)];
+        for ((s, claim), [p0, p1, q0, q1]) in shape.iter().zip(&mut claims).zip(&gates) {
+            if s.claimed_vars(t, n_max).is_some() {
+                *claim = [*p0 + mu * (*p1 - p0), *q0 + mu * (*q1 - q0)];
+            }
         }
         point.clear();
         point.push(mu);
@@ -182,7 +208,7 @@ pub(crate) fn verify_batch<F: PrimeField>(
 
     Ok(GkrClaims {
         point,
-        roots: proof.roots.clone(),
+        roots,
         inputs: claims,
     })
 }

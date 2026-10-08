@@ -4,10 +4,11 @@
 use ark_ff::{PrimeField, batch_inversion};
 
 use super::{
-    ALPHA_LABEL, FractionInstance, GkrClaims, GkrShape, LAMBDA_LABEL, LogupGkrProof, MASKS_LABEL,
-    MAX_GKR_VARS, MU_LABEL, Numerator, RHO_LABEL, ROOTS_LABEL, ROUND_LABEL, absorb_shape,
+    ALPHA_LABEL, FIRST_LAYERS_LABEL, FractionInstance, GkrClaims, GkrShape, LAMBDA_LABEL,
+    LogupGkrProof, MASKS_LABEL, MAX_GKR_VARS, MU_LABEL, Numerator, RHO_LABEL, ROUND_LABEL,
+    absorb_shape,
     layer::{Layer, build_layer_stacks, eq_table, map_jobs, pool_threads},
-    powers_of_two,
+    powers_of_two, proof_len,
 };
 use crate::{
     errors::{SnarkError, SnarkResult},
@@ -67,7 +68,10 @@ fn shape_of<F>(instance: &FractionInstance<F>) -> SnarkResult<GkrShape> {
 
 /// One instance across the iterations of a batch.
 struct InstanceState<F> {
-    n_vars: usize,
+    shape: GkrShape,
+    /// Variables of the layer the instance has a claim on in the current
+    /// iteration, once it has joined.
+    k: Option<usize>,
     /// Index into the eq tables, shared by the instances of one size.
     eq: usize,
     /// Layers below the claimed one; `pop` yields the next.
@@ -81,7 +85,26 @@ struct InstanceState<F> {
     claim: [F; 2],
 }
 
-/// An instance taking part in the current iteration.
+impl<F: PrimeField> InstanceState<F> {
+    /// The gate left of the current layer once every variable of the
+    /// claimed layer, of which there are `k`, is bound.
+    fn gate(&self, k: usize) -> [F; 4] {
+        children(&self.bufs[src_buf(k)])
+    }
+}
+
+/// `[p0, p1, q0, q1]` of a layer that is down to one gate, the numerators
+/// being one where the layer has none.
+fn children<F: PrimeField>(layer: &Layer<F>) -> [F; 4] {
+    let [p0, p1] = if layer.p.is_empty() {
+        [F::one(); 2]
+    } else {
+        [layer.p[0], layer.p[1]]
+    };
+    [p0, p1, layer.q[0], layer.q[1]]
+}
+
+/// An instance in the sumcheck of the current iteration.
 struct Active<'a, F> {
     state: &'a mut InstanceState<F>,
     /// Variables of the claimed layer: the instance is live in rounds
@@ -89,18 +112,15 @@ struct Active<'a, F> {
     k: usize,
     /// The layer below is the numerator-free input layer.
     singles: bool,
-    /// `alpha^idx`, with `idx` the position in the full instance list.
-    alpha_pow: F,
-    /// `alpha^idx · 2^(t-k)`, the weight of the instance's own round
-    /// polynomial while it is live.
+    /// `alpha^idx · 2^(t-k)`, with `idx` the position in the full instance
+    /// list: the weight of the instance's own round polynomial while it is
+    /// live.
     weight: F,
     /// Running claim of the instance's own sumcheck, without batching weight
     /// and without the eq factor of the variables bound so far (which is the
     /// same for every live instance). It is part of the proof, not a
     /// cross-check: a round gets its polynomial at 1 from it, which is what
-    /// lets the round be computed from two sums instead of three, and once
-    /// the instance has bound its last variable it is the instance's
-    /// constant term in the later rounds of the iteration (`done` below).
+    /// lets the round be computed from two sums instead of three.
     claim: F,
 }
 
@@ -336,6 +356,110 @@ fn fold_round<F: PrimeField>(
     map_jobs(jobs, total_pairs >= SERIAL_BELOW_PAIRS, |job| job.run(r));
 }
 
+/// The sumcheck of an iteration: reduces the claims the instances hold on
+/// their layers, at prefixes of `point`, to the masks of the layers below,
+/// which it sends as each instance runs out of variables. Returns the
+/// challenges of its rounds, one per coordinate of `point`.
+fn reduce_claims<F: PrimeField>(
+    states: &mut [InstanceState<F>],
+    eqs: &mut [EqTables<F>],
+    point: &[F],
+    pow2: &[F],
+    tr: &mut Tr<F>,
+    messages: &mut Vec<F>,
+) -> SnarkResult<Vec<F>> {
+    let t = point.len();
+    let lambda = tr.get_and_append_challenge(LAMBDA_LABEL)?;
+    let alpha = tr.get_and_append_challenge(ALPHA_LABEL)?;
+
+    // A round derives its polynomial at 1 from the running claim, which
+    // takes a division by the round's coordinate of the point. A zero
+    // coordinate has probability 1/|F| per challenge and depends on
+    // nothing the caller chose, so the prover gives up on it instead of
+    // keeping a three-sum path that no test could reach.
+    let mut point_inv = point.to_vec();
+    batch_inversion(&mut point_inv);
+    if point_inv.iter().any(|z| z.is_zero()) {
+        return Err(invalid("LogUp-GKR challenge is zero"));
+    }
+    let mut active = Vec::new();
+    let mut alpha_pow = F::one();
+    for state in states.iter_mut() {
+        // An instance that joins in this iteration has no claim to reduce.
+        if let Some(k) = state.k.filter(|k| *k > 0) {
+            active.push(Active {
+                k,
+                singles: state.bufs[0].p.is_empty(),
+                weight: alpha_pow * pow2[t - k],
+                claim: state.claim[0] + lambda * state.claim[1],
+                state,
+            });
+        }
+        alpha_pow *= alpha;
+    }
+
+    let mut rho = Vec::with_capacity(t);
+    // eq of the point and the challenges over the variables bound so
+    // far: the same for every instance that is still live.
+    let mut bound = F::one();
+    for round in 0..t {
+        let sums = sum_round(&active, eqs, round, lambda);
+        // A live instance's round polynomial is
+        // `bound · eq(z, x) · h(x)` with `z = point[round]` and `h`
+        // quadratic. The sums give `h(0)` and its leading coefficient
+        // `c`; `h(1)` follows from `(1-z)·h(0) + z·h(1) = claim`.
+        let z = point[round];
+        let not_z = F::one() - z;
+        // Coefficients of `x` and `x^2` in the weighted sum of the `h`:
+        // with `bound` they are the message. The constant one is left to
+        // the verifier, who has the claim it follows from.
+        let mut message = [F::zero(); 2];
+        // Per instance, the coefficients of `h`.
+        let mut polys = vec![[F::zero(); 3]; active.len()];
+        let live = active.iter().zip(&sums).zip(&mut polys);
+        for ((a, sum), poly) in live.filter(|((a, _), _)| a.k > round) {
+            let [h0, c] = *sum;
+            let h1 = (a.claim - not_z * h0) * point_inv[round];
+            *poly = [h0, h1 - h0 - c, c];
+            message[0] += a.weight * poly[1];
+            message[1] += a.weight * c;
+        }
+        for coefficient in &mut message {
+            *coefficient *= bound;
+        }
+        tr.append_serializable_element(ROUND_LABEL, &message)?;
+        messages.extend(message);
+        let r = tr.get_and_append_challenge(RHO_LABEL)?;
+
+        bound *= not_z + r * (z - not_z);
+        for (a, poly) in active.iter_mut().zip(&polys).filter(|(a, _)| a.k > round) {
+            let [h0, b, c] = *poly;
+            a.claim = h0 + r * (b + r * c);
+        }
+        fold_round(&mut active, eqs, round, r);
+
+        // The instances that just bound their last variable are down to
+        // one gate, which is their mask. Sending it now, not with the
+        // others at the end, is what lets the verifier account for them in
+        // the rounds to come.
+        let sent = messages.len();
+        for a in active.iter().filter(|a| a.k == round + 1) {
+            let gate = a.state.gate(a.k);
+            let [p0, p1, q0, q1] = gate;
+            // The verifier's layer check, per instance and on the
+            // prover's own values: it holds for any input, true
+            // statement or not.
+            debug_assert_eq!(a.claim, p0 * q1 + p1 * q0 + lambda * q0 * q1);
+            messages.extend(&gate[4 - a.state.shape.layer_len(a.k + 1)..]);
+        }
+        if messages.len() > sent {
+            tr.append_serializable_element(MASKS_LABEL, &&messages[sent..])?;
+        }
+        rho.push(r);
+    }
+    Ok(rho)
+}
+
 /// Proves a batch of instances and returns the proof with the claims the
 /// caller has to discharge (see the module docs).
 ///
@@ -373,60 +497,47 @@ pub(crate) fn prove_batch<F: PrimeField>(
         .into_iter()
         .zip(&shape)
         .map(|(stack, s)| InstanceState {
-            n_vars: s.n_vars,
+            shape: *s,
+            k: None,
             eq: sizes.binary_search(&s.n_vars).unwrap_or(0),
             layers: stack.layers,
             bufs: Default::default(),
             claim: stack.root,
         })
         .collect();
-
     let roots: Vec<[F; 2]> = states.iter().map(|state| state.claim).collect();
-    tr.append_serializable_element(ROOTS_LABEL, &roots)?;
+
+    // The layer under each root, from which the verifier works the root out
+    // itself; an instance of one fraction has nothing but its root.
+    let mut messages = Vec::with_capacity(proof_len(&shape).unwrap_or(0));
+    for state in &states {
+        match state.layers.last() {
+            Some(first) => {
+                let gate = children(first);
+                messages.extend(&gate[4 - state.shape.first_layer_len()..]);
+            }
+            None => messages.extend(state.claim),
+        }
+    }
+    tr.append_serializable_element(FIRST_LAYERS_LABEL, &messages.as_slice())?;
 
     let pow2 = powers_of_two::<F>(n_max);
     let mut point: Vec<F> = Vec::with_capacity(n_max);
-    let mut round_polys = Vec::with_capacity(n_max);
-    let mut masks = Vec::with_capacity(n_max);
 
     for t in 0..n_max {
-        let lambda = tr.get_and_append_challenge(LAMBDA_LABEL)?;
-        let alpha = tr.get_and_append_challenge(ALPHA_LABEL)?;
-
-        // A round derives its polynomial at 1 from the running claim, which
-        // takes a division by the round's coordinate of the point. A zero
-        // coordinate has probability 1/|F| per challenge and depends on
-        // nothing the caller chose, so the prover gives up on it instead of
-        // keeping a three-sum path that no test could reach.
-        let mut point_inv = point.clone();
-        batch_inversion(&mut point_inv);
-        if point_inv.iter().any(|z| z.is_zero()) {
-            return Err(invalid("LogUp-GKR challenge is zero"));
-        }
-        let mut active = Vec::new();
-        let mut alpha_pow = F::one();
         for state in states.iter_mut() {
-            if let Some(k) = (state.n_vars + t).checked_sub(n_max) {
+            state.k = state.shape.claimed_vars(t, n_max);
+            if state.k.is_some() {
                 let Some(layer) = state.layers.pop() else {
                     return Err(invalid("LogUp-GKR layer stack ran out"));
                 };
-                let singles = layer.p.is_empty();
-                state.bufs[0] = layer;
-                if singles {
+                if layer.p.is_empty() {
                     // The scratch numerators stay idle from here on.
                     state.bufs[1].p = Vec::new();
                     state.bufs[2].p = Vec::new();
                 }
-                active.push(Active {
-                    k,
-                    singles,
-                    alpha_pow,
-                    weight: alpha_pow * pow2[t - k],
-                    claim: state.claim[0] + lambda * state.claim[1],
-                    state,
-                });
+                state.bufs[0] = layer;
             }
-            alpha_pow *= alpha;
         }
 
         // Built only now, and after releasing the table it replaces: the
@@ -439,97 +550,24 @@ pub(crate) fn prove_batch<F: PrimeField>(
             }
         }
 
-        // Sum of alpha^idx · claim over the instances that have no variable
-        // left; in round j each of the t-1-j later variables doubles it.
-        let mut done: F = active
-            .iter()
-            .filter(|a| a.k == 0)
-            .map(|a| a.alpha_pow * a.claim)
-            .sum();
-        let mut rho = Vec::with_capacity(t);
-        let mut rounds = Vec::with_capacity(t);
-        // eq of the point and the challenges over the variables bound so
-        // far: the same for every instance that is still live.
-        let mut bound = F::one();
-        for round in 0..t {
-            let sums = sum_round(&active, &eqs, round, lambda);
-            // A live instance's round polynomial is
-            // `bound · eq(z, x) · h(x)` with `z = point[round]` and `h`
-            // quadratic. The sums give `h(0)` and its leading coefficient
-            // `c`; `h(1)` follows from `(1-z)·h(0) + z·h(1) = claim`.
-            let z = point[round];
-            let not_z = F::one() - z;
-            let slope = z - not_z;
-            let mut inner = [F::zero(); 3];
-            // Per instance, the coefficients of `h`.
-            let mut polys = vec![[F::zero(); 3]; active.len()];
-            let live = active.iter().zip(&sums).zip(&mut polys);
-            for ((a, sum), poly) in live.filter(|((a, _), _)| a.k > round) {
-                let [h0, c] = *sum;
-                let h1 = (a.claim - not_z * h0) * point_inv[round];
-                let h2 = h1.double() - h0 + c.double();
-                let h3 = h2.double() - h1 + c.double();
-                *poly = [h0, h1 - h0 - c, c];
-                for (sum, h) in inner.iter_mut().zip([h0, h2, h3]) {
-                    *sum += a.weight * h;
-                }
-            }
-            // eq(z, x) at 0, 2 and 3.
-            let eq2 = z + slope;
-            let lines = [not_z, eq2, eq2 + slope];
-            let mut evals = [pow2[t - 1 - round] * done; 3];
-            for ((eval, line), sum) in evals.iter_mut().zip(lines).zip(inner) {
-                *eval += bound * line * sum;
-            }
-            tr.append_serializable_element(ROUND_LABEL, &evals)?;
-            let r = tr.get_and_append_challenge(RHO_LABEL)?;
-
-            bound *= not_z + r * slope;
-            for (a, poly) in active.iter_mut().zip(&polys).filter(|(a, _)| a.k > round) {
-                let [h0, b, c] = *poly;
-                a.claim = h0 + r * (b + r * c);
-                if a.k == round + 1 {
-                    done += a.alpha_pow * bound * a.claim;
-                }
-            }
-            fold_round(&mut active, &mut eqs, round, r);
-            rho.push(r);
-            rounds.push(evals);
-        }
-
-        // After its k folds an instance's tables are down to the two
-        // children of one gate: the mask.
-        let gates: Vec<[F; 4]> = active
-            .iter()
-            .map(|a| {
-                let top = &a.state.bufs[if a.k == 0 { 0 } else { 2 - a.k % 2 }];
-                let [q0, q1] = [top.q[0], top.q[1]];
-                let [p0, p1] = if a.singles {
-                    [F::one(); 2]
-                } else {
-                    [top.p[0], top.p[1]]
-                };
-                // The verifier's layer check, per instance and on the
-                // prover's own values: it holds for any input, true
-                // statement or not.
-                debug_assert_eq!(a.claim, p0 * q1 + p1 * q0 + lambda * q0 * q1);
-                [p0, p1, q0, q1]
-            })
-            .collect();
-        let iteration_masks: Vec<Vec<F>> = active
-            .iter()
-            .zip(&gates)
-            .map(|(a, gate)| gate[if a.singles { 2 } else { 0 }..].to_vec())
-            .collect();
-        tr.append_serializable_element(MASKS_LABEL, &iteration_masks)?;
+        // In the first iteration the largest instances join and nothing
+        // else happens.
+        let rho = if t == 0 {
+            Vec::new()
+        } else {
+            reduce_claims(&mut states, &mut eqs, &point, &pow2, tr, &mut messages)?
+        };
         let mu = tr.get_and_append_challenge(MU_LABEL)?;
 
-        for (a, [p0, p1, q0, q1]) in active.into_iter().zip(gates) {
-            a.state.claim = [p0 + mu * (p1 - p0), q0 + mu * (q1 - q0)];
-            // The layer just read and the larger scratch become the scratch
-            // of the next iteration; the smaller scratch is released when
-            // the next layer takes its slot.
-            a.state.bufs.rotate_right(1);
+        for state in states.iter_mut() {
+            if let Some(k) = state.k {
+                let [p0, p1, q0, q1] = state.gate(k);
+                state.claim = [p0 + mu * (p1 - p0), q0 + mu * (q1 - q0)];
+                // The layer just read and the larger scratch become the
+                // scratch of the next iteration; the smaller scratch is
+                // released when the next layer takes its slot.
+                state.bufs.rotate_right(1);
+            }
         }
         for eq in eqs.iter_mut().filter(|eq| eq.k.is_some()) {
             eq.bufs.swap(0, 1);
@@ -537,16 +575,10 @@ pub(crate) fn prove_batch<F: PrimeField>(
         point.clear();
         point.push(mu);
         point.extend(rho);
-        round_polys.push(rounds);
-        masks.push(iteration_masks);
     }
 
     let inputs = states.iter().map(|state| state.claim).collect();
-    let proof = LogupGkrProof {
-        roots: roots.clone(),
-        round_polys,
-        masks,
-    };
+    let proof = LogupGkrProof { messages };
     let claims = GkrClaims {
         point,
         roots,
