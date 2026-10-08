@@ -46,8 +46,8 @@ use crate::{
     },
     tracker_core::TrackerCore,
     types::{
-        CommitmentBinding, LookupProtocol, SharedArgConfig, SumcheckSubproof, TrackerID,
-        artifact::Artifact, claim::TrackerZerocheckClaim,
+        CommitmentBinding, LookupMessages, LookupProtocol, SharedArgConfig, SumcheckSubproof,
+        TrackerID, artifact::Artifact, claim::TrackerZerocheckClaim,
     },
     verifier::{
         ArgVerifier,
@@ -3455,6 +3455,115 @@ fn logup_sum_that_balances_a_false_lookup_is_rejected() {
     assert_stopped_by_the_input_claims(session(), |session| {
         session.prove_shifting_sums(&[zero, zero, zero, gap])
     });
+}
+
+/// Two keyed sums into one table, with every kind of term that sends a
+/// sum: a column with a helper of its own, a constant column under tracked
+/// weights of `2^weights_nv` rows, which sends the sum of the weights, a
+/// weighted table, and two columns that share a helper. Five sums, three
+/// of them in the first relation. The constant column has 8 rows.
+fn five_sum_session(weights_nv: usize) -> Session {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let table = fv(0..16);
+    let sevens = fv([7; 8]);
+    let weights = fv(1..=1 << weights_nv);
+    let alone = in_table(4, 16, 1);
+    let shared = [in_table(3, 16, 2), in_table(3, 16, 3)];
+    let columns = [
+        table.clone(),
+        tally(&table, &[(&alone, None), (&sevens, Some(&weights))]),
+        alone,
+        weights,
+        tally(&table, &[(&shared[0], None), (&shared[1], None)]),
+        shared[0].clone(),
+        shared[1].clone(),
+    ];
+    let relations = [
+        (vec![(2, None), (2, Some(3))], vec![(0, Some(1))]),
+        (vec![(5, None), (6, None)], vec![(0, Some(4))]),
+    ];
+    let mut session = Session::new(&columns, &[], &relations);
+    session.relations[0].fxs[1] = KeyedTerm::Constant {
+        value: F::from(7u64),
+        nv: 3,
+    };
+    session
+}
+
+/// A sum is in the transcript from where the verifier reads it: one that
+/// is changed in the proof moves the `gamma` of every relation after its
+/// own and what the verifier draws once the batch is reduced, and leaves
+/// the `gamma` of its own relation and of those before it alone. So no
+/// sum can be chosen in view of a challenge drawn after it.
+#[test]
+fn logup_sums_are_in_the_transcript_from_where_they_are_read() {
+    /// The verifier's party, taking note of the `gamma` of every helper.
+    struct Recording(Vec<F>);
+    impl logup::Party<VerifierTracker<B>> for Recording {
+        fn helper(
+            &mut self,
+            tracker: &mut VerifierTracker<B>,
+            cols: &[TrackerID],
+            mult: Option<TrackerID>,
+            gamma: F,
+        ) -> SnarkResult<(TrackerID, F)> {
+            self.0.push(gamma);
+            logup::VerifyingParty.helper(tracker, cols, mult, gamma)
+        }
+
+        fn sum(&mut self, tracker: &mut VerifierTracker<B>, poly: TrackerID) -> SnarkResult<F> {
+            logup::VerifyingParty.sum(tracker, poly)
+        }
+
+        fn reject(&self, reason: String) -> SnarkError {
+            logup::Party::<VerifierTracker<B>>::reject(&logup::VerifyingParty, reason)
+        }
+    }
+
+    let mut session = five_sum_session(3);
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    let sums = proof.lookup_messages.sums().to_vec();
+    assert_eq!(sums.len(), 5);
+    session.verify(&proof).unwrap();
+
+    // The reduction without the comparison of the two sides, which a
+    // single changed sum would not get past: the `gamma` of each relation
+    // and the challenge that follows the batch.
+    let reduce = |sums: Vec<F>| -> ([F; 2], F) {
+        let mut proof = proof.clone();
+        proof.lookup_messages = LookupMessages::LogUp { sums };
+        let mut verifier = session.verifier.fork();
+        verifier.set_proof_ref(&proof);
+        for id in &session.ids {
+            verifier.track_mv_com_by_id(*id).unwrap();
+        }
+        let mut party = Recording(Vec::new());
+        {
+            let tracker = verifier.tracker();
+            let mut tracker = tracker.borrow_mut();
+            logup::reduce_keyed_sums(&mut *tracker, &mut party, &session.relations).unwrap();
+        }
+        // A helper for the lone column and one for the table, then one
+        // for the pair and one for the table again.
+        let gammas = party.0;
+        assert_eq!(gammas.len(), 4);
+        assert_eq!((gammas[0], gammas[2]), (gammas[1], gammas[3]));
+        let after = verifier.get_and_append_challenge(b"probe").unwrap();
+        ([gammas[0], gammas[2]], after)
+    };
+
+    let (gammas, after) = reduce(sums.clone());
+    assert_ne!(gammas[0], gammas[1]);
+    for changed in 0..sums.len() {
+        let mut sums = sums.clone();
+        sums[changed] += F::one();
+        let (changed_gammas, changed_after) = reduce(sums);
+        assert_eq!(changed_gammas[0], gammas[0]);
+        // The first three sums are those of the first relation.
+        assert_eq!(changed_gammas[1] != gammas[1], changed < 3);
+        assert_ne!(changed_after, after);
+    }
 }
 
 /// The terms `session` lays its relations out as under LogUp.
