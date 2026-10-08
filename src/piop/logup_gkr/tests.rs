@@ -199,6 +199,17 @@ pub(crate) enum Deviation {
         round: usize,
         delta: [Fr; 2],
     },
+    /// A round message is bent as by `RoundPoly`, and the mask `instance`
+    /// sends in the same iteration makes up for it: its gate value is
+    /// chosen so that the claim the false message left is the one the true
+    /// messages of the remaining rounds go on from. A mask sent before that
+    /// round is the true one, and nothing is made up for.
+    RoundPolyMadeUpByMask {
+        iteration: usize,
+        round: usize,
+        delta: [Fr; 2],
+        instance: usize,
+    },
     /// The mask `instance` sends in `iteration` is moved by `delta` along a
     /// direction that keeps its gate value. In the iteration the instance
     /// joins in, that mask is its first layer and the move keeps the root.
@@ -438,6 +449,7 @@ pub(crate) fn naive_prove_batch(
             // What the masks sent so far in this iteration come to, as the
             // verifier computes it.
             let mut done = Fr::zero();
+            let mut made_up = false;
             for j in 0..t {
                 let free = t - 1 - j;
                 // `f` at `(rho, x, b)`, summed over the boolean `b`.
@@ -481,11 +493,19 @@ pub(crate) fn naive_prove_batch(
                         "round {j} of iteration {t}"
                     );
                 }
-                if let Some(Deviation::RoundPoly {
-                    iteration,
-                    round,
-                    delta,
-                }) = deviation
+                if let Some(
+                    Deviation::RoundPoly {
+                        iteration,
+                        round,
+                        delta,
+                    }
+                    | Deviation::RoundPolyMadeUpByMask {
+                        iteration,
+                        round,
+                        delta,
+                        ..
+                    },
+                ) = deviation
                     && (iteration, round) == (t, j)
                 {
                     message[0] += delta[0];
@@ -546,10 +566,40 @@ pub(crate) fn naive_prove_batch(
                         .map(|&&(i, _, weight)| weight * bound * gate(gates[i], lambda))
                         .sum::<Fr>()
                 };
+                if let Some(Deviation::RoundPolyMadeUpByMask {
+                    iteration,
+                    round,
+                    instance,
+                    ..
+                }) = deviation
+                    && iteration == t
+                    && round <= j
+                    && let Some(&&(i, k, weight)) = finished.iter().find(|(i, _, _)| *i == instance)
+                {
+                    // What the instances that still have variables sum to
+                    // from here. The claim is that plus the masks sent so
+                    // far, doubled per variable still summed over; with a
+                    // false message behind it, the masks have to come to
+                    // something else than the tables give.
+                    let rest: Fr = (0..1u64 << free)
+                        .map(|bits| {
+                            let mut y = rho.clone();
+                            y.extend((0..free).map(|bit| Fr::from((bits >> bit) & 1)));
+                            let live = running.iter().filter(|(_, k, _)| *k > j + 1);
+                            live.map(|other| term(other, &y, None)).sum::<Fr>()
+                        })
+                        .sum();
+                    let masks = (claim - rest) / Fr::from(1u64 << free);
+                    let need = (masks - total(&gates)) / (weight * bound);
+                    gates[i] = bend_mask(gates[i], short(i, k + 1), need, lambda);
+                    made_up = true;
+                }
                 // After the last round every instance is finished and the
                 // gate values of the masks have to add up to the claim.
                 if free == 0 {
-                    if fault.is_none() {
+                    // A lie made up for by a mask is one the verifier does
+                    // not see in this iteration either.
+                    if fault.is_none() || made_up {
                         assert_eq!(total(&gates), claim, "layer check of iteration {t}");
                     }
                     if t < patch_until && total(&gates) != claim {
@@ -1274,6 +1324,114 @@ fn cheating_prover_is_rejected_at_early_mask() {
     // The two instances of size 3 in iterations 2 and 3, the one of size 2
     // in iteration 3.
     assert_eq!(early, 5);
+}
+
+/// A false round message can be made up for inside its iteration by an
+/// instance that runs out of variables after it. The gate value of that
+/// instance's mask is a constant of every later round, so the cheater picks
+/// the one under which the false claim is where the true messages go on
+/// from, and the iteration's layer check passes with every other mask true.
+/// What it has to give for that is the mask itself, which is absorbed
+/// before the next challenge and is not what the tables fold to.
+#[test]
+fn cheating_prover_making_up_for_a_round_by_an_early_mask_is_rejected() {
+    let batch = [(4, false), (4, true), (3, true), (3, false), (2, false)];
+    let instances = random_batch(&batch, 79);
+    let shape = shape_of(&instances);
+    let n_max = 4;
+    let (honest, _) = naive_prove_batch(&instances, &mut transcript(), None);
+    let layout = layout(&shape);
+    let delta = [3u64, 5].map(Fr::from);
+
+    let mut early = 0;
+    for iteration in 1..n_max {
+        for (instance, &(n, _)) in batch.iter().enumerate() {
+            // Out of variables after round `k - 1` of `iteration` rounds.
+            let Some(k) = (n + iteration).checked_sub(n_max).filter(|k| *k > 0) else {
+                continue;
+            };
+            for round in 0..iteration {
+                let fault = |delta: [Fr; 2], patch_until: usize| Fault {
+                    deviation: Deviation::RoundPolyMadeUpByMask {
+                        iteration,
+                        round,
+                        delta,
+                        instance,
+                    },
+                    patch_until,
+                };
+                let identity = fault([Fr::zero(); 2], n_max);
+                assert_eq!(outcome(&instances, &shape, identity), Outcome::Accepted);
+
+                for patch_until in 0..=n_max {
+                    let fault = fault(delta, patch_until);
+                    let (proof, _) = naive_prove_batch(&instances, &mut transcript(), Some(fault));
+                    let at = layout.rounds[iteration][round];
+                    assert_eq!(proof.messages[..at], honest.messages[..at]);
+                    assert_eq!(proof.messages[at], honest.messages[at] + delta[0]);
+                    assert_eq!(proof.messages[at + 1], honest.messages[at + 1] + delta[1]);
+
+                    // The cheater that bends the round and makes up for it
+                    // nowhere before the last round.
+                    let unaided = Fault {
+                        deviation: Deviation::RoundPoly {
+                            iteration,
+                            round,
+                            delta,
+                        },
+                        patch_until,
+                    };
+                    let (plain, _) =
+                        naive_prove_batch(&instances, &mut transcript(), Some(unaided));
+                    if round < k && k < iteration {
+                        let mask = layout.masks[&(iteration, instance)].clone();
+                        assert_eq!(proof.messages[..mask.start], plain.messages[..mask.start]);
+                        assert_ne!(proof.messages[mask.clone()], plain.messages[mask]);
+                    }
+
+                    if round >= k {
+                        // The mask went out before the false message, and
+                        // this cheater is that one.
+                        assert_eq!(proof, plain);
+                        assert_eq!(
+                            outcome_of(&instances, &shape, &proof),
+                            expected_outcome(patch_until, n_max),
+                            "{fault:?}"
+                        );
+                    } else if iteration + 1 == n_max {
+                        // The reference prover has checked that the masks
+                        // of this iteration come to its claim. It is the
+                        // last one and the mask is of the input layer:
+                        // `verify_batch` ACCEPTS without any mask patched
+                        // after the last round, and the false claim is the
+                        // one on the inputs of that instance, left to the
+                        // CALLER'S OPENING.
+                        let claims = verify_batch(&shape, &proof, &mut transcript()).unwrap();
+                        let truth = direct_inputs(&instances, &shape, &claims.point);
+                        for (i, (claim, truth)) in claims.inputs.iter().zip(&truth).enumerate() {
+                            assert_eq!(claim != truth, i == instance, "{fault:?}");
+                        }
+                    } else {
+                        // The claim folded from that mask is false, and the
+                        // LAYER CHECK of the next iteration fails, or of the
+                        // first later one that is not patched.
+                        assert_eq!(
+                            outcome_of(&instances, &shape, &proof),
+                            expected_outcome(patch_until, n_max),
+                            "{fault:?}"
+                        );
+                    }
+                }
+                if round < k && k < iteration {
+                    early += 1;
+                }
+            }
+        }
+    }
+    // The instances of size 3 after the first round of iteration 2 and
+    // after either of the first two of iteration 3, the one of size 2 after
+    // the first round of iteration 3.
+    assert_eq!(early, 7);
 }
 
 #[test]

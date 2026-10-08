@@ -228,6 +228,14 @@ fn standalone_operand<F>(term: Either<TrackerID, F>, nv: usize) -> Operand<F> {
 /// The entries are walked relation by relation, the `f` side of each before
 /// its `g` side. A group holds its entries in that order, and the instances
 /// come out in that order too, a group at the position of its first entry.
+///
+/// The size of a polynomial the proof commits to is the prover's choice,
+/// that of a lookup's multiplicities above all, and with it which stack an
+/// entry is in. That is harmless: the size is fixed with the commitment,
+/// before any `gamma`; multiplicities of any size state the same lookup,
+/// repeated along their table or the table along them; and an entry keeps
+/// the `gamma` of the relation the statement puts it in, wherever it is
+/// stacked.
 pub(super) fn plan_instances<T: TrackerCore>(
     tracker: &T,
     relations: &[KeyedSumRelation<T::F>],

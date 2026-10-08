@@ -1748,6 +1748,84 @@ fn lookups_into_tables_of_one_size_share_their_instances() {
     }
 }
 
+/// How long the multiplicity of a lookup is, is up to the prover: the
+/// verifier has its size from the commitment. Whatever it is, the table
+/// side is the table with the multiplicity repeated along it, or the
+/// multiplicity with the table repeated along it. A longer or a shorter
+/// one therefore proves the same lookup, in an instance of another shape
+/// that the table shares with no other, and proves no other lookup.
+#[test]
+fn multiplicities_of_another_size_than_their_tables_prove_the_same_lookups() {
+    let tables = [fv(0..8), fv(100..108)];
+    // The second sub column holds every value of its table once.
+    let subs = [in_table(3, 8, 1), fv((0..8).map(|i| 100 + (i * 3) % 8))];
+    let counts = tally(&tables[0], &[(&subs[0], None)]);
+    let session = |subs: &[Vec<F>; 2], first: &[F], second: &[F]| {
+        let columns = [
+            tables[0].clone(),
+            first.to_vec(),
+            tables[1].clone(),
+            second.to_vec(),
+            subs[0].clone(),
+            subs[1].clone(),
+        ];
+        let relations = [
+            (vec![(4, None)], vec![(0, Some(1))]),
+            (vec![(5, None)], vec![(2, Some(3))]),
+        ];
+        Session::new(&columns, &[], &relations)
+    };
+    let unit = (Side::F, 3, 1, true, false, false);
+
+    // As long as their tables, which then share a stack.
+    let same = session(&subs, &counts, &fv([1; 8]));
+    assert_eq!(
+        layout(&same.plan()),
+        [unit, (Side::G, 3, 1, false, false, false)]
+    );
+    same.prove_and_verify().unwrap();
+
+    // Twice as long for the first table, the counts in either half or half
+    // of them in each, and half as long for the second.
+    let zeros = vec![F::zero(); 8];
+    let halved: Vec<F> = counts.iter().map(|c| *c / F::from(2u64)).collect();
+    let long = [
+        [&counts[..], &zeros[..]].concat(),
+        [&zeros[..], &counts[..]].concat(),
+        [&halved[..], &halved[..]].concat(),
+    ];
+    let short = fv([1; 4]);
+    for long in &long {
+        let other = session(&subs, long, &short);
+        assert_eq!(
+            layout(&other.plan()),
+            [
+                unit,
+                (Side::G, 4, 0, false, false, false),
+                (Side::G, 3, 0, false, false, false)
+            ]
+        );
+        other.prove_and_verify().unwrap();
+
+        // A count too many in the half the table is repeated into.
+        let mut miscounted = long.clone();
+        miscounted[11] += F::one();
+        let session = session(&subs, &miscounted, &short);
+        assert_rejected_in_the_reduction(session.prove_and_verify());
+    }
+    assert_rejected_in_the_reduction(
+        session(&subs, &long[0], &fv([1, 1, 1, 2])).prove_and_verify(),
+    );
+
+    // A value of the other table in either sub column.
+    for (sub, value) in [(0, 100u64), (1, 0)] {
+        let mut subs = subs.clone();
+        subs[sub][5] = F::from(value);
+        let session = session(&subs, &long[0], &short);
+        assert_rejected_in_the_reduction(session.prove_and_verify());
+    }
+}
+
 /// A column of a keyed sum with its optional multiplicity.
 type KeyedCol = (Vec<F>, Option<Vec<F>>);
 
