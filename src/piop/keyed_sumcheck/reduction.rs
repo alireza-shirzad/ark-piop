@@ -794,9 +794,10 @@ pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
                 }
             });
     if checked.is_err() {
-        // The roots and the constants are compared here and nowhere else.
-        // The claims pushed up to the failure can all be true, and the
-        // subproofs are consumed, so a verifier that went on would accept.
+        // The two sides, and under LogUp-GKR the constants, are compared
+        // here and nowhere else. The claims pushed up to the failure can
+        // all be true, and the subproofs and sums are consumed, so a
+        // verifier that went on would accept.
         tracker.reject();
     }
     checked
