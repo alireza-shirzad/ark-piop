@@ -3662,19 +3662,18 @@ fn logup_helper_of_another_column_than_the_statements_is_rejected() {
     stopped(session, sub, &fake);
 }
 
-/// The size of a helper is the prover's to choose with its commitment, and
-/// the term's sum runs over the helper's hypercube. A column of 8 rows is
-/// not a permutation of itself written twice, but its helper written twice
-/// is a helper of the column on 16 rows, every claim about which is true,
-/// and sums to twice as much. The verifier takes a helper of its column's
-/// size and no other.
-#[test]
-fn logup_helper_of_another_size_than_its_column_is_refused() {
+/// A prover with a column of 8 rows on one side of a keyed sum and the
+/// same rows twice on the other: 16 rows, which are not a permutation of
+/// the 8. It commits for the column `cheated` to a helper of the other
+/// column's size, and is honest about the other column. Every claim it
+/// makes is true, and its two sides balance. Returns what the verifier
+/// makes of it.
+fn helper_of_the_other_columns_size(column: &[F], cheated: usize) -> Result<(), Rejected> {
     PROTOCOL.set(LookupProtocol::LogUp);
-    let column = fv((0..8).map(|i| 3 * i + 1));
-    let twice = [column.clone(), column.clone()].concat();
-    let relation = (vec![(0, None)], vec![(1, None)]);
-    let mut session = Session::new(&[column.clone(), twice], &[], &[relation]);
+    let twice = [column, column].concat();
+    let honest = 1 - cheated;
+    let relation = (vec![(cheated, None)], vec![(honest, None)]);
+    let mut session = Session::new(&[column.to_vec(), twice], &[], &[relation]);
     let ids = session.ids.clone();
     {
         // The reduction by hand: the prover's own schedule would refuse
@@ -3687,38 +3686,90 @@ fn logup_helper_of_another_size_than_its_column_is_refused() {
             .iter()
             .map(|value| (*value - gamma).inverse().unwrap())
             .collect();
-        let wide = [inverses.clone(), inverses].concat();
-        let helper = tracker
-            .track_and_commit_mat_mv_p(&mle(&wide), false)
+        // The helper of the column on 16 rows is its helper written
+        // twice, and that of the 16 rows is their helper's first half.
+        let table = match cheated {
+            0 => [inverses.clone(), inverses].concat(),
+            _ => inverses,
+        };
+        let helper = match tracker
+            .track_and_commit_mat_mv_p(&mle(&table), false)
             .unwrap()
-            .left()
-            .unwrap();
-        let wide_sum = sum(&wide);
-        tracker.send_logup_sum(wide_sum);
-        TrackerCore::append_field_element(tracker, b"keyed term sum", &wide_sum).unwrap();
-        tracker.push_raw_sumcheck_claim(helper, wide_sum).unwrap();
-        let product = tracker.mul_polys(ids[0], helper);
+        {
+            Either::Left(helper) => helper,
+            // A constant is tracked by id alone, as the honest prover's.
+            Either::Right((helper, _)) => {
+                let nv = table.len().trailing_zeros() as usize;
+                tracker.register_mat_mv_poly(
+                    helper,
+                    MLE::from_evaluations_vec(nv, table[..1].to_vec()),
+                );
+                helper
+            }
+        };
+        let helper_sum = sum(&table);
+        tracker.send_logup_sum(helper_sum);
+        TrackerCore::append_field_element(tracker, b"keyed term sum", &helper_sum).unwrap();
+        tracker.push_raw_sumcheck_claim(helper, helper_sum).unwrap();
+        let product = tracker.mul_polys(ids[cheated], helper);
         let shifted = tracker.mul_scalar(helper, gamma);
         let rest = tracker.sub_polys(product, shifted);
         let rest = tracker.add_scalar(rest, -F::one());
         tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
 
-        let mut honest = logup::ProvingParty {
+        let mut party = logup::ProvingParty {
             evals: ColumnEvals::new(),
         };
         let other_side = logup::Term::Single {
-            col: (Either::Left(ids[1]), 4),
+            col: (Either::Left(ids[honest]), 3 + honest),
             mult: None,
         };
-        let other_sum = logup::reduce_term(tracker, &mut honest, &other_side, gamma).unwrap();
+        let other_sum = logup::reduce_term(tracker, &mut party, &other_side, gamma).unwrap();
         // The two sides balance.
-        assert_eq!(wide_sum, other_sum);
+        assert_eq!(helper_sum, other_sum);
     }
     let proof = session.prover.build_proof().unwrap();
+    session.verify(&proof)
+}
+
+/// The size of a helper is the prover's to choose with its commitment, and
+/// the term's sum runs over the helper's hypercube. A column of 8 rows is
+/// not a permutation of itself written twice, but its helper written twice
+/// is a helper of the column on 16 rows, every claim about which is true,
+/// and sums to twice as much. The verifier takes a helper of its column's
+/// size and no other.
+#[test]
+fn logup_helper_of_another_size_than_its_column_is_refused() {
+    let column = fv((0..8).map(|i| 3 * i + 1));
     assert!(matches!(
-        session.verify(&proof),
+        helper_of_the_other_columns_size(&column, 0),
         Err(Rejected::Reduction(SnarkError::VerifierError(_)))
     ));
+}
+
+/// The other way round: the first half of the helper of the 16 rows is a
+/// helper of theirs on every row, the rows repeating as it does, and sums
+/// to half as much.
+#[test]
+fn logup_helper_smaller_than_its_column_is_refused() {
+    let column = fv((0..8).map(|i| 3 * i + 1));
+    assert!(matches!(
+        helper_of_the_other_columns_size(&column, 1),
+        Err(Rejected::Reduction(SnarkError::VerifierError(_)))
+    ));
+}
+
+/// The helper of a constant column is a constant, which the proof carries
+/// as a value with a size it declares. That size is the prover's to choose
+/// like a commitment's, in either direction.
+#[test]
+fn logup_constant_helper_declared_of_another_size_than_its_column_is_refused() {
+    for cheated in [0, 1] {
+        assert!(matches!(
+            helper_of_the_other_columns_size(&fv([7; 8]), cheated),
+            Err(Rejected::Reduction(SnarkError::VerifierError(_)))
+        ));
+    }
 }
 
 /// Which columns share a helper: two neighbours of one size on one side,
