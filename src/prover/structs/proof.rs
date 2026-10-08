@@ -36,7 +36,7 @@ use crate::{
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress};
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use derivative::Derivative;
 /// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
@@ -112,16 +112,31 @@ where
                 version, PROOF_ENCODING_VERSION
             )));
         }
-        let mut cursor = std::io::Cursor::new(payload);
-        match Self::deserialize_compressed_unchecked(&mut cursor) {
-            Ok(proof) => Ok(proof),
-            Err(_) => {
-                let mut fallback_cursor = std::io::Cursor::new(payload);
-                Ok(Self::deserialize_uncompressed_unchecked(
-                    &mut fallback_cursor,
-                )?)
-            }
-        }
+        // The payload is a proof and nothing after it. The fields that
+        // say how long the rest is come from the prover: bytes left over
+        // would be ones no check of the verifier looks at, such as the
+        // sums of a LogUp proof whose tag was changed to LogUp-GKR's.
+        let decode = |compress: Compress| {
+            let mut cursor = std::io::Cursor::new(payload);
+            Self::deserialize_with_mode(&mut cursor, compress, Validate::No)
+                .map(|proof| (proof, payload.len() - cursor.position() as usize))
+        };
+        let left_over = match decode(Compress::Yes) {
+            Ok((proof, 0)) => return Ok(proof),
+            Ok((_, left_over)) => Some(left_over),
+            Err(_) => None,
+        };
+        // `to_bytes` writes compressed; a payload written uncompressed is
+        // read as well, on the same terms. It is the longer of the two,
+        // which may be what the bytes left over were.
+        let left_over = match (decode(Compress::No), left_over) {
+            (Ok((proof, 0)), _) => return Ok(proof),
+            (_, Some(left_over)) | (Ok((_, left_over)), None) => left_over,
+            (Err(error), None) => return Err(error.into()),
+        };
+        Err(SnarkError::Artifact(format!(
+            "{left_over} bytes follow the proof in its buffer"
+        )))
     }
 
     fn size_breakdown(&self) -> Option<SizeBreakdown> {

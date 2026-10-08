@@ -178,6 +178,57 @@ fn proof_envelope_rejects_version_2() {
     assert!(matches!(err, SnarkError::Artifact(_)), "got {err:?}");
 }
 
+/// A proof with a sumcheck claim on a committed column, which gives it a
+/// commitment: something that is not encoded the same compressed and
+/// uncompressed.
+fn proof_with_a_commitment() -> SNARKProof<B> {
+    let (mut prover, _verifier) = test_prelude::<B>().unwrap();
+    let nv = 3usize;
+    let evals: Vec<F> = (0..(1 << nv)).map(|i| F::from(i as u64)).collect();
+    let poly = MLE::from_evaluations_vec(nv, evals.clone());
+    let tracked = prover.track_and_commit_mat_mv_poly(&poly).unwrap();
+    let sum: F = evals.iter().copied().fold(F::zero(), |a, b| a + b);
+    prover.add_mv_sumcheck_claim(tracked.id(), sum).unwrap();
+    prover.build_proof().unwrap()
+}
+
+/// The bytes of a proof are a proof and nothing after it. Whatever
+/// followed would be ignored by every check of the verifier, and could be
+/// what is left of a proof whose fields were made to end early.
+#[test]
+fn proof_envelope_rejects_trailing_bytes() {
+    let bytes = proof_with_a_commitment().to_bytes().unwrap();
+    for trailing in [&[0u8][..], &[0xff; 9], &bytes[1..]] {
+        let longer = [&bytes[..], trailing].concat();
+        let err = SNARKProof::<B>::from_bytes(&longer).expect_err("trailing bytes must fail");
+        match err {
+            SnarkError::Artifact(msg) => assert!(
+                msg.contains(&format!("{} bytes", trailing.len())),
+                "error message must count the trailing bytes: got {msg}"
+            ),
+            other => panic!("expected SnarkError::Artifact, got {other:?}"),
+        }
+    }
+}
+
+/// A payload written uncompressed is still read, as the same proof, and
+/// nothing may follow it either.
+#[test]
+fn proof_envelope_reads_an_uncompressed_payload_whole() {
+    let proof = proof_with_a_commitment();
+    let bytes = proof.to_bytes().unwrap();
+    let mut uncompressed = vec![PROOF_ENCODING_VERSION];
+    proof.serialize_uncompressed(&mut uncompressed).unwrap();
+    assert!(uncompressed.len() > bytes.len());
+
+    let decoded = SNARKProof::<B>::from_bytes(&uncompressed).unwrap();
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+
+    uncompressed.push(0);
+    let err = SNARKProof::<B>::from_bytes(&uncompressed).expect_err("trailing bytes must fail");
+    assert!(matches!(err, SnarkError::Artifact(_)), "got {err:?}");
+}
+
 /// An empty buffer must fail with a descriptive error, not a panic.
 #[test]
 fn proof_envelope_rejects_empty_buffer() {

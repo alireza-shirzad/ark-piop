@@ -2738,36 +2738,46 @@ fn proof_with_lookups_renamed_to_another_protocol_is_rejected() {
 }
 
 /// The tag of a LogUp proof sits before its sums. Set to a byte that names
-/// no protocol, the bytes do not decode. Flipped to LogUp-GKR's they do, as
-/// a proof without sums, since nothing reads the bytes past the tag; that
-/// proof is refused by the verifier it was made for, which is told of
-/// another protocol, and by a LogUp-GKR verifier, which shares no challenge
-/// with its prover.
+/// no protocol, the bytes do not decode. Flipped to LogUp-GKR's, they are a
+/// proof without sums with the bytes of the sums left over behind it, and
+/// the bytes of a proof end where the proof does: they do not decode
+/// either. Flipped and cut off behind the tag, they are that proof and
+/// nothing else, which is refused by the verifier it was made for, which
+/// is told of another protocol, and by a LogUp-GKR verifier, which shares
+/// no challenge with its prover.
 #[test]
 fn logup_proof_with_a_flipped_protocol_tag_is_rejected() {
     let (logup, gkr) = (LookupProtocol::LogUp, LookupProtocol::LogUpGkr);
+    let flipped = |proof: &SNARKProof<B>, to: Option<u8>| {
+        let mut bytes = proof.to_bytes().unwrap();
+        // The two sub columns share a helper: a sum for them, for
+        // their table, and for each side of the keyed sum.
+        assert_eq!(logup_sums(proof).len(), 4);
+        let tag_at = bytes.len() - 1 - 8 - 32 * 4;
+        match to {
+            Some(to) => bytes[tag_at] = to,
+            None => bytes[tag_at] ^= 1,
+        }
+        (bytes, tag_at)
+    };
     let flip = |to: Option<u8>| {
         move |proof: &mut SNARKProof<B>| {
-            let mut bytes = proof.to_bytes().unwrap();
-            // The two sub columns share a helper: a sum for them, for
-            // their table, and for each side of the keyed sum.
-            assert_eq!(logup_sums(proof).len(), 4);
-            let tag_at = bytes.len() - 1 - 8 - 32 * 4;
-            let Some(to) = to else {
-                bytes[tag_at] ^= 1;
-                *proof = SNARKProof::<B>::from_bytes(&bytes).unwrap();
-                assert_eq!(proof.lookup_messages, LookupMessages::LogUpGkr);
-                return;
-            };
-            bytes[tag_at] = to;
+            let (bytes, _) = flipped(proof, to);
             assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
         }
     };
-    assert_check_failed(lookups_e2e(logup, logup, flip(None)));
-    assert_rejected_by_verifier(lookups_e2e(logup, gkr, flip(None)));
-    for unknown in [2, 0xff] {
-        assert_accepted(lookups_e2e(logup, logup, flip(Some(unknown))));
+    for to in [None, Some(2), Some(0xff)] {
+        assert_accepted(lookups_e2e(logup, logup, flip(to)));
     }
+
+    let flip_and_cut = |proof: &mut SNARKProof<B>| {
+        let (mut bytes, tag_at) = flipped(proof, None);
+        bytes.truncate(tag_at + 1);
+        *proof = SNARKProof::<B>::from_bytes(&bytes).unwrap();
+        assert_eq!(proof.lookup_messages, LookupMessages::LogUpGkr);
+    };
+    assert_check_failed(lookups_e2e(logup, logup, flip_and_cut));
+    assert_rejected_by_verifier(lookups_e2e(logup, gkr, flip_and_cut));
 }
 
 fn with_logup_sums(change: impl FnOnce(&mut Vec<F>)) -> impl FnOnce(&mut SNARKProof<B>) {
