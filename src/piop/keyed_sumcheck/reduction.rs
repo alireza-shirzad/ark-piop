@@ -49,7 +49,7 @@ use crate::{
     },
     prover::{ArgProver, tracker::ProverTracker},
     tracker_core::TrackerCore,
-    types::TrackerID,
+    types::{LookupProtocol, TrackerID},
     verifier::{ArgVerifier, errors::VerifierError, tracker::VerifierTracker},
 };
 
@@ -747,8 +747,9 @@ impl<B: SnarkBackend> Party<VerifierTracker<B>> for VerifyingParty {
     }
 }
 
-/// Proves `relations` in one batch. `evals` may hold the evaluations of any
-/// of their polynomials; the rest is read from the tracker.
+/// Proves `relations` in one batch, with the lookup protocol the prover is
+/// configured for. `evals` may hold the evaluations of any of their
+/// polynomials; the rest is read from the tracker.
 pub(crate) fn prove_keyed_sums<B: SnarkBackend>(
     prover: &mut ArgProver<B>,
     relations: &[KeyedSumRelation<B::F>],
@@ -756,19 +757,41 @@ pub(crate) fn prove_keyed_sums<B: SnarkBackend>(
 ) -> SnarkResult<()> {
     let tracker = prover.tracker();
     let mut tracker = tracker.borrow_mut();
-    reduce_keyed_sums(&mut *tracker, &mut ProvingParty { evals }, relations)?;
+    match tracker.config().lookup_protocol {
+        LookupProtocol::LogUpGkr => {
+            reduce_keyed_sums(&mut *tracker, &mut ProvingParty { evals }, relations)?;
+        }
+        LookupProtocol::LogUp => {
+            return Err(invalid_parameters("LogUp is not available".to_string()));
+        }
+    }
     Ok(())
 }
 
-/// Verifies `relations` in one batch, mirroring [`prove_keyed_sums`].
+/// Verifies `relations` in one batch, mirroring [`prove_keyed_sums`]. The
+/// protocol is the one the verifier is configured for; a proof that names
+/// another is refused before anything is read off it.
 pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
     verifier: &mut ArgVerifier<B>,
     relations: &[KeyedSumRelation<B::F>],
 ) -> SnarkResult<()> {
     let tracker = verifier.tracker();
     let mut tracker = tracker.borrow_mut();
-    let checked = reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations)
-        .and_then(|reduction| check_batch_sums(&reduction).map_err(VerifyingParty::check_failed));
+    let checked =
+        tracker
+            .check_lookup_protocol()
+            .and_then(|()| match tracker.config().lookup_protocol {
+                LookupProtocol::LogUpGkr => {
+                    reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations).and_then(
+                        |reduction| {
+                            check_batch_sums(&reduction).map_err(VerifyingParty::check_failed)
+                        },
+                    )
+                }
+                LookupProtocol::LogUp => Err(VerifyingParty::check_failed(
+                    "LogUp is not available".to_string(),
+                )),
+            });
     if checked.is_err() {
         // The roots and the constants are compared here and nowhere else.
         // The claims pushed up to the failure can all be true, and the

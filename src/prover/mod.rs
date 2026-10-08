@@ -28,7 +28,7 @@ use crate::{
         structs::polynomial::TrackedPoly,
     },
     setup::structs::SNARKPk,
-    types::{CommitmentBinding, TrackerID},
+    types::{CommitmentBinding, SharedArgConfig, TrackerID},
 };
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
@@ -67,10 +67,29 @@ impl<B> ArgProver<B>
 where
     B: SnarkBackend,
 {
-    #[instrument(level = "debug", skip_all)]
-    /// Create a prover from the proving key
+    /// Create a prover from the proving key, under the default
+    /// configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_pk_with_config`] returns that as an error.
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
-        let mut prover = Self::new_from_tracker(ProverTracker::new_from_pk(pk.clone()));
+        Self::new_from_pk_with_config(pk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Create a prover from the proving key under `config`. The verifier
+    /// has to be given the same one:
+    /// [`ArgVerifier::new_from_vk_with_config`](crate::verifier::ArgVerifier::new_from_vk_with_config).
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds; see
+    /// [`LookupProtocol::from_env`](crate::types::LookupProtocol::from_env).
+    #[instrument(level = "debug", skip_all)]
+    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        let tracker = ProverTracker::new_from_pk_with_config(pk.clone(), config)?;
+        let mut prover = Self::new_from_tracker(tracker);
         let indexed_polys: BTreeMap<String, TrackedPoly<B>> = pk
             .indexed_tracked_polys
             .iter()
@@ -84,7 +103,7 @@ where
             .borrow_mut()
             .set_indexed_tracked_polys(indexed_polys);
 
-        prover
+        Ok(prover)
     }
     /// Create a prover from the tracker
     #[instrument(level = "debug", skip_all)]

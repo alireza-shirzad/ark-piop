@@ -25,10 +25,15 @@ use ark_piop::{
             proof::{PROOF_ENCODING_VERSION, SNARKProof},
         },
     },
+    setup::KeyGenerator,
     test_utils::prelude_with_vars,
-    types::{TrackerID, artifact::Artifact},
+    types::{
+        LOOKUP_PROTOCOL_ENV, LookupMessages, LookupProtocol, SharedArgConfig, TrackerID,
+        artifact::Artifact,
+    },
     verifier::{
         ArgVerifier,
+        errors::VerifierError,
         structs::oracle::{Oracle, TrackedOracle},
     },
 };
@@ -1695,14 +1700,14 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
     assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));
 }
 
-/// The version tag is the one of the flat LogUp-GKR messages, and a proof
-/// tagged with the version before it is not decoded.
+/// The version tag is the one of proofs that name their lookup protocol,
+/// and a proof tagged with the version before it is not decoded.
 #[test]
 fn snark_proof_tagged_with_the_previous_encoding_version_is_refused() {
     let (proof, _, _) = proof_with_lookups();
     let mut bytes = proof.to_bytes().unwrap();
-    assert_eq!(bytes[0], 4);
-    bytes[0] = 3;
+    assert_eq!(bytes[0], 5);
+    bytes[0] = 4;
     assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
 }
 
@@ -2137,4 +2142,256 @@ fn keyed_sumcheck_checks_its_shape_on_both_sides() {
             KeyedSumcheck::<B>::verify(verifier, input((1, 1, 1, 1)))
         },
     ));
+}
+
+// ─── The lookup protocol as a choice ─────────────────────────────────────
+
+const PROTOCOLS: [LookupProtocol; 2] = [LookupProtocol::LogUp, LookupProtocol::LogUpGkr];
+
+fn other(protocol: LookupProtocol) -> LookupProtocol {
+    match protocol {
+        LookupProtocol::LogUp => LookupProtocol::LogUpGkr,
+        LookupProtocol::LogUpGkr => LookupProtocol::LogUp,
+    }
+}
+
+/// A prover and a verifier configured for a protocol each, whatever the
+/// environment names.
+fn setup_under(prover: LookupProtocol, verifier: LookupProtocol) -> (ArgProver<B>, ArgVerifier<B>) {
+    let (pk, vk) = KeyGenerator::<B>::new()
+        .with_num_mv_vars(SRS_NV)
+        .gen_keys()
+        .unwrap();
+    let config = |lookup_protocol| SharedArgConfig {
+        lookup_protocol,
+        ..SharedArgConfig::default()
+    };
+    (
+        ArgProver::new_from_pk_with_config(pk, config(prover)).unwrap(),
+        ArgVerifier::new_from_vk_with_config(vk, config(verifier)).unwrap(),
+    )
+}
+
+/// The statement of one sumcheck claim on a committed column: nothing in it
+/// is proved by a lookup protocol. Returns the verifier's verdict on the
+/// proof as `retag` leaves it.
+fn sum_claim_e2e(
+    prover: LookupProtocol,
+    verifier: LookupProtocol,
+    retag: impl FnOnce(&mut SNARKProof<B>),
+) -> SnarkResult<()> {
+    let (mut prover, mut verifier) = setup_under(prover, verifier);
+    let column = summed_column();
+    let id = commit(&mut prover, &column)?.id();
+    prover.add_mv_sumcheck_claim(id, sum(&column))?;
+    let mut proof = prover.build_proof()?;
+    retag(&mut proof);
+    verifier.set_proof_ref(&proof);
+    let oracle = verifier.track_mv_com_by_id(id)?;
+    verifier.add_mv_sumcheck_claim(oracle.id(), sum(&column));
+    verifier.verify()
+}
+
+fn assert_check_failed(res: SnarkResult<()>) {
+    let err = res.expect_err("the verifier must refuse the proof");
+    assert!(
+        matches!(
+            err,
+            SnarkError::VerifierError(VerifierError::VerifierCheckFailed(_))
+        ),
+        "expected a failed verifier check, got {err:?}"
+    );
+}
+
+#[test]
+fn lookup_protocol_is_named_logup_or_gkr_in_any_case() {
+    for name in ["logup", "LogUp", "LOGUP"] {
+        assert_eq!(
+            name.parse::<LookupProtocol>().unwrap(),
+            LookupProtocol::LogUp
+        );
+    }
+    for name in ["gkr", "Gkr", "GKR"] {
+        assert_eq!(
+            name.parse::<LookupProtocol>().unwrap(),
+            LookupProtocol::LogUpGkr
+        );
+    }
+    for name in ["", " gkr", "logup-gkr", "logupgkr", "0", "plookup"] {
+        let err = name.parse::<LookupProtocol>().unwrap_err();
+        assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
+    }
+    assert_eq!(LookupProtocol::default(), LookupProtocol::LogUpGkr);
+}
+
+/// What this process's environment makes of a default configuration and of
+/// the constructors. It holds under any environment, and prints which of
+/// the three outcomes it found for
+/// [`environment_names_the_default_lookup_protocol`], which runs it under
+/// each.
+#[test]
+fn default_configuration_follows_the_environment() {
+    let keys = || {
+        KeyGenerator::<B>::new()
+            .with_num_mv_vars(SRS_NV)
+            .gen_keys()
+            .unwrap()
+    };
+    let explicit = SharedArgConfig {
+        lookup_protocol: LookupProtocol::LogUp,
+        ..SharedArgConfig::default()
+    };
+    let named = std::env::var(LOOKUP_PROTOCOL_ENV).ok();
+    let expected = match named.as_deref().map(str::to_ascii_lowercase).as_deref() {
+        None => Some(LookupProtocol::LogUpGkr),
+        Some("logup") => Some(LookupProtocol::LogUp),
+        Some("gkr") => Some(LookupProtocol::LogUpGkr),
+        Some(_) => None,
+    };
+    let Some(expected) = expected else {
+        // The default cannot say so; everything that builds on it does.
+        assert_eq!(
+            SharedArgConfig::default().lookup_protocol,
+            LookupProtocol::LogUpGkr
+        );
+        let err = LookupProtocol::from_env().unwrap_err();
+        assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
+        let (pk, vk) = keys();
+        for config in [SharedArgConfig::default(), explicit] {
+            let err = ArgProver::<B>::new_from_pk_with_config(pk.clone(), config.clone())
+                .map(drop)
+                .unwrap_err();
+            assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
+            let err = ArgVerifier::<B>::new_from_vk_with_config(vk.clone(), config)
+                .map(drop)
+                .unwrap_err();
+            assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
+        }
+        let default_prover = std::panic::catch_unwind(|| drop(ArgProver::<B>::new_from_pk(pk)));
+        let default_verifier = std::panic::catch_unwind(|| drop(ArgVerifier::<B>::new_from_vk(vk)));
+        assert!(default_prover.is_err() && default_verifier.is_err());
+        println!("lookup protocol of the environment: refused");
+        return;
+    };
+    assert_eq!(LookupProtocol::from_env().unwrap(), named.map(|_| expected));
+    assert_eq!(SharedArgConfig::default().lookup_protocol, expected);
+    // An explicit configuration is not the environment's to change.
+    let (pk, vk) = keys();
+    let mut prover = ArgProver::<B>::new_from_pk_with_config(pk.clone(), explicit).unwrap();
+    assert_eq!(
+        prover.build_proof().unwrap().lookup_messages.protocol(),
+        LookupProtocol::LogUp
+    );
+    // The default constructors are those of a default configuration.
+    let mut prover = ArgProver::<B>::new_from_pk(pk);
+    let proof = prover.build_proof().unwrap();
+    assert_eq!(proof.lookup_messages.protocol(), expected);
+    let mut verifier = ArgVerifier::<B>::new_from_vk(vk);
+    verifier.set_proof(proof);
+    assert_accepted(verifier.verify());
+    println!("lookup protocol of the environment: {expected}");
+}
+
+/// The environment variable is read by a process once, so each value gets a
+/// process of its own: this test binary, running the test above.
+#[test]
+fn environment_names_the_default_lookup_protocol() {
+    let probe = |value: Option<&str>| {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "default_configuration_follows_the_environment",
+            "--nocapture",
+        ]);
+        match value {
+            Some(value) => command.env(LOOKUP_PROTOCOL_ENV, value),
+            None => command.env_remove(LOOKUP_PROTOCOL_ENV),
+        };
+        let output = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert!(
+            output.status.success(),
+            "under {value:?}: {stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("lookup protocol of the environment: "))
+            .unwrap_or_else(|| panic!("under {value:?} the probe did not run: {stdout}"))
+            .to_string()
+    };
+    assert_eq!(probe(None), "LogUp-GKR");
+    for value in ["logup", "LogUp", "LOGUP"] {
+        assert_eq!(probe(Some(value)), "LogUp");
+    }
+    for value in ["gkr", "GKR"] {
+        assert_eq!(probe(Some(value)), "LogUp-GKR");
+    }
+    for value in ["", "logup-gkr", "1", "default"] {
+        assert_eq!(probe(Some(value)), "refused");
+    }
+}
+
+/// A proof names the protocol of the prover that made it, and keeps the
+/// name through its encoding.
+#[test]
+fn proof_names_the_lookup_protocol_of_its_prover() {
+    for protocol in PROTOCOLS {
+        let (mut prover, _) = setup_under(protocol, protocol);
+        let proof = prover.build_proof().unwrap();
+        assert_eq!(proof.lookup_messages.protocol(), protocol);
+        let decoded = SNARKProof::<B>::from_bytes(&proof.to_bytes().unwrap()).unwrap();
+        assert_eq!(decoded.lookup_messages, proof.lookup_messages);
+    }
+}
+
+/// The two sides have to be configured for the same protocol, in a proof
+/// without a single lookup as well: the proof would be accepted by a
+/// verifier of the prover's protocol, and the other one refuses it.
+#[test]
+fn verifier_of_another_protocol_refuses_a_proof_without_lookups() {
+    for protocol in PROTOCOLS {
+        assert_accepted(sum_claim_e2e(protocol, protocol, |_| ()));
+        assert_check_failed(sum_claim_e2e(protocol, other(protocol), |_| ()));
+    }
+}
+
+/// The name a proof carries is not what makes a verifier accept it. A proof
+/// renamed to the verifier's protocol passes the comparison of the names
+/// and fails on the transcript, which opens with the prover's protocol;
+/// one renamed away from it fails the comparison.
+#[test]
+fn proof_renamed_to_another_lookup_protocol_is_rejected() {
+    let rename = |to: LookupProtocol| {
+        move |proof: &mut SNARKProof<B>| {
+            proof.lookup_messages = match to {
+                LookupProtocol::LogUp => LookupMessages::LogUp { sums: Vec::new() },
+                LookupProtocol::LogUpGkr => LookupMessages::LogUpGkr,
+            }
+        }
+    };
+    for protocol in PROTOCOLS {
+        assert_check_failed(sum_claim_e2e(protocol, protocol, rename(other(protocol))));
+        assert_rejected_by_verifier(sum_claim_e2e(
+            protocol,
+            other(protocol),
+            rename(other(protocol)),
+        ));
+    }
+}
+
+/// The protocol's tag is the last byte of a LogUp-GKR proof. Flipped to
+/// LogUp's, the bytes announce sums that are not there; set to anything
+/// else, they name no protocol. Neither decodes.
+#[test]
+fn proof_bytes_with_a_flipped_protocol_tag_do_not_decode() {
+    let (mut prover, _) = setup_under(LookupProtocol::LogUpGkr, LookupProtocol::LogUpGkr);
+    let bytes = prover.build_proof().unwrap().to_bytes().unwrap();
+    let tag = *bytes.last().unwrap();
+    assert!(SNARKProof::<B>::from_bytes(&bytes).is_ok());
+    for flipped in [tag ^ 1, tag ^ 2, 0xff] {
+        let mut bytes = bytes.clone();
+        *bytes.last_mut().unwrap() = flipped;
+        assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+    }
 }

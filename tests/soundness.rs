@@ -11,6 +11,7 @@ use ark_piop::{
     types::artifact::Artifact,
     verifier::errors::VerifierError,
 };
+use ark_serialize::{CanonicalSerialize, Compress};
 
 type B = DefaultSnarkBackend;
 type F = <B as SnarkBackend>::F;
@@ -150,10 +151,10 @@ fn proof_envelope_rejects_wrong_version() {
     }
 }
 
-/// Version 2 had no LogUp-GKR subproofs. With that field last, cutting the
-/// empty list off a current proof gives exactly its version-2 encoding,
-/// which must be refused by its tag, and must not decode under the current
-/// tag either.
+/// Version 2 had no LogUp-GKR subproofs and named no lookup protocol. With
+/// those fields last, cutting the empty list and the protocol's messages
+/// off a current proof gives exactly its version-2 encoding, which must be
+/// refused by its tag, and must not decode under the current tag either.
 #[test]
 fn proof_envelope_rejects_version_2() {
     let (mut prover, _verifier) = test_prelude::<B>().unwrap();
@@ -167,8 +168,9 @@ fn proof_envelope_rejects_version_2() {
     assert!(proof.logup_gkr_subproofs.is_empty());
 
     let mut bytes = proof.to_bytes().unwrap();
-    let empty_list = bytes.split_off(bytes.len() - 8);
-    assert_eq!(empty_list, [0u8; 8]);
+    let lookup_messages = proof.lookup_messages.serialized_size(Compress::Yes);
+    let since_version_2 = bytes.split_off(bytes.len() - 8 - lookup_messages);
+    assert_eq!(since_version_2[..8], [0u8; 8]);
     assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
 
     bytes[0] = 2;

@@ -23,11 +23,16 @@ use crate::{
 /// in place of three evaluations, and each gate where its instance runs out
 /// of variables. The lookups and keyed sums of a batch share its instances,
 /// each under a `gamma` of its own.
-pub const PROOF_ENCODING_VERSION: u8 = 4;
+///
+/// v5: `SNARKProof.lookup_messages` names the lookup protocol the proof was
+/// made with and carries the term sums of LogUp.
+pub const PROOF_ENCODING_VERSION: u8 = 5;
 use crate::{
     pcs::PCS,
     piop::logup_gkr::LogupGkrProof,
-    types::{CommitmentID, ConstantID, PointID, PointMap, SumcheckSubproof, TrackerID},
+    types::{
+        CommitmentID, ConstantID, LookupMessages, PointID, PointMap, SumcheckSubproof, TrackerID,
+    },
 };
 use ark_ff::PrimeField;
 use ark_poly::Polynomial;
@@ -45,10 +50,12 @@ where
     pub uv_pcs_subproof: PCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
-    /// One proof per LogUp-GKR run, in the order the protocol ran them. Kept
+    /// One proof per LogUp-GKR run, in the order the protocol ran them.
+    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    /// The lookup protocol of the proof and its messages. New fields go
     /// last: wrappers that serialize a proof without the version tag then
     /// fail to decode an older layout instead of misreading it.
-    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    pub lookup_messages: LookupMessages<B::F>,
 }
 
 /// The PCS subproof of a SNARK for the ZKSQL protocol.
@@ -187,6 +194,7 @@ where
             .miscellaneous_field_vectors
             .serialized_size(Compress::Yes);
         let logup_gkr_subproofs = self.logup_gkr_subproofs.serialized_size(Compress::Yes);
+        let lookup_messages = self.lookup_messages.serialized_size(Compress::Yes);
         // +1 for the version byte `to_bytes` prepends, matching on-disk size.
         let total = self.serialized_size(Compress::Yes) + 1;
 
@@ -230,6 +238,7 @@ where
                     "logup_gkr_subproofs",
                     SizeBreakdown::leaf(logup_gkr_subproofs),
                 ),
+                ("lookup_messages", SizeBreakdown::leaf(lookup_messages)),
             ],
         ))
     }

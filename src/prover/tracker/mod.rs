@@ -43,8 +43,8 @@ use crate::{
         structs::{SNARKPk, SNARKVk},
     },
     types::{
-        CommitmentBinding, CommitmentID, ConstantID, PCSOpeningProof, PointID, SharedArgConfig,
-        SumcheckBucketProof, SumcheckSubproof, TrackerID,
+        CommitmentBinding, CommitmentID, ConstantID, LookupProtocol, PCSOpeningProof, PointID,
+        SharedArgConfig, SumcheckBucketProof, SumcheckSubproof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
@@ -441,19 +441,51 @@ where
         })
     }
 
+    /// A tracker under the default configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_pk_with_config`] returns that as an error.
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         Self::new_from_pk_with_config(pk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> Self {
-        let mut tracker = Self {
-            pk: ProcessedSNARKPk::new_from_pk(&pk),
+    /// A tracker under `config`, which the verifier has to share.
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds: a default configuration made under
+    /// such a value does not show it.
+    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        LookupProtocol::from_env()?;
+        let mut tracker = Self::with_fresh_state(&pk, config);
+        tracker
+            .config
+            .lookup_protocol
+            .bind(&mut tracker.state.transcript)?;
+        tracker.add_vk_to_transcript(pk.vk.clone());
+        Ok(tracker)
+    }
+
+    /// [`Self::new_from_pk_with_config`] without the lookup protocol in the
+    /// transcript, which is how a transcript started before proofs named
+    /// their protocol. No verifier accepts what this proves; it is for
+    /// comparing proofs with those of that time.
+    #[cfg(test)]
+    pub(crate) fn new_from_pk_unbound(pk: SNARKPk<B>, config: SharedArgConfig) -> Self {
+        let mut tracker = Self::with_fresh_state(&pk, config);
+        tracker.add_vk_to_transcript(pk.vk.clone());
+        tracker
+    }
+
+    fn with_fresh_state(pk: &SNARKPk<B>, config: SharedArgConfig) -> Self {
+        Self {
+            pk: ProcessedSNARKPk::new_from_pk(pk),
             state: ProverState::default(),
             config,
             self_rc: None,
-        };
-        tracker.add_vk_to_transcript(pk.vk.clone());
-        tracker
+        }
     }
 
     pub fn set_self_rc(&mut self, self_rc: Weak<RefCell<ProverTracker<B>>>) {

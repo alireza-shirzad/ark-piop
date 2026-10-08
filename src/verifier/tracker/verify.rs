@@ -1012,6 +1012,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn verify(&mut self) -> SnarkResult<()> {
         // Fail fast if the caller forgot to set a proof.
         let proof = self.proof_or_err()?;
+        self.check_lookup_protocol()?;
         if self.state.rejected {
             return Err(SnarkError::VerifierError(
                 VerifierError::VerifierCheckFailed(

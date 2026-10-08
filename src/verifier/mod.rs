@@ -24,7 +24,7 @@ use crate::{
     },
     prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk,
-    types::{CommitmentBinding, TrackerID},
+    types::{CommitmentBinding, SharedArgConfig, TrackerID},
 };
 
 use crate::pcs::PCS;
@@ -57,10 +57,30 @@ impl<B> ArgVerifier<B>
 where
     B: SnarkBackend,
 {
+    /// Create a verifier from the verifying key, under the default
+    /// configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_vk_with_config`] returns that as an error.
+    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
+        Self::new_from_vk_with_config(vk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Create a verifier from the verifying key under `config`, which has
+    /// to be the one the prover was given:
+    /// [`ArgProver::new_from_pk_with_config`](crate::prover::ArgProver::new_from_pk_with_config).
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds; see
+    /// [`LookupProtocol::from_env`](crate::types::LookupProtocol::from_env).
     // TODO: See if you can shorten this function
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
-        let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
+    pub fn new_from_vk_with_config(vk: SNARKVk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        let tracker = VerifierTracker::new_from_vk_with_config(vk.clone(), config)?;
+        let verifier = Self::new_from_tracker(tracker);
         let range_tr_polys: BTreeMap<String, TrackedOracle<B>> = vk
             .indexed_coms
             .iter()
@@ -73,7 +93,7 @@ where
             .tracker_rc
             .borrow_mut()
             .set_indexed_tracked_polys(range_tr_polys);
-        verifier
+        Ok(verifier)
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -489,6 +509,10 @@ where
     /// sum has been found false, every later call fails too.
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&self) -> SnarkResult<()> {
+        // Before anything is read off the proof: under another protocol
+        // than the proof's, the reduction would fail on whatever it misses
+        // first.
+        self.tracker_rc.borrow().check_lookup_protocol()?;
         let mut verifier = self.clone();
         verifier.reduce_lookup_claims()?;
         self.tracker_rc.borrow_mut().verify()

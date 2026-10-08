@@ -19,7 +19,7 @@ use crate::{
     prover::structs::proof::SNARKProof,
     transcript::Tr,
     types::{
-        CommitmentID, PointID, PointMap, QueryMap, SumcheckSubproof, TrackerID,
+        CommitmentID, LookupMessages, PointID, PointMap, QueryMap, SumcheckSubproof, TrackerID,
         claim::{TrackerNoZerocheckClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
@@ -88,6 +88,7 @@ where
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
     pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    pub lookup_messages: LookupMessages<B::F>,
 }
 
 impl<B> ProcessedProof<B>
@@ -106,6 +107,7 @@ where
             miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
             miscellaneous_field_vectors: proof.miscellaneous_field_vectors.clone(),
             logup_gkr_subproofs: proof.logup_gkr_subproofs.clone(),
+            lookup_messages: proof.lookup_messages.clone(),
         }
     }
 }

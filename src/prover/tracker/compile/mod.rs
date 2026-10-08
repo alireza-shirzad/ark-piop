@@ -17,6 +17,7 @@ mod sumcheck;
 mod virt_poly;
 
 use super::*;
+use crate::types::LookupMessages;
 
 /// Run one statement inside a `bench_stats` span named `$name`, so a
 /// subscriber can time it. Covers mid-function regions that a
@@ -114,6 +115,10 @@ where
             miscellaneous_field_elements: take(&mut self.state.miscellaneous_field_elements),
             miscellaneous_field_vectors: take(&mut self.state.miscellaneous_field_vectors),
             logup_gkr_subproofs: take(&mut self.state.logup_gkr_subproofs),
+            lookup_messages: match self.config.lookup_protocol {
+                LookupProtocol::LogUp => LookupMessages::LogUp { sums: Vec::new() },
+                LookupProtocol::LogUpGkr => LookupMessages::LogUpGkr,
+            },
         })
     }
 }

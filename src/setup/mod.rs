@@ -2,7 +2,7 @@
 //! ([`SNARKPk`](structs::SNARKPk)) and a verifying key
 //! ([`SNARKVk`](structs::SNARKVk)).
 
-pub(crate) mod errors;
+pub mod errors;
 pub mod structs;
 
 use crate::{

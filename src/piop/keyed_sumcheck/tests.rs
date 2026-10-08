@@ -38,7 +38,10 @@ use crate::{
     setup::KeyGenerator,
     test_utils::prelude_with_vars,
     tracker_core::TrackerCore,
-    types::{CommitmentBinding, SharedArgConfig, SumcheckSubproof, TrackerID, artifact::Artifact},
+    types::{
+        CommitmentBinding, LookupProtocol, SharedArgConfig, SumcheckSubproof, TrackerID,
+        artifact::Artifact,
+    },
     verifier::{
         ArgVerifier,
         structs::oracle::{Oracle, TrackedOracle},
@@ -56,6 +59,24 @@ fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
     prelude_with_vars::<B>(SRS_NV).unwrap()
 }
 
+/// A pair whose sides are configured as given. An honest pair is given the
+/// same configuration.
+fn setup_with_configs(
+    prover: SharedArgConfig,
+    verifier: SharedArgConfig,
+) -> (ArgProver<B>, ArgVerifier<B>) {
+    let (pk, vk) = KeyGenerator::<B>::new()
+        .with_num_mv_vars(SRS_NV)
+        .gen_keys()
+        .unwrap();
+    let prover = ProverTracker::new_from_pk_with_config(pk, prover).unwrap();
+    let verifier = VerifierTracker::new_from_vk_with_config(vk, verifier).unwrap();
+    (
+        ArgProver::new_from_tracker(prover),
+        ArgVerifier::new_from_tracker(verifier),
+    )
+}
+
 /// [`setup`] with the GKR runs of each side limited to its own budget. An
 /// honest pair is given the same one.
 fn setup_with_budgets(prover: usize, verifier: usize) -> (ArgProver<B>, ArgVerifier<B>) {
@@ -63,16 +84,7 @@ fn setup_with_budgets(prover: usize, verifier: usize) -> (ArgProver<B>, ArgVerif
         logup_gkr_run_budget,
         ..SharedArgConfig::default()
     };
-    let (pk, vk) = KeyGenerator::<B>::new()
-        .with_num_mv_vars(SRS_NV)
-        .gen_keys()
-        .unwrap();
-    let prover = ProverTracker::new_from_pk_with_config(pk, config(prover));
-    let verifier = VerifierTracker::new_from_vk_with_config(vk, config(verifier));
-    (
-        ArgProver::new_from_tracker(prover),
-        ArgVerifier::new_from_tracker(verifier),
-    )
+    setup_with_configs(config(prover), config(verifier))
 }
 
 fn fv(vals: impl IntoIterator<Item = u64>) -> Vec<F> {
@@ -3120,6 +3132,96 @@ fn proof_by_the_fast_paths_is_the_proof_by_the_slow_ones() {
         verifier.add_mv_lookup_claim(table, sub).unwrap();
     }
     verifier.verify().unwrap();
+}
+
+// ─── The proof before the protocol was a choice ──────────────────────────
+
+/// What `prover` proves about [`fast_path_columns`] when its statement
+/// reaches the reduction by every route: a keyed sum proved on the spot,
+/// the lookups of [`fast_path_lookups`], a keyed sum claimed for later, and
+/// a sumcheck claim that has nothing to do with any of them.
+fn all_routes_proof(mut prover: ArgProver<B>) -> SNARKProof<B> {
+    let columns = fast_path_columns();
+    let handles: Vec<TrackedPoly<B>> = columns
+        .iter()
+        .map(|column| commit(&mut prover, column))
+        .collect();
+    let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
+    KeyedSumcheck::<B>::prove(
+        &mut prover,
+        KeyedSumcheckProverInput {
+            fxs: vec![handles[5].clone(), handles[6].clone()],
+            gxs: vec![handles[6].clone(), handles[5].clone()],
+            mfxs: vec![None, None],
+            mgxs: vec![None, None],
+        },
+    )
+    .unwrap();
+    let lookups = fast_path_lookups(&mut *prover.tracker().borrow_mut(), &ids);
+    for (table, sub) in lookups {
+        prover.add_mv_lookup_claim(table, sub).unwrap();
+    }
+    let weights = fv((0..16).map(|i| i + 1));
+    let counts = tally(
+        &columns[1],
+        &[(&columns[9], None), (&columns[8], Some(&weights))],
+    );
+    let weights = commit(&mut prover, &weights);
+    let counts = commit(&mut prover, &counts);
+    prover
+        .add_mv_keyed_sum_claim(KeyedSumcheckProverInput {
+            fxs: vec![handles[9].clone(), handles[8].clone()],
+            mfxs: vec![None, Some(weights)],
+            gxs: vec![handles[1].clone()],
+            mgxs: vec![Some(counts)],
+        })
+        .unwrap();
+    prover
+        .add_mv_sumcheck_claim(ids[0], sum(&columns[0]))
+        .unwrap();
+    prover.build_proof().unwrap()
+}
+
+/// Making the lookup protocol a choice left LogUp-GKR what it was. Two
+/// things changed in its proofs, and nothing else: they end in the
+/// protocol's tag, and their transcript opens with the protocol, which
+/// moves every challenge.
+///
+/// A prover whose transcript opens as it used to therefore gives, between
+/// the version byte and the tag, the proof the commit before the choice
+/// (b1dc5e2) gives for [`all_routes_proof`]: 21214 bytes with this hash.
+#[test]
+fn logup_gkr_proof_is_the_one_from_before_the_protocol_was_a_choice() {
+    const BEFORE: &str = "a3414e6d67dc1dcdb9347ff09343c04899957c4ac7a7912e829a135ec9fe7d2f";
+    const BEFORE_LEN: usize = 21214;
+
+    let config = SharedArgConfig {
+        lookup_protocol: LookupProtocol::LogUpGkr,
+        ..SharedArgConfig::default()
+    };
+    let (pk, _) = KeyGenerator::<B>::new()
+        .with_num_mv_vars(SRS_NV)
+        .gen_keys()
+        .unwrap();
+    let unbound = ProverTracker::new_from_pk_unbound(pk.clone(), config.clone());
+    let bytes = all_routes_proof(ArgProver::new_from_tracker(unbound))
+        .to_bytes()
+        .unwrap();
+    let (version, rest) = bytes.split_first().unwrap();
+    let (tag, before) = rest.split_last().unwrap();
+    assert_eq!(*version, 5);
+    assert_eq!(*tag, LookupProtocol::LogUpGkr.tag());
+    assert_eq!(before.len() + 1, BEFORE_LEN);
+    assert_eq!(blake3::hash(before).to_hex().as_str(), BEFORE);
+
+    // The binding is the whole difference to a proof that verifies: one of
+    // the same length that is not the same.
+    let bound = ProverTracker::new_from_pk_with_config(pk, config).unwrap();
+    let bound = all_routes_proof(ArgProver::new_from_tracker(bound))
+        .to_bytes()
+        .unwrap();
+    assert_eq!(bound.len(), bytes.len());
+    assert_ne!(bound, bytes);
 }
 
 // ─── Proof plumbing ──────────────────────────────────────────────────────

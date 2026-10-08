@@ -23,7 +23,8 @@ use crate::{
     prover::structs::proof::SNARKProof,
     setup::{errors::SetupError::NoRangePoly, structs::SNARKVk},
     types::{
-        CommitmentBinding, CommitmentID, PCSOpeningProof, SharedArgConfig, TrackerID,
+        CommitmentBinding, CommitmentID, LookupProtocol, PCSOpeningProof, SharedArgConfig,
+        TrackerID,
         claim::{
             TrackerLookupClaim, TrackerNoZerocheckClaim, TrackerSumcheckClaim,
             TrackerZerocheckClaim,
@@ -89,12 +90,14 @@ pub struct VerifierTracker<B: SnarkBackend> {
 }
 
 impl<B: SnarkBackend> VerifierTracker<B> {
-    // Create new verifier tracker with clean state given a verifying key
-    pub(crate) fn new_from_vk(vk: SNARKVk<B>) -> Self {
-        Self::new_from_vk_with_config(vk, SharedArgConfig::default())
-    }
-
-    pub(crate) fn new_from_vk_with_config(vk: SNARKVk<B>, config: SharedArgConfig) -> Self {
+    /// A tracker with clean state under `config`, which has to be the
+    /// prover's. Fails if the environment names a lookup protocol that does
+    /// not exist, as the prover's tracker does.
+    pub(crate) fn new_from_vk_with_config(
+        vk: SNARKVk<B>,
+        config: SharedArgConfig,
+    ) -> SnarkResult<Self> {
+        LookupProtocol::from_env()?;
         let mut tracker = Self {
             vk: ProcessedSNARKVk::new_from_vk(&vk),
             state: VerifierState::default(),
@@ -102,8 +105,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             config,
             self_rc: None,
         };
-        tracker.add_vk_to_transcript(vk);
         tracker
+            .config
+            .lookup_protocol
+            .bind(&mut tracker.state.transcript)?;
+        tracker.add_vk_to_transcript(vk);
+        Ok(tracker)
     }
 
     pub fn set_self_rc(&mut self, self_rc: Weak<RefCell<VerifierTracker<B>>>) {
@@ -151,6 +158,23 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let claims = verify_batch(shape, subproof, &mut self.state.transcript)?;
         self.state.logup_gkr_subproofs_consumed = next + 1;
         Ok(claims)
+    }
+
+    /// Refuses a proof made with another lookup protocol than the one this
+    /// verifier is configured for. The proof names its protocol so that
+    /// this can be said plainly; which protocol the verifier runs is its
+    /// configuration's alone.
+    pub(crate) fn check_lookup_protocol(&self) -> SnarkResult<()> {
+        let proved = self.proof_or_err()?.lookup_messages.protocol();
+        let configured = self.config.lookup_protocol;
+        if proved != configured {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "proof was made with {proved}, verifier is configured for {configured}"
+                )),
+            ));
+        }
+        Ok(())
     }
 
     /// Makes every later [`Self::verify`] fail. For the caller of a check
