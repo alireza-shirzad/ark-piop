@@ -340,9 +340,12 @@ impl Session {
     }
 
     /// The honest prover, or with `evals` a prover that runs the GKR on
-    /// tables of its own choosing in place of some committed columns; under
-    /// LogUp, one that commits to the helpers of those tables and sends
-    /// their sums.
+    /// tables of its own choosing in place of some committed columns.
+    /// Under LogUp it commits to the helpers of those tables and sends
+    /// their sums, and its tracker goes on with the helper of the
+    /// committed column wherever that column has a table to read it off:
+    /// what it then claims falsely is the sum.
+    /// [`Self::prove_with_fake_helpers`] keeps the helpers it committed to.
     fn prove_with(&mut self, evals: ColumnEvals<F>) -> SnarkResult<()> {
         prove_keyed_sums(&mut self.prover, &self.relations, evals)
     }
