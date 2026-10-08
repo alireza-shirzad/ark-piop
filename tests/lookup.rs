@@ -2,8 +2,13 @@
 //!
 //! Each test states a relation and checks only whether it is accepted or
 //! rejected, never how the proof is laid out, so the suite keeps its meaning
-//! when the protocol underneath the claims changes.
+//! when the protocol underneath the claims changes. There are two such
+//! protocols to choose from, and every test runs under both
+//! ([`under_each_protocol`]); the few that look at what a proof carries say
+//! what that is under each.
 #![cfg(feature = "test-utils")]
+
+use std::cell::Cell;
 
 use ark_ff::{One, Zero};
 use ark_piop::{
@@ -26,7 +31,6 @@ use ark_piop::{
         },
     },
     setup::KeyGenerator,
-    test_utils::prelude_with_vars,
     types::{
         LOOKUP_PROTOCOL_ENV, LookupMessages, LookupProtocol, SharedArgConfig, TrackerID,
         artifact::Artifact,
@@ -45,8 +49,42 @@ type F = <B as SnarkBackend>::F;
 /// milliseconds, where `test_prelude` re-reads the 2^19 one on every call.
 const SRS_NV: usize = 10;
 
+const PROTOCOLS: [LookupProtocol; 2] = [LookupProtocol::LogUp, LookupProtocol::LogUpGkr];
+
+thread_local! {
+    /// The lookup protocol the test of this thread is running under.
+    static PROTOCOL: Cell<Option<LookupProtocol>> = const { Cell::new(None) };
+}
+
+/// Runs `test` once under each lookup protocol. [`setup`] configures both
+/// sides for the protocol of the run, so a statement is put to both
+/// protocols by the same code; `test` is told which one it is under for
+/// the few things that differ between them. The protocol is printed, to
+/// show in a failure which run it was.
+fn under_each_protocol(test: impl Fn(LookupProtocol)) {
+    for protocol in PROTOCOLS {
+        println!("under {protocol}");
+        PROTOCOL.set(Some(protocol));
+        test(protocol);
+    }
+    PROTOCOL.set(None);
+}
+
+/// The term sums a LogUp proof carries; a LogUp-GKR proof has none.
+fn logup_sums(proof: &SNARKProof<B>) -> &[F] {
+    match &proof.lookup_messages {
+        LookupMessages::LogUp { sums } => sums,
+        LookupMessages::LogUpGkr => &[],
+    }
+}
+
+/// A prover and a verifier for the protocol of the run. Their
+/// configuration is explicit: the environment does not choose for them.
 fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
-    prelude_with_vars::<B>(SRS_NV).unwrap()
+    let protocol = PROTOCOL
+        .get()
+        .expect("a test of this suite runs under_each_protocol");
+    setup_under(protocol, protocol)
 }
 
 fn fv(vals: impl IntoIterator<Item = u64>) -> Vec<F> {
@@ -457,258 +495,284 @@ fn prefix_activator(nv: usize, active: usize) -> Vec<F> {
 
 #[test]
 fn lookup_value_outside_table_is_rejected() {
-    let table = fv(0..64);
-    let good = fv((0..64).map(|i| (i * 7) % 64));
-    assert_accepted(lookup_e2e(&table, std::slice::from_ref(&good)));
+    under_each_protocol(|_| {
+        let table = fv(0..64);
+        let good = fv((0..64).map(|i| (i * 7) % 64));
+        assert_accepted(lookup_e2e(&table, std::slice::from_ref(&good)));
 
-    let mut bad = good.clone();
-    bad[13] = F::from(1000u64);
-    assert_rejected(lookup_e2e(&table, &[bad]));
+        let mut bad = good.clone();
+        bad[13] = F::from(1000u64);
+        assert_rejected(lookup_e2e(&table, &[bad]));
 
-    // One past the table's largest value, in the last row of the second sub.
-    let mut bad = good.clone();
-    bad[63] = F::from(64u64);
-    assert_rejected(lookup_e2e(&table, &[good, bad]));
+        // One past the table's largest value, in the last row of the second sub.
+        let mut bad = good.clone();
+        bad[63] = F::from(64u64);
+        assert_rejected(lookup_e2e(&table, &[good, bad]));
+    });
 }
 
 #[test]
 fn lookup_sub_smaller_than_table() {
-    let table = fv(0..256);
-    assert_accepted(lookup_e2e(&table, &[fv((0..16).map(|i| i * 16 + 3))]));
+    under_each_protocol(|_| {
+        let table = fv(0..256);
+        assert_accepted(lookup_e2e(&table, &[fv((0..16).map(|i| i * 16 + 3))]));
 
-    let mut bad = fv((0..16).map(|i| i * 16 + 3));
-    bad[5] = F::from(256u64);
-    assert_rejected(lookup_e2e(&table, &[bad]));
+        let mut bad = fv((0..16).map(|i| i * 16 + 3));
+        bad[5] = F::from(256u64);
+        assert_rejected(lookup_e2e(&table, &[bad]));
+    });
 }
 
 #[test]
 fn lookup_sub_larger_than_table() {
-    let table = fv(0..16);
-    assert_accepted(lookup_e2e(&table, &[fv((0..256).map(|i| (i * 5) % 16))]));
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        assert_accepted(lookup_e2e(&table, &[fv((0..256).map(|i| (i * 5) % 16))]));
 
-    let mut bad = fv((0..256).map(|i| (i * 5) % 16));
-    bad[200] = F::from(16u64);
-    assert_rejected(lookup_e2e(&table, &[bad]));
+        let mut bad = fv((0..256).map(|i| (i * 5) % 16));
+        bad[200] = F::from(16u64);
+        assert_rejected(lookup_e2e(&table, &[bad]));
+    });
 }
 
 #[test]
 fn lookup_three_subs_table_with_duplicates() {
-    // Every table value occurs four times; an odd number of subs of one size.
-    let table = fv((0..64).map(|i| i % 16));
-    let subs = [
-        fv((0..64).map(|i| (i * 7) % 16)),
-        fv((0..64).map(|i| (i * 3) % 8)),
-        fv((0..64).map(|i| i % 5)),
-    ];
-    assert_accepted(lookup_e2e(&table, &subs));
+    under_each_protocol(|_| {
+        // Every table value occurs four times; an odd number of subs of one size.
+        let table = fv((0..64).map(|i| i % 16));
+        let subs = [
+            fv((0..64).map(|i| (i * 7) % 16)),
+            fv((0..64).map(|i| (i * 3) % 8)),
+            fv((0..64).map(|i| i % 5)),
+        ];
+        assert_accepted(lookup_e2e(&table, &subs));
 
-    let mut bad = subs.clone();
-    bad[2][40] = F::from(16u64);
-    assert_rejected(lookup_e2e(&table, &bad));
+        let mut bad = subs.clone();
+        bad[2][40] = F::from(16u64);
+        assert_rejected(lookup_e2e(&table, &bad));
+    });
 }
 
 /// Subs of three different sizes against one table, on both sides of the
 /// table's own size.
 #[test]
 fn lookup_subs_of_mixed_sizes_one_table() {
-    let table = fv(0..32);
-    let subs = [
-        fv((0..8).map(|i| i * 4)),
-        fv((0..128).map(|i| (i * 11) % 32)),
-        fv((0..32).map(|i| 31 - i)),
-        fv((0..128).map(|i| i % 3)),
-    ];
-    assert_accepted(lookup_e2e(&table, &subs));
+    under_each_protocol(|_| {
+        let table = fv(0..32);
+        let subs = [
+            fv((0..8).map(|i| i * 4)),
+            fv((0..128).map(|i| (i * 11) % 32)),
+            fv((0..32).map(|i| 31 - i)),
+            fv((0..128).map(|i| i % 3)),
+        ];
+        assert_accepted(lookup_e2e(&table, &subs));
 
-    let mut bad = subs.clone();
-    bad[0][7] = F::from(32u64);
-    assert_rejected(lookup_e2e(&table, &bad));
+        let mut bad = subs.clone();
+        bad[0][7] = F::from(32u64);
+        assert_rejected(lookup_e2e(&table, &bad));
+    });
 }
 
 /// The same claim made twice, and a table looked up in itself.
 #[test]
 fn lookup_repeated_and_self_claims() {
-    assert_accepted(prove_and_verify(
-        |prover| {
-            let table = commit(prover, &fv(0..16))?;
-            let sub = commit(prover, &fv((0..16).map(|i| (i * 3) % 8)))?;
-            prover.add_mv_lookup_claim(table.id(), sub.id())?;
-            prover.add_mv_lookup_claim(table.id(), sub.id())?;
-            prover.add_mv_lookup_claim(table.id(), table.id())?;
-            Ok([table.id(), sub.id()])
-        },
-        |verifier, ids| {
-            let oracles = track_all(verifier, &ids)?;
-            verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())?;
-            verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())?;
-            verifier.add_mv_lookup_claim(oracles[0].id(), oracles[0].id())
-        },
-    ));
+    under_each_protocol(|_| {
+        assert_accepted(prove_and_verify(
+            |prover| {
+                let table = commit(prover, &fv(0..16))?;
+                let sub = commit(prover, &fv((0..16).map(|i| (i * 3) % 8)))?;
+                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                prover.add_mv_lookup_claim(table.id(), table.id())?;
+                Ok([table.id(), sub.id()])
+            },
+            |verifier, ids| {
+                let oracles = track_all(verifier, &ids)?;
+                verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())?;
+                verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())?;
+                verifier.add_mv_lookup_claim(oracles[0].id(), oracles[0].id())
+            },
+        ));
+    });
 }
 
 #[test]
 fn hinted_lookup_correct_multiplicity_accepts() {
-    // Every even table value is hit twice, odd values never.
-    let table = fv(0..64);
-    let sub = fv((0..64).map(|i| (i * 2) % 64));
-    let multiplicity = fv((0..64).map(|i| if i % 2 == 0 { 2 } else { 0 }));
-    assert_accepted(hinted_e2e(&table, &[sub], &multiplicity));
+    under_each_protocol(|_| {
+        // Every even table value is hit twice, odd values never.
+        let table = fv(0..64);
+        let sub = fv((0..64).map(|i| (i * 2) % 64));
+        let multiplicity = fv((0..64).map(|i| if i % 2 == 0 { 2 } else { 0 }));
+        assert_accepted(hinted_e2e(&table, &[sub], &multiplicity));
 
-    // Two subs of different sizes feeding one multiplicity column.
-    let subs = [fv((0..64).map(|i| i % 16)), fv(0..16)];
-    let multiplicity = fv((0..64).map(|i| if i < 16 { 5 } else { 0 }));
-    assert_accepted(hinted_e2e(&table, &subs, &multiplicity));
+        // Two subs of different sizes feeding one multiplicity column.
+        let subs = [fv((0..64).map(|i| i % 16)), fv(0..16)];
+        let multiplicity = fv((0..64).map(|i| if i < 16 { 5 } else { 0 }));
+        assert_accepted(hinted_e2e(&table, &subs, &multiplicity));
+    });
 }
 
 #[test]
 fn hinted_lookup_wrong_multiplicity_is_rejected() {
-    let table = fv(0..64);
-    let sub = fv((0..64).map(|i| (i * 2) % 64));
-    let multiplicity = fv((0..64).map(|i| if i % 2 == 0 { 2 } else { 0 }));
+    under_each_protocol(|_| {
+        let table = fv(0..64);
+        let sub = fv((0..64).map(|i| (i * 2) % 64));
+        let multiplicity = fv((0..64).map(|i| if i % 2 == 0 { 2 } else { 0 }));
 
-    let mut one_more = multiplicity.clone();
-    one_more[4] += F::one();
-    assert_rejected(hinted_e2e(&table, std::slice::from_ref(&sub), &one_more));
+        let mut one_more = multiplicity.clone();
+        one_more[4] += F::one();
+        assert_rejected(hinted_e2e(&table, std::slice::from_ref(&sub), &one_more));
 
-    // Same total, so a check on the multiplicity sum alone would pass.
-    let mut moved = multiplicity;
-    moved[4] += F::one();
-    moved[6] -= F::one();
-    assert_rejected(hinted_e2e(&table, &[sub], &moved));
+        // Same total, so a check on the multiplicity sum alone would pass.
+        let mut moved = multiplicity;
+        moved[4] += F::one();
+        moved[6] -= F::one();
+        assert_rejected(hinted_e2e(&table, &[sub], &moved));
+    });
 }
 
 #[test]
 fn lookup_check_piop_accepts_and_rejects() {
-    let table = fv(0..16);
-    assert_accepted(lookup_piop_e2e(&table, &[fv((0..32).map(|i| (i * 3) % 8))]));
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        assert_accepted(lookup_piop_e2e(&table, &[fv((0..32).map(|i| (i * 3) % 8))]));
 
-    // Every table entry is hit exactly once, so the multiplicity column the
-    // PIOP commits is constant and travels as a committed constant.
-    assert_accepted(lookup_piop_e2e(
-        &table,
-        &[fv((0..16).map(|i| (i * 5 + 3) % 16))],
-    ));
-    // Likewise with two subs: the constant is 2.
-    assert_accepted(lookup_piop_e2e(
-        &table,
-        &[
-            fv((0..16).map(|i| 15 - i)),
-            fv((0..16).map(|i| (i * 7) % 16)),
-        ],
-    ));
+        // Every table entry is hit exactly once, so the multiplicity column the
+        // PIOP commits is constant and travels as a committed constant.
+        assert_accepted(lookup_piop_e2e(
+            &table,
+            &[fv((0..16).map(|i| (i * 5 + 3) % 16))],
+        ));
+        // Likewise with two subs: the constant is 2.
+        assert_accepted(lookup_piop_e2e(
+            &table,
+            &[
+                fv((0..16).map(|i| 15 - i)),
+                fv((0..16).map(|i| (i * 7) % 16)),
+            ],
+        ));
 
-    let mut bad = fv((0..16).map(|i| (i * 5 + 3) % 16));
-    bad[9] = F::from(16u64);
-    assert_rejected(lookup_piop_e2e(&table, &[bad]));
+        let mut bad = fv((0..16).map(|i| (i * 5 + 3) % 16));
+        bad[9] = F::from(16u64);
+        assert_rejected(lookup_piop_e2e(&table, &[bad]));
+    });
 }
 
 #[test]
 fn keyed_sumcheck_multiplicities_both_sides_mixed_nv() {
-    let f = fv(0..32);
-    let mf = fv((0..32).map(|i| (i % 3) + 1));
-    let g = fv((0..128).map(|i| i % 32));
-    let mg = fv((0..128).map(|i| if i < 32 { (i % 3) + 1 } else { 0 }));
-    assert_accepted(keyed_e2e(
-        &[(f.clone(), Some(mf.clone()))],
-        &[(g.clone(), Some(mg.clone()))],
-    ));
+    under_each_protocol(|_| {
+        let f = fv(0..32);
+        let mf = fv((0..32).map(|i| (i % 3) + 1));
+        let g = fv((0..128).map(|i| i % 32));
+        let mg = fv((0..128).map(|i| if i < 32 { (i % 3) + 1 } else { 0 }));
+        assert_accepted(keyed_e2e(
+            &[(f.clone(), Some(mf.clone()))],
+            &[(g.clone(), Some(mg.clone()))],
+        ));
 
-    // A second, smaller f column with unit multiplicity, balanced on the g
-    // side by one more unit on its eight values.
-    let small = fv(0..8);
-    let mg_with_small = fv((0..128).map(|i| match i {
-        0..8 => (i % 3) + 2,
-        8..32 => (i % 3) + 1,
-        _ => 0,
-    }));
-    assert_accepted(keyed_e2e(
-        &[(f.clone(), Some(mf.clone())), (small, None)],
-        &[(g.clone(), Some(mg_with_small))],
-    ));
+        // A second, smaller f column with unit multiplicity, balanced on the g
+        // side by one more unit on its eight values.
+        let small = fv(0..8);
+        let mg_with_small = fv((0..128).map(|i| match i {
+            0..8 => (i % 3) + 2,
+            8..32 => (i % 3) + 1,
+            _ => 0,
+        }));
+        assert_accepted(keyed_e2e(
+            &[(f.clone(), Some(mf.clone())), (small, None)],
+            &[(g.clone(), Some(mg_with_small))],
+        ));
 
-    let mut wrong_mf = mf;
-    wrong_mf[0] += F::one();
-    assert_rejected(keyed_e2e(&[(f, Some(wrong_mf))], &[(g, Some(mg))]));
+        let mut wrong_mf = mf;
+        wrong_mf[0] += F::one();
+        assert_rejected(keyed_e2e(&[(f, Some(wrong_mf))], &[(g, Some(mg))]));
+    });
 }
 
 #[test]
 fn keyed_sumcheck_permutation_and_non_permutation() {
-    let f = fv(0..64);
-    let g = fv((0..64).map(|i| (i * 5 + 3) % 64));
-    assert_accepted(keyed_e2e(&[(f.clone(), None)], &[(g.clone(), None)]));
+    under_each_protocol(|_| {
+        let f = fv(0..64);
+        let g = fv((0..64).map(|i| (i * 5 + 3) % 64));
+        assert_accepted(keyed_e2e(&[(f.clone(), None)], &[(g.clone(), None)]));
 
-    let mut not_a_permutation = g.clone();
-    not_a_permutation[9] = F::from(99u64);
-    assert_rejected(keyed_e2e(
-        &[(f.clone(), None)],
-        &[(not_a_permutation, None)],
-    ));
+        let mut not_a_permutation = g.clone();
+        not_a_permutation[9] = F::from(99u64);
+        assert_rejected(keyed_e2e(
+            &[(f.clone(), None)],
+            &[(not_a_permutation, None)],
+        ));
 
-    // Two columns a side: only the union of each side has to match.
-    let low = fv(0..32);
-    let high = fv(32..64);
-    let evens = fv((0..32).map(|i| 2 * i));
-    let odds = fv((0..32).map(|i| 2 * i + 1));
-    assert_accepted(keyed_e2e(
-        &[(low.clone(), None), (high.clone(), None)],
-        &[(odds.clone(), None), (evens.clone(), None)],
-    ));
-    // One column against two half-size ones.
-    assert_accepted(keyed_e2e(
-        &[(f, None)],
-        &[(evens.clone(), None), (odds, None)],
-    ));
-    // Both sides hold 64 values, but 0..32 twice is not 0..64.
-    assert_rejected(keyed_e2e(
-        &[(low.clone(), None), (low, None)],
-        &[(evens, None), (high, None)],
-    ));
+        // Two columns a side: only the union of each side has to match.
+        let low = fv(0..32);
+        let high = fv(32..64);
+        let evens = fv((0..32).map(|i| 2 * i));
+        let odds = fv((0..32).map(|i| 2 * i + 1));
+        assert_accepted(keyed_e2e(
+            &[(low.clone(), None), (high.clone(), None)],
+            &[(odds.clone(), None), (evens.clone(), None)],
+        ));
+        // One column against two half-size ones.
+        assert_accepted(keyed_e2e(
+            &[(f, None)],
+            &[(evens.clone(), None), (odds, None)],
+        ));
+        // Both sides hold 64 values, but 0..32 twice is not 0..64.
+        assert_rejected(keyed_e2e(
+            &[(low.clone(), None), (low, None)],
+            &[(evens, None), (high, None)],
+        ));
+    });
 }
 
 /// Columns and multiplicities that were committed as constants reach the
 /// keyed sum as constant handles, not as tracked polynomials.
 #[test]
 fn keyed_sumcheck_constant_columns_and_multiplicities() {
-    // `n` copies of the key 7, credited to row 7 of a table.
-    let counts = |n: u64| fv((0..16).map(|i| if i == 7 { n } else { 0 }));
-    assert_accepted(keyed_e2e(
-        &[(fv([7; 8]), None)],
-        &[(fv(0..16), Some(counts(8)))],
-    ));
-    assert_rejected(keyed_e2e(
-        &[(fv([7; 8]), None)],
-        &[(fv(0..16), Some(counts(7)))],
-    ));
+    under_each_protocol(|_| {
+        // `n` copies of the key 7, credited to row 7 of a table.
+        let counts = |n: u64| fv((0..16).map(|i| if i == 7 { n } else { 0 }));
+        assert_accepted(keyed_e2e(
+            &[(fv([7; 8]), None)],
+            &[(fv(0..16), Some(counts(8)))],
+        ));
+        assert_rejected(keyed_e2e(
+            &[(fv([7; 8]), None)],
+            &[(fv(0..16), Some(counts(7)))],
+        ));
 
-    // Constant columns on both sides, of equal and of different sizes.
-    assert_accepted(keyed_e2e(&[(fv([7; 8]), None)], &[(fv([7; 8]), None)]));
-    assert_accepted(keyed_e2e(
-        &[(fv([7; 8]), None), (fv([7; 8]), None)],
-        &[(fv([7; 16]), None)],
-    ));
-    assert_rejected(keyed_e2e(&[(fv([7; 8]), None)], &[(fv([6; 8]), None)]));
+        // Constant columns on both sides, of equal and of different sizes.
+        assert_accepted(keyed_e2e(&[(fv([7; 8]), None)], &[(fv([7; 8]), None)]));
+        assert_accepted(keyed_e2e(
+            &[(fv([7; 8]), None), (fv([7; 8]), None)],
+            &[(fv([7; 16]), None)],
+        ));
+        assert_rejected(keyed_e2e(&[(fv([7; 8]), None)], &[(fv([6; 8]), None)]));
 
-    // Constant multiplicities.
-    let f = fv(0..8);
-    let g = fv((0..8).map(|i| 7 - i));
-    assert_accepted(keyed_e2e(
-        &[(f.clone(), Some(fv([3; 8])))],
-        &[(g.clone(), Some(fv([3; 8])))],
-    ));
-    assert_rejected(keyed_e2e(
-        &[(f, Some(fv([3; 8])))],
-        &[(g, Some(fv([4; 8])))],
-    ));
+        // Constant multiplicities.
+        let f = fv(0..8);
+        let g = fv((0..8).map(|i| 7 - i));
+        assert_accepted(keyed_e2e(
+            &[(f.clone(), Some(fv([3; 8])))],
+            &[(g.clone(), Some(fv([3; 8])))],
+        ));
+        assert_rejected(keyed_e2e(
+            &[(f, Some(fv([3; 8])))],
+            &[(g, Some(fv([4; 8])))],
+        ));
+    });
 }
 
 /// As `lookup_constant_sub_wider_than_every_commitment`, through the PIOP.
 #[test]
 fn keyed_sumcheck_constant_column_wider_than_every_commitment() {
-    let counts = fv((0..16).map(|i| if i == 7 { 32 } else { 0 }));
-    assert_accepted(keyed_e2e(
-        &[(fv([7; 32]), None)],
-        &[(fv(0..16), Some(counts))],
-    ));
+    under_each_protocol(|_| {
+        let counts = fv((0..16).map(|i| if i == 7 { 32 } else { 0 }));
+        assert_accepted(keyed_e2e(
+            &[(fv([7; 32]), None)],
+            &[(fv(0..16), Some(counts))],
+        ));
+    });
 }
 
 /// A multiplicity with more rows than its column, and the other way round:
@@ -716,60 +780,65 @@ fn keyed_sumcheck_constant_column_wider_than_every_commitment() {
 /// repeating.
 #[test]
 fn keyed_sum_column_and_multiplicity_of_different_nv() {
-    // One key, eight weights adding up to 28.
-    let counts = |n: u64| fv((0..16).map(|i| if i == 7 { n } else { 0 }));
-    assert_accepted(keyed_e2e(
-        &[(fv([7]), Some(fv(0..8)))],
-        &[(fv(0..16), Some(counts(28)))],
-    ));
-    assert_rejected(keyed_e2e(
-        &[(fv([7]), Some(fv(0..8)))],
-        &[(fv(0..16), Some(counts(27)))],
-    ));
+    under_each_protocol(|_| {
+        // One key, eight weights adding up to 28.
+        let counts = |n: u64| fv((0..16).map(|i| if i == 7 { n } else { 0 }));
+        assert_accepted(keyed_e2e(
+            &[(fv([7]), Some(fv(0..8)))],
+            &[(fv(0..16), Some(counts(28)))],
+        ));
+        assert_rejected(keyed_e2e(
+            &[(fv([7]), Some(fv(0..8)))],
+            &[(fv(0..16), Some(counts(27)))],
+        ));
 
-    // Keys 0..8 repeating under 32 weights.
-    let per_key = fv((0..8).map(|key| (0..32u64).filter(|i| i % 8 == key).map(|i| i + 1).sum()));
-    assert_accepted(keyed_e2e(
-        &[(fv(0..8), Some(fv((0..32).map(|i| i + 1))))],
-        &[(fv(0..8), Some(per_key))],
-    ));
+        // Keys 0..8 repeating under 32 weights.
+        let per_key =
+            fv((0..8).map(|key| (0..32u64).filter(|i| i % 8 == key).map(|i| i + 1).sum()));
+        assert_accepted(keyed_e2e(
+            &[(fv(0..8), Some(fv((0..32).map(|i| i + 1))))],
+            &[(fv(0..8), Some(per_key))],
+        ));
 
-    // 32 keys, each of 0..8 four times, under 8 repeating weights.
-    assert_accepted(keyed_e2e(
-        &[(fv((0..32).map(|i| i % 8)), Some(fv((0..8).map(|i| i + 1))))],
-        &[(fv(0..8), Some(fv((0..8).map(|key| 4 * (key + 1)))))],
-    ));
+        // 32 keys, each of 0..8 four times, under 8 repeating weights.
+        assert_accepted(keyed_e2e(
+            &[(fv((0..32).map(|i| i % 8)), Some(fv((0..8).map(|i| i + 1))))],
+            &[(fv(0..8), Some(fv((0..8).map(|key| 4 * (key + 1)))))],
+        ));
+    });
 }
 
 #[test]
 fn lookup_sub_virtual_product() {
-    let table = fv(0..16);
-    let activator = prefix_activator(5, 20);
-    // Active rows hold table values. Inactive rows hold values far outside
-    // the table: the activator, not the data, is what makes them harmless.
-    let data = fv((0..32).map(|i| if i < 20 { (i * 3) % 16 } else { 1000 + i }));
-    let run = |data: &[F]| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &table)?;
-                let data = commit(prover, data)?;
-                let activator = commit(prover, &activator)?;
-                let sub = &data * &activator;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), data.id(), activator.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let sub = &oracles[1] * &oracles[2];
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(&data));
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let activator = prefix_activator(5, 20);
+        // Active rows hold table values. Inactive rows hold values far outside
+        // the table: the activator, not the data, is what makes them harmless.
+        let data = fv((0..32).map(|i| if i < 20 { (i * 3) % 16 } else { 1000 + i }));
+        let run = |data: &[F]| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &table)?;
+                    let data = commit(prover, data)?;
+                    let activator = commit(prover, &activator)?;
+                    let sub = &data * &activator;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), data.id(), activator.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let sub = &oracles[1] * &oracles[2];
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(&data));
 
-    let mut bad = data.clone();
-    bad[19] = F::from(16u64);
-    assert_rejected(run(&bad));
+        let mut bad = data.clone();
+        bad[19] = F::from(16u64);
+        assert_rejected(run(&bad));
+    });
 }
 
 /// A constant data chunk is committed as a constant, so `data * activator`
@@ -777,54 +846,58 @@ fn lookup_sub_virtual_product() {
 /// chunk (the high limbs of small integers) makes that scalar zero.
 #[test]
 fn lookup_sub_committed_constant_times_activator() {
-    let run = |chunk: u64| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv(0..16))?;
-                let data = commit(prover, &fv([chunk; 32]))?;
-                assert!(data.is_constant());
-                let activator = commit(prover, &prefix_activator(5, 11))?;
-                let sub = &data * &activator;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), data.id(), activator.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let sub = &oracles[1] * &oracles[2];
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(0));
-    assert_accepted(run(7));
-    assert_rejected(run(16));
+    under_each_protocol(|_| {
+        let run = |chunk: u64| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv(0..16))?;
+                    let data = commit(prover, &fv([chunk; 32]))?;
+                    assert!(data.is_constant());
+                    let activator = commit(prover, &prefix_activator(5, 11))?;
+                    let sub = &data * &activator;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), data.id(), activator.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let sub = &oracles[1] * &oracles[2];
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(0));
+        assert_accepted(run(7));
+        assert_rejected(run(16));
+    });
 }
 
 /// As above with the sub far wider than the table, so that the claim on the
 /// all-zero sub is the only one of its size in the proof.
 #[test]
 fn lookup_sub_zero_constant_times_activator_far_wider_than_the_table() {
-    let run = |chunk: u64| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv(0..4))?;
-                let data = commit(prover, &fv([chunk; 256]))?;
-                assert!(data.is_constant());
-                let activator = commit(prover, &prefix_activator(8, 201))?;
-                let sub = &data * &activator;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), data.id(), activator.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let sub = &oracles[1] * &oracles[2];
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(0));
-    assert_accepted(run(3));
-    assert_rejected(run(4));
+    under_each_protocol(|_| {
+        let run = |chunk: u64| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv(0..4))?;
+                    let data = commit(prover, &fv([chunk; 256]))?;
+                    assert!(data.is_constant());
+                    let activator = commit(prover, &prefix_activator(8, 201))?;
+                    let sub = &data * &activator;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), data.id(), activator.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let sub = &oracles[1] * &oracles[2];
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(0));
+        assert_accepted(run(3));
+        assert_rejected(run(4));
+    });
 }
 
 /// A window activator that covers every row, or none, is a constant: the
@@ -834,52 +907,54 @@ fn lookup_sub_zero_constant_times_activator_far_wider_than_the_table() {
 /// less on the sub decides it.
 #[test]
 fn lookup_sub_under_a_window_activator_that_is_constant() {
-    let run = |active: usize, data_modulus: u64| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv(0..8))?;
-                let data = commit(prover, &fv((0..8).map(|i| (i * 3 + 1) % data_modulus)))?;
-                let activator = prover.get_or_build_contig_one_poly(3, active)?;
-                let sub = &data * &activator;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
+    under_each_protocol(|_| {
+        let run = |active: usize, data_modulus: u64| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv(0..8))?;
+                    let data = commit(prover, &fv((0..8).map(|i| (i * 3 + 1) % data_modulus)))?;
+                    let activator = prover.get_or_build_contig_one_poly(3, active)?;
+                    let sub = &data * &activator;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
 
-                let narrow = fv(0..8);
-                let narrow_poly = commit(prover, &narrow)?;
-                prover.add_mv_sumcheck_claim(narrow_poly.id(), sum(&narrow))?;
+                    let narrow = fv(0..8);
+                    let narrow_poly = commit(prover, &narrow)?;
+                    prover.add_mv_sumcheck_claim(narrow_poly.id(), sum(&narrow))?;
 
-                let wide = fv((0..16).map(|i| i + 2));
-                let wide_poly = commit(prover, &wide)?;
-                let square = &wide_poly * &wide_poly;
-                let square_sum = sum(&wide.iter().map(|v| *v * v).collect::<Vec<F>>());
-                prover.add_mv_sumcheck_claim(square.id(), square_sum)?;
+                    let wide = fv((0..16).map(|i| i + 2));
+                    let wide_poly = commit(prover, &wide)?;
+                    let square = &wide_poly * &wide_poly;
+                    let square_sum = sum(&wide.iter().map(|v| *v * v).collect::<Vec<F>>());
+                    prover.add_mv_sumcheck_claim(square.id(), square_sum)?;
 
-                let ids = [table.id(), data.id(), narrow_poly.id(), wide_poly.id()];
-                Ok((ids, sum(&narrow), square_sum))
-            },
-            |verifier, (ids, narrow_sum, square_sum)| {
-                // In the prover's order: the activator and the product take
-                // their ids between the commitments.
-                let lookup = track_all(verifier, &ids[..2])?;
-                let activator = verifier.get_or_build_contig_one_poly(3, active)?;
-                let sub = &lookup[1] * &activator;
-                verifier.add_mv_lookup_claim(lookup[0].id(), sub.id())?;
+                    let ids = [table.id(), data.id(), narrow_poly.id(), wide_poly.id()];
+                    Ok((ids, sum(&narrow), square_sum))
+                },
+                |verifier, (ids, narrow_sum, square_sum)| {
+                    // In the prover's order: the activator and the product take
+                    // their ids between the commitments.
+                    let lookup = track_all(verifier, &ids[..2])?;
+                    let activator = verifier.get_or_build_contig_one_poly(3, active)?;
+                    let sub = &lookup[1] * &activator;
+                    verifier.add_mv_lookup_claim(lookup[0].id(), sub.id())?;
 
-                let narrow = verifier.track_mv_com_by_id(ids[2])?;
-                verifier.add_mv_sumcheck_claim(narrow.id(), narrow_sum);
-                let wide = verifier.track_mv_com_by_id(ids[3])?;
-                let square = &wide * &wide;
-                verifier.add_mv_sumcheck_claim(square.id(), square_sum);
-                Ok(())
-            },
-        )
-    };
-    for active in [0, 8, 5] {
-        assert_accepted(run(active, 8));
-    }
-    // Rows 1 and 4 leave the table; an empty window hides them.
-    assert_accepted(run(0, 11));
-    assert_rejected(run(8, 11));
-    assert_rejected(run(5, 11));
+                    let narrow = verifier.track_mv_com_by_id(ids[2])?;
+                    verifier.add_mv_sumcheck_claim(narrow.id(), narrow_sum);
+                    let wide = verifier.track_mv_com_by_id(ids[3])?;
+                    let square = &wide * &wide;
+                    verifier.add_mv_sumcheck_claim(square.id(), square_sum);
+                    Ok(())
+                },
+            )
+        };
+        for active in [0, 8, 5] {
+            assert_accepted(run(active, 8));
+        }
+        // Rows 1 and 4 leave the table; an empty window hides them.
+        assert_accepted(run(0, 11));
+        assert_rejected(run(8, 11));
+        assert_rejected(run(5, 11));
+    });
 }
 
 /// `sub ⊆ 0..16` for a sub with `rows` copies of `chunk`, committed as a
@@ -924,22 +999,26 @@ fn constant_sub_e2e(chunk: u64, rows: usize, derived: bool, sibling: bool) -> Sn
 /// A constant chunk without an activator: the sub is a committed constant.
 #[test]
 fn lookup_sub_bare_committed_constant() {
-    for (rows, sibling) in [(8, false), (16, false), (64, true)] {
-        assert_accepted(constant_sub_e2e(0, rows, false, sibling));
-        assert_accepted(constant_sub_e2e(7, rows, false, sibling));
-        assert_rejected(constant_sub_e2e(16, rows, false, sibling));
-    }
+    under_each_protocol(|_| {
+        for (rows, sibling) in [(8, false), (16, false), (64, true)] {
+            assert_accepted(constant_sub_e2e(0, rows, false, sibling));
+            assert_accepted(constant_sub_e2e(7, rows, false, sibling));
+            assert_rejected(constant_sub_e2e(16, rows, false, sibling));
+        }
+    });
 }
 
 /// A constant chunk times a constant activator folds to a constant that was
 /// never committed; asking for its id tracks it on both sides.
 #[test]
 fn lookup_sub_derived_constant() {
-    for (rows, sibling) in [(8, false), (16, false), (64, true)] {
-        assert_accepted(constant_sub_e2e(0, rows, true, sibling));
-        assert_accepted(constant_sub_e2e(7, rows, true, sibling));
-        assert_rejected(constant_sub_e2e(16, rows, true, sibling));
-    }
+    under_each_protocol(|_| {
+        for (rows, sibling) in [(8, false), (16, false), (64, true)] {
+            assert_accepted(constant_sub_e2e(0, rows, true, sibling));
+            assert_accepted(constant_sub_e2e(7, rows, true, sibling));
+            assert_rejected(constant_sub_e2e(16, rows, true, sibling));
+        }
+    });
 }
 
 /// A scalar times a constant column folds to a constant with the column's
@@ -947,158 +1026,168 @@ fn lookup_sub_derived_constant() {
 /// often its value is looked up, or counted in a keyed sum.
 #[test]
 fn scalar_times_constant_column_keeps_the_rows_of_the_column() {
-    let lookup = |scalar_first: bool, scalar: u64| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv(0..16))?;
-                let column = commit(prover, &fv([3; 8]))?;
-                assert!(column.is_constant());
-                let scalar = prover.track_mat_mv_cnst_poly(0, F::from(scalar));
-                let sub = if scalar_first {
-                    &scalar * &column
-                } else {
-                    &column * &scalar
-                };
-                assert!(sub.is_constant());
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), column.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(scalar));
-                let sub = if scalar_first {
-                    &scalar * &oracles[1]
-                } else {
-                    &oracles[1] * &scalar
-                };
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    // The same product as a column of a keyed sum, where it stays a
-    // constant handle: 8 rows of 6 against a table that counts `count`.
-    let keyed = |scalar_first: bool, count: u64| {
-        let mut counts = vec![F::zero(); 16];
-        counts[6] = F::from(count);
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv(0..16))?;
-                let counts = commit(prover, &counts)?;
-                let column = commit(prover, &fv([3; 8]))?;
-                let scalar = prover.track_mat_mv_cnst_poly(0, F::from(2u64));
-                let product = if scalar_first {
-                    &scalar * &column
-                } else {
-                    &column * &scalar
-                };
-                let ids = [table.id(), counts.id(), column.id()];
-                KeyedSumcheck::<B>::prove(
-                    prover,
-                    KeyedSumcheckProverInput {
-                        fxs: vec![product],
-                        mfxs: vec![None],
-                        gxs: vec![table],
-                        mgxs: vec![Some(counts)],
-                    },
-                )?;
-                Ok(ids)
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(2u64));
-                let product = if scalar_first {
-                    &scalar * &oracles[2]
-                } else {
-                    &oracles[2] * &scalar
-                };
-                KeyedSumcheck::<B>::verify(
-                    verifier,
-                    KeyedSumcheckVerifierInput {
-                        fxs: vec![product],
-                        mfxs: vec![None],
-                        gxs: vec![oracles[0].clone()],
-                        mgxs: vec![Some(oracles[1].clone())],
-                    },
-                )
-            },
-        )
-    };
-    for scalar_first in [true, false] {
-        assert_accepted(lookup(scalar_first, 2));
-        assert_rejected(lookup(scalar_first, 7));
-        assert_accepted(keyed(scalar_first, 8));
-        // One row of 6 is what a product of the scalar's size would be.
-        assert_rejected(keyed(scalar_first, 1));
-    }
+    under_each_protocol(|_| {
+        let lookup = |scalar_first: bool, scalar: u64| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv(0..16))?;
+                    let column = commit(prover, &fv([3; 8]))?;
+                    assert!(column.is_constant());
+                    let scalar = prover.track_mat_mv_cnst_poly(0, F::from(scalar));
+                    let sub = if scalar_first {
+                        &scalar * &column
+                    } else {
+                        &column * &scalar
+                    };
+                    assert!(sub.is_constant());
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), column.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(scalar));
+                    let sub = if scalar_first {
+                        &scalar * &oracles[1]
+                    } else {
+                        &oracles[1] * &scalar
+                    };
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        // The same product as a column of a keyed sum, where it stays a
+        // constant handle: 8 rows of 6 against a table that counts `count`.
+        let keyed = |scalar_first: bool, count: u64| {
+            let mut counts = vec![F::zero(); 16];
+            counts[6] = F::from(count);
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv(0..16))?;
+                    let counts = commit(prover, &counts)?;
+                    let column = commit(prover, &fv([3; 8]))?;
+                    let scalar = prover.track_mat_mv_cnst_poly(0, F::from(2u64));
+                    let product = if scalar_first {
+                        &scalar * &column
+                    } else {
+                        &column * &scalar
+                    };
+                    let ids = [table.id(), counts.id(), column.id()];
+                    KeyedSumcheck::<B>::prove(
+                        prover,
+                        KeyedSumcheckProverInput {
+                            fxs: vec![product],
+                            mfxs: vec![None],
+                            gxs: vec![table],
+                            mgxs: vec![Some(counts)],
+                        },
+                    )?;
+                    Ok(ids)
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let scalar = verifier.track_mat_mv_cnst_oracle(0, F::from(2u64));
+                    let product = if scalar_first {
+                        &scalar * &oracles[2]
+                    } else {
+                        &oracles[2] * &scalar
+                    };
+                    KeyedSumcheck::<B>::verify(
+                        verifier,
+                        KeyedSumcheckVerifierInput {
+                            fxs: vec![product],
+                            mfxs: vec![None],
+                            gxs: vec![oracles[0].clone()],
+                            mgxs: vec![Some(oracles[1].clone())],
+                        },
+                    )
+                },
+            )
+        };
+        for scalar_first in [true, false] {
+            assert_accepted(lookup(scalar_first, 2));
+            assert_rejected(lookup(scalar_first, 7));
+            assert_accepted(keyed(scalar_first, 8));
+            // One row of 6 is what a product of the scalar's size would be.
+            assert_rejected(keyed(scalar_first, 1));
+        }
+    });
 }
 
 /// The constant sub is the largest column of the whole proof: the table and
 /// its multiplicity have 16 rows and nothing else is committed.
 #[test]
 fn lookup_constant_sub_wider_than_every_commitment() {
-    assert_accepted(constant_sub_e2e(7, 32, false, false));
-    assert_accepted(constant_sub_e2e(7, 64, true, false));
-    assert_rejected(constant_sub_e2e(16, 32, false, false));
+    under_each_protocol(|_| {
+        assert_accepted(constant_sub_e2e(7, 32, false, false));
+        assert_accepted(constant_sub_e2e(7, 64, true, false));
+        assert_rejected(constant_sub_e2e(16, 32, false, false));
+    });
 }
 
 /// `(a + 4·b + 16) · activator`: several terms, a scalar on a term and a
 /// constant term, all under one activator.
 #[test]
 fn lookup_sub_multiterm_virtual() {
-    let table = fv(0..32);
-    let a = fv((0..16).map(|i| i % 4));
-    let b = fv((0..16).map(|i| (i / 4) % 4));
-    let activator = prefix_activator(4, 13);
-    let run = |a: &[F]| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &table)?;
-                let a = commit(prover, a)?;
-                let b = commit(prover, &b)?;
-                let activator = commit(prover, &activator)?;
-                let folded =
-                    (&a + &b.mul_scalar_poly(F::from(4u64))).add_scalar_poly(F::from(16u64));
-                let sub = &folded * &activator;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), a.id(), b.id(), activator.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let folded = (&oracles[1] + &oracles[2].mul_scalar_oracle(F::from(4u64)))
-                    .add_scalar_oracle(F::from(16u64));
-                let sub = &folded * &oracles[3];
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(&a));
+    under_each_protocol(|_| {
+        let table = fv(0..32);
+        let a = fv((0..16).map(|i| i % 4));
+        let b = fv((0..16).map(|i| (i / 4) % 4));
+        let activator = prefix_activator(4, 13);
+        let run = |a: &[F]| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &table)?;
+                    let a = commit(prover, a)?;
+                    let b = commit(prover, &b)?;
+                    let activator = commit(prover, &activator)?;
+                    let folded =
+                        (&a + &b.mul_scalar_poly(F::from(4u64))).add_scalar_poly(F::from(16u64));
+                    let sub = &folded * &activator;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), a.id(), b.id(), activator.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let folded = (&oracles[1] + &oracles[2].mul_scalar_oracle(F::from(4u64)))
+                        .add_scalar_oracle(F::from(16u64));
+                    let sub = &folded * &oracles[3];
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(&a));
 
-    let mut bad = a.clone();
-    bad[12] = F::from(40u64);
-    assert_rejected(run(&bad));
+        let mut bad = a.clone();
+        bad[12] = F::from(40u64);
+        assert_rejected(run(&bad));
+    });
 }
 
 #[test]
 fn lookup_transparent_table_sub_larger() {
-    let activator = prefix_activator(6, 50);
-    // Inactive rows are zero, as in the limb columns of a sign check.
-    let data = fv((0..64).map(|i| if i < 50 { (i * 7) % 16 } else { 0 }));
-    assert_accepted(transparent_range_e2e(4, &data, &activator));
+    under_each_protocol(|_| {
+        let activator = prefix_activator(6, 50);
+        // Inactive rows are zero, as in the limb columns of a sign check.
+        let data = fv((0..64).map(|i| if i < 50 { (i * 7) % 16 } else { 0 }));
+        assert_accepted(transparent_range_e2e(4, &data, &activator));
 
-    let mut bad = data;
-    bad[49] = F::from(16u64);
-    assert_rejected(transparent_range_e2e(4, &bad, &activator));
+        let mut bad = data;
+        bad[49] = F::from(16u64);
+        assert_rejected(transparent_range_e2e(4, &bad, &activator));
+    });
 }
 
 #[test]
 fn lookup_transparent_table_sub_smaller() {
-    let activator = prefix_activator(3, 6);
-    let data = fv((0..8).map(|i| if i < 6 { i * 9 + 2 } else { 0 }));
-    assert_accepted(transparent_range_e2e(6, &data, &activator));
+    under_each_protocol(|_| {
+        let activator = prefix_activator(3, 6);
+        let data = fv((0..8).map(|i| if i < 6 { i * 9 + 2 } else { 0 }));
+        assert_accepted(transparent_range_e2e(6, &data, &activator));
 
-    let mut bad = data;
-    bad[0] = F::from(64u64);
-    assert_rejected(transparent_range_e2e(6, &bad, &activator));
+        let mut bad = data;
+        bad[0] = F::from(64u64);
+        assert_rejected(transparent_range_e2e(6, &bad, &activator));
+    });
 }
 
 /// The AND-table lookup of a bitwise gadget: the table depends on challenges
@@ -1106,106 +1195,111 @@ fn lookup_transparent_table_sub_smaller() {
 /// tracked after those challenges on both sides.
 #[test]
 fn lookup_table_tracked_after_challenge() {
-    const BITS: usize = 2;
-    let label: &'static [u8] = b"and fold";
-    // Row `a + 4·b` of the table holds `r0·a + r1·b + r2·(a & b)`.
-    let and_table = |rs: [F; 3]| -> Vec<F> {
-        (0..1u64 << (2 * BITS))
-            .map(|idx| {
-                let (a, b) = (idx % (1 << BITS), idx >> BITS);
-                rs[0] * F::from(a) + rs[1] * F::from(b) + rs[2] * F::from(a & b)
+    under_each_protocol(|_| {
+        const BITS: usize = 2;
+        let label: &'static [u8] = b"and fold";
+        // Row `a + 4·b` of the table holds `r0·a + r1·b + r2·(a & b)`.
+        let and_table = |rs: [F; 3]| -> Vec<F> {
+            (0..1u64 << (2 * BITS))
+                .map(|idx| {
+                    let (a, b) = (idx % (1 << BITS), idx >> BITS);
+                    rs[0] * F::from(a) + rs[1] * F::from(b) + rs[2] * F::from(a & b)
+                })
+                .collect()
+        };
+        // The same table as a multilinear polynomial in the bits of a and b.
+        let and_table_oracle = |rs: [F; 3]| {
+            Oracle::new_multivariate(2 * BITS, move |x: Vec<F>| {
+                let mut acc = F::zero();
+                let mut weight = F::one();
+                for i in 0..BITS {
+                    acc +=
+                        weight * (rs[0] * x[i] + rs[1] * x[BITS + i] + rs[2] * x[i] * x[BITS + i]);
+                    weight += weight;
+                }
+                Ok(acc)
             })
-            .collect()
-    };
-    // The same table as a multilinear polynomial in the bits of a and b.
-    let and_table_oracle = |rs: [F; 3]| {
-        Oracle::new_multivariate(2 * BITS, move |x: Vec<F>| {
-            let mut acc = F::zero();
-            let mut weight = F::one();
-            for i in 0..BITS {
-                acc += weight * (rs[0] * x[i] + rs[1] * x[BITS + i] + rs[2] * x[i] * x[BITS + i]);
-                weight += weight;
-            }
-            Ok(acc)
-        })
-    };
-    let a: Vec<u64> = (0..32).map(|i| i % 4).collect();
-    let b: Vec<u64> = (0..32).map(|i| (i / 4) % 4).collect();
-    let and: Vec<u64> = a.iter().zip(&b).map(|(a, b)| a & b).collect();
-    let activator = prefix_activator(5, 27);
-    let run = |and: &[u64]| {
-        prove_and_verify(
-            |prover| {
-                let a = commit(prover, &fv(a.iter().copied()))?;
-                let b = commit(prover, &fv(b.iter().copied()))?;
-                let and = commit(prover, &fv(and.iter().copied()))?;
-                let activator = commit(prover, &activator)?;
-                let rs = [
-                    prover.get_and_append_challenge(label)?,
-                    prover.get_and_append_challenge(label)?,
-                    prover.get_and_append_challenge(label)?,
-                ];
-                let folded = &(&a.mul_scalar_poly(rs[0]) + &b.mul_scalar_poly(rs[1]))
-                    + &and.mul_scalar_poly(rs[2]);
-                let sub = &folded * &activator;
-                let table = prover.track_mat_mv_poly(mle(&and_table(rs)));
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([a.id(), b.id(), and.id(), activator.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                let rs = [
-                    verifier.get_and_append_challenge(label)?,
-                    verifier.get_and_append_challenge(label)?,
-                    verifier.get_and_append_challenge(label)?,
-                ];
-                let folded = &(&oracles[0].mul_scalar_oracle(rs[0])
-                    + &oracles[1].mul_scalar_oracle(rs[1]))
-                    + &oracles[2].mul_scalar_oracle(rs[2]);
-                let sub = &folded * &oracles[3];
-                let table = verifier.track_base_oracle(and_table_oracle(rs));
-                verifier.add_mv_lookup_claim(table.id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(&and));
+        };
+        let a: Vec<u64> = (0..32).map(|i| i % 4).collect();
+        let b: Vec<u64> = (0..32).map(|i| (i / 4) % 4).collect();
+        let and: Vec<u64> = a.iter().zip(&b).map(|(a, b)| a & b).collect();
+        let activator = prefix_activator(5, 27);
+        let run = |and: &[u64]| {
+            prove_and_verify(
+                |prover| {
+                    let a = commit(prover, &fv(a.iter().copied()))?;
+                    let b = commit(prover, &fv(b.iter().copied()))?;
+                    let and = commit(prover, &fv(and.iter().copied()))?;
+                    let activator = commit(prover, &activator)?;
+                    let rs = [
+                        prover.get_and_append_challenge(label)?,
+                        prover.get_and_append_challenge(label)?,
+                        prover.get_and_append_challenge(label)?,
+                    ];
+                    let folded = &(&a.mul_scalar_poly(rs[0]) + &b.mul_scalar_poly(rs[1]))
+                        + &and.mul_scalar_poly(rs[2]);
+                    let sub = &folded * &activator;
+                    let table = prover.track_mat_mv_poly(mle(&and_table(rs)));
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([a.id(), b.id(), and.id(), activator.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let rs = [
+                        verifier.get_and_append_challenge(label)?,
+                        verifier.get_and_append_challenge(label)?,
+                        verifier.get_and_append_challenge(label)?,
+                    ];
+                    let folded = &(&oracles[0].mul_scalar_oracle(rs[0])
+                        + &oracles[1].mul_scalar_oracle(rs[1]))
+                        + &oracles[2].mul_scalar_oracle(rs[2]);
+                    let sub = &folded * &oracles[3];
+                    let table = verifier.track_base_oracle(and_table_oracle(rs));
+                    verifier.add_mv_lookup_claim(table.id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(&and));
 
-    // An inactive row may hold anything: it folds to the table's zero row.
-    let mut garbage_in_inactive_row = and.clone();
-    garbage_in_inactive_row[30] = 3;
-    assert_accepted(run(&garbage_in_inactive_row));
+        // An inactive row may hold anything: it folds to the table's zero row.
+        let mut garbage_in_inactive_row = and.clone();
+        garbage_in_inactive_row[30] = 3;
+        assert_accepted(run(&garbage_in_inactive_row));
 
-    // An active row may not: 3 & 1 is 1.
-    let mut bad = and;
-    assert_eq!((a[7], b[7], bad[7]), (3, 1, 1));
-    bad[7] = 2;
-    assert_rejected(run(&bad));
+        // An active row may not: 3 & 1 is 1.
+        let mut bad = and;
+        assert_eq!((a[7], b[7], bad[7]), (3, 1, 1));
+        bad[7] = 2;
+        assert_rejected(run(&bad));
+    });
 }
 
 /// A one-row table and a one-row sub, next to an ordinary claim on a real
 /// column.
 #[test]
 fn lookup_nv0_table_and_sub() {
-    let other = fv(0..8);
-    let run = |sub: u64| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &fv([7]))?;
-                let sub = commit(prover, &fv([sub]))?;
-                let other_p = commit(prover, &other)?;
-                prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
-                prover.add_mv_lookup_claim(table.id(), sub.id())?;
-                Ok([table.id(), sub.id(), other_p.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                verifier.add_mv_sumcheck_claim(oracles[2].id(), sum(&other));
-                verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())
-            },
-        )
-    };
-    assert_accepted(run(7));
-    assert_rejected(run(8));
+    under_each_protocol(|_| {
+        let other = fv(0..8);
+        let run = |sub: u64| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &fv([7]))?;
+                    let sub = commit(prover, &fv([sub]))?;
+                    let other_p = commit(prover, &other)?;
+                    prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
+                    prover.add_mv_lookup_claim(table.id(), sub.id())?;
+                    Ok([table.id(), sub.id(), other_p.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    verifier.add_mv_sumcheck_claim(oracles[2].id(), sum(&other));
+                    verifier.add_mv_lookup_claim(oracles[0].id(), oracles[1].id())
+                },
+            )
+        };
+        assert_accepted(run(7));
+        assert_rejected(run(8));
+    });
 }
 
 /// The same lookup as the whole statement: every polynomial is a constant.
@@ -1214,191 +1308,202 @@ fn lookup_nv0_table_and_sub() {
             polynomials without variables cannot be built; build_proof returns a PolyIOP error \
             (\"Attempt to prove a constant\") for a true statement"]
 fn lookup_nv0_only_statement() {
-    assert_accepted(lookup_e2e(&fv([7]), &[fv([7])]));
-    assert_rejected(lookup_e2e(&fv([7]), &[fv([8])]));
+    under_each_protocol(|_| {
+        assert_accepted(lookup_e2e(&fv([7]), &[fv([7])]));
+        assert_rejected(lookup_e2e(&fv([7]), &[fv([8])]));
+    });
 }
 
 /// A one-row sub in a real table, and a real sub in a one-row table.
 #[test]
 fn lookup_nv0_against_larger_columns() {
-    assert_accepted(lookup_e2e(&fv(0..16), &[fv([7])]));
-    assert_rejected(lookup_e2e(&fv(0..16), &[fv([16])]));
+    under_each_protocol(|_| {
+        assert_accepted(lookup_e2e(&fv(0..16), &[fv([7])]));
+        assert_rejected(lookup_e2e(&fv(0..16), &[fv([16])]));
 
-    let mut bad = fv([7; 8]);
-    bad[3] = F::from(6u64);
-    assert_rejected(lookup_e2e(&fv([7]), &[bad]));
+        let mut bad = fv([7; 8]);
+        bad[3] = F::from(6u64);
+        assert_rejected(lookup_e2e(&fv([7]), &[bad]));
+    });
 }
 
 /// A table that is itself a committed constant.
 #[test]
 fn lookup_constant_table() {
-    assert_accepted(lookup_e2e(&fv([7; 32]), &[fv([7; 8])]));
-    assert_rejected(lookup_e2e(&fv([7; 32]), &[fv([6; 8])]));
-    assert_rejected(lookup_e2e(&fv([7; 8]), &[fv([7, 7, 7, 7, 7, 7, 7, 6])]));
+    under_each_protocol(|_| {
+        assert_accepted(lookup_e2e(&fv([7; 32]), &[fv([7; 8])]));
+        assert_rejected(lookup_e2e(&fv([7; 32]), &[fv([6; 8])]));
+        assert_rejected(lookup_e2e(&fv([7; 8]), &[fv([7, 7, 7, 7, 7, 7, 7, 6])]));
+    });
 }
 
 /// The lookup is the whole statement: the proof carries no sumcheck or
 /// zerocheck claim of the caller's own, and the table is not even committed.
 #[test]
 fn lookup_only_statement() {
-    assert_accepted(lookup_e2e(&fv(0..8), &[fv((0..8).map(|i| 7 - i))]));
-    assert_accepted(transparent_range_e2e(
-        3,
-        &fv((0..8).map(|i| 7 - i)),
-        &fv([1; 8]),
-    ));
+    under_each_protocol(|_| {
+        assert_accepted(lookup_e2e(&fv(0..8), &[fv((0..8).map(|i| 7 - i))]));
+        assert_accepted(transparent_range_e2e(
+            3,
+            &fv((0..8).map(|i| 7 - i)),
+            &fv([1; 8]),
+        ));
+    });
 }
 
 /// Lookup claims against three tables, interleaved with ordinary claims and
 /// with keyed sumchecks proved on the spot.
 #[test]
 fn several_super_groups_plus_direct_keyed_sumcheck() {
-    struct Statement {
-        ids: Vec<TrackerID>,
-        summed: F,
-        after_permutation: ArgProver<B>,
-        after_weighted: ArgProver<B>,
-    }
-    let summed = fv((0..16).map(|i| i * i));
-    let table_a = fv(0..16);
-    let table_b = fv((0..64).map(|i| (i % 32) * 3));
-    let sub_a1 = fv((0..16).map(|i| (i * 3) % 16));
-    let sub_a2 = fv((0..64).map(|i| i % 11));
-    let sub_b1 = fv((0..8).map(|i| i * 9));
-    let data_c = fv((0..32).map(|i| if i < 25 { i } else { 0 }));
-    let act_c = prefix_activator(5, 25);
-    let perm_f = fv(0..32);
-    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
-    let weighted_f = fv((0..8).map(|i| i + 100));
-    let weighted_mf = fv((0..8).map(|i| i + 1));
-    let weighted_g = fv((0..32).map(|i| (i % 8) + 100));
-    let weighted_mg = fv((0..32).map(|i| if i < 8 { i + 1 } else { 0 }));
+    under_each_protocol(|_| {
+        struct Statement {
+            ids: Vec<TrackerID>,
+            summed: F,
+            after_permutation: ArgProver<B>,
+            after_weighted: ArgProver<B>,
+        }
+        let summed = fv((0..16).map(|i| i * i));
+        let table_a = fv(0..16);
+        let table_b = fv((0..64).map(|i| (i % 32) * 3));
+        let sub_a1 = fv((0..16).map(|i| (i * 3) % 16));
+        let sub_a2 = fv((0..64).map(|i| i % 11));
+        let sub_b1 = fv((0..8).map(|i| i * 9));
+        let data_c = fv((0..32).map(|i| if i < 25 { i } else { 0 }));
+        let act_c = prefix_activator(5, 25);
+        let perm_f = fv(0..32);
+        let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+        let weighted_f = fv((0..8).map(|i| i + 100));
+        let weighted_mf = fv((0..8).map(|i| i + 1));
+        let weighted_g = fv((0..32).map(|i| (i % 8) + 100));
+        let weighted_mg = fv((0..32).map(|i| if i < 8 { i + 1 } else { 0 }));
 
-    assert_accepted(prove_and_verify(
-        |prover| {
-            let cols = [
-                &summed,
-                &table_a,
-                &table_b,
-                &sub_a1,
-                &sub_a2,
-                &sub_b1,
-                &data_c,
-                &act_c,
-                &perm_f,
-                &perm_g,
-                &weighted_f,
-                &weighted_mf,
-                &weighted_g,
-                &weighted_mg,
-            ]
-            .map(|evals| commit(prover, evals))
-            .into_iter()
-            .collect::<SnarkResult<Vec<_>>>()?;
-            let ids = cols.iter().map(TrackedPoly::id).collect();
-            let [
-                summed_p,
-                table_a,
-                table_b,
-                sub_a1,
-                sub_a2,
-                sub_b1,
-                data_c,
-                act_c,
-                perm_f,
-                perm_g,
-                weighted_f,
-                weighted_mf,
-                weighted_g,
-                weighted_mg,
-            ]: [TrackedPoly<B>; 14] = cols.try_into().unwrap();
-            let table_c = prover.track_mat_mv_poly(range_table(5));
-            let sub_c1 = &data_c * &act_c;
-            // Active rows of data_c count up from zero, as perm_f does.
-            let zero = &sub_c1 - &(&perm_f * &act_c);
+        assert_accepted(prove_and_verify(
+            |prover| {
+                let cols = [
+                    &summed,
+                    &table_a,
+                    &table_b,
+                    &sub_a1,
+                    &sub_a2,
+                    &sub_b1,
+                    &data_c,
+                    &act_c,
+                    &perm_f,
+                    &perm_g,
+                    &weighted_f,
+                    &weighted_mf,
+                    &weighted_g,
+                    &weighted_mg,
+                ]
+                .map(|evals| commit(prover, evals))
+                .into_iter()
+                .collect::<SnarkResult<Vec<_>>>()?;
+                let ids = cols.iter().map(TrackedPoly::id).collect();
+                let [
+                    summed_p,
+                    table_a,
+                    table_b,
+                    sub_a1,
+                    sub_a2,
+                    sub_b1,
+                    data_c,
+                    act_c,
+                    perm_f,
+                    perm_g,
+                    weighted_f,
+                    weighted_mf,
+                    weighted_g,
+                    weighted_mg,
+                ]: [TrackedPoly<B>; 14] = cols.try_into().unwrap();
+                let table_c = prover.track_mat_mv_poly(range_table(5));
+                let sub_c1 = &data_c * &act_c;
+                // Active rows of data_c count up from zero, as perm_f does.
+                let zero = &sub_c1 - &(&perm_f * &act_c);
 
-            prover.add_mv_sumcheck_claim(summed_p.id(), sum(&summed))?;
-            prover.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
-            KeyedSumcheck::<B>::prove(
-                prover,
-                KeyedSumcheckProverInput {
-                    fxs: vec![perm_f],
-                    gxs: vec![perm_g],
-                    mfxs: vec![None],
-                    mgxs: vec![None],
-                },
-            )?;
-            let after_permutation = prover.deep_copy();
-            prover.add_mv_lookup_claim(table_b.id(), sub_b1.id())?;
-            prover.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
-            prover.add_mv_zerocheck_claim(zero.id())?;
-            KeyedSumcheck::<B>::prove(
-                prover,
-                KeyedSumcheckProverInput {
-                    fxs: vec![weighted_f],
-                    gxs: vec![weighted_g],
-                    mfxs: vec![Some(weighted_mf)],
-                    mgxs: vec![Some(weighted_mg)],
-                },
-            )?;
-            let after_weighted = prover.deep_copy();
-            prover.add_mv_lookup_claim(table_c.id(), sub_c1.id())?;
-            Ok(Statement {
-                ids,
-                summed: sum(&summed),
-                after_permutation,
-                after_weighted,
-            })
-        },
-        |verifier, statement| {
-            let [
-                summed,
-                table_a,
-                table_b,
-                sub_a1,
-                sub_a2,
-                sub_b1,
-                data_c,
-                act_c,
-                perm_f,
-                perm_g,
-                weighted_f,
-                weighted_mf,
-                weighted_g,
-                weighted_mg,
-            ]: [TrackedOracle<B>; 14] = track_all(verifier, &statement.ids)?.try_into().unwrap();
-            let table_c = verifier.track_base_oracle(range_oracle(5));
-            let sub_c1 = &data_c * &act_c;
-            let zero = &sub_c1 - &(&perm_f * &act_c);
+                prover.add_mv_sumcheck_claim(summed_p.id(), sum(&summed))?;
+                prover.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                KeyedSumcheck::<B>::prove(
+                    prover,
+                    KeyedSumcheckProverInput {
+                        fxs: vec![perm_f],
+                        gxs: vec![perm_g],
+                        mfxs: vec![None],
+                        mgxs: vec![None],
+                    },
+                )?;
+                let after_permutation = prover.deep_copy();
+                prover.add_mv_lookup_claim(table_b.id(), sub_b1.id())?;
+                prover.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
+                prover.add_mv_zerocheck_claim(zero.id())?;
+                KeyedSumcheck::<B>::prove(
+                    prover,
+                    KeyedSumcheckProverInput {
+                        fxs: vec![weighted_f],
+                        gxs: vec![weighted_g],
+                        mfxs: vec![Some(weighted_mf)],
+                        mgxs: vec![Some(weighted_mg)],
+                    },
+                )?;
+                let after_weighted = prover.deep_copy();
+                prover.add_mv_lookup_claim(table_c.id(), sub_c1.id())?;
+                Ok(Statement {
+                    ids,
+                    summed: sum(&summed),
+                    after_permutation,
+                    after_weighted,
+                })
+            },
+            |verifier, statement| {
+                let [
+                    summed,
+                    table_a,
+                    table_b,
+                    sub_a1,
+                    sub_a2,
+                    sub_b1,
+                    data_c,
+                    act_c,
+                    perm_f,
+                    perm_g,
+                    weighted_f,
+                    weighted_mf,
+                    weighted_g,
+                    weighted_mg,
+                ]: [TrackedOracle<B>; 14] =
+                    track_all(verifier, &statement.ids)?.try_into().unwrap();
+                let table_c = verifier.track_base_oracle(range_oracle(5));
+                let sub_c1 = &data_c * &act_c;
+                let zero = &sub_c1 - &(&perm_f * &act_c);
 
-            verifier.add_mv_sumcheck_claim(summed.id(), statement.summed);
-            verifier.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
-            KeyedSumcheck::<B>::verify(
-                verifier,
-                KeyedSumcheckVerifierInput {
-                    fxs: vec![perm_f],
-                    gxs: vec![perm_g],
-                    mfxs: vec![None],
-                    mgxs: vec![None],
-                },
-            )?;
-            assert_prover_verifier_in_sync(&statement.after_permutation, verifier);
-            verifier.add_mv_lookup_claim(table_b.id(), sub_b1.id())?;
-            verifier.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
-            verifier.add_mv_zerocheck_claim(zero.id());
-            KeyedSumcheck::<B>::verify(
-                verifier,
-                KeyedSumcheckVerifierInput {
-                    fxs: vec![weighted_f],
-                    gxs: vec![weighted_g],
-                    mfxs: vec![Some(weighted_mf)],
-                    mgxs: vec![Some(weighted_mg)],
-                },
-            )?;
-            assert_prover_verifier_in_sync(&statement.after_weighted, verifier);
-            verifier.add_mv_lookup_claim(table_c.id(), sub_c1.id())
-        },
-    ));
+                verifier.add_mv_sumcheck_claim(summed.id(), statement.summed);
+                verifier.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                KeyedSumcheck::<B>::verify(
+                    verifier,
+                    KeyedSumcheckVerifierInput {
+                        fxs: vec![perm_f],
+                        gxs: vec![perm_g],
+                        mfxs: vec![None],
+                        mgxs: vec![None],
+                    },
+                )?;
+                assert_prover_verifier_in_sync(&statement.after_permutation, verifier);
+                verifier.add_mv_lookup_claim(table_b.id(), sub_b1.id())?;
+                verifier.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
+                verifier.add_mv_zerocheck_claim(zero.id());
+                KeyedSumcheck::<B>::verify(
+                    verifier,
+                    KeyedSumcheckVerifierInput {
+                        fxs: vec![weighted_f],
+                        gxs: vec![weighted_g],
+                        mfxs: vec![Some(weighted_mf)],
+                        mgxs: vec![Some(weighted_mg)],
+                    },
+                )?;
+                assert_prover_verifier_in_sync(&statement.after_weighted, verifier);
+                verifier.add_mv_lookup_claim(table_c.id(), sub_c1.id())
+            },
+        ));
+    });
 }
 
 /// Two hinted lookups, each false, whose errors cancel when all four sides
@@ -1407,84 +1512,86 @@ fn several_super_groups_plus_direct_keyed_sumcheck() {
 /// relation has to balance on its own.
 #[test]
 fn two_relations_with_cancelling_errors_are_rejected() {
-    let table_a = fv(0..8);
-    let table_b = fv(8..16);
-    let counts_a = [1, 3, 1, 3, 1, 3, 1, 3];
-    let counts_b = [3, 1, 3, 1, 3, 1, 3, 1];
-    let repeat = |table: std::ops::Range<u64>, counts: [usize; 8]| -> Vec<u64> {
-        table
-            .zip(counts)
-            .flat_map(|(value, count)| std::iter::repeat_n(value, count))
-            .collect()
-    };
-    // The multiplicities claim the counts above, but one 7 of sub_a has been
-    // swapped for the 8 that sub_b is missing.
-    let mut sub_a = repeat(0..8, counts_a);
-    let mut sub_b = repeat(8..16, counts_b);
-    assert_eq!((sub_a[15], sub_b[0]), (7, 8));
-    (sub_a[15], sub_b[0]) = (8, 7);
-    let (sub_a, sub_b) = (fv(sub_a), fv(sub_b));
-    let multiplicity_a = fv(counts_a.map(|c| c as u64));
-    let multiplicity_b = fv(counts_b.map(|c| c as u64));
+    under_each_protocol(|_| {
+        let table_a = fv(0..8);
+        let table_b = fv(8..16);
+        let counts_a = [1, 3, 1, 3, 1, 3, 1, 3];
+        let counts_b = [3, 1, 3, 1, 3, 1, 3, 1];
+        let repeat = |table: std::ops::Range<u64>, counts: [usize; 8]| -> Vec<u64> {
+            table
+                .zip(counts)
+                .flat_map(|(value, count)| std::iter::repeat_n(value, count))
+                .collect()
+        };
+        // The multiplicities claim the counts above, but one 7 of sub_a has been
+        // swapped for the 8 that sub_b is missing.
+        let mut sub_a = repeat(0..8, counts_a);
+        let mut sub_b = repeat(8..16, counts_b);
+        assert_eq!((sub_a[15], sub_b[0]), (7, 8));
+        (sub_a[15], sub_b[0]) = (8, 7);
+        let (sub_a, sub_b) = (fv(sub_a), fv(sub_b));
+        let multiplicity_a = fv(counts_a.map(|c| c as u64));
+        let multiplicity_b = fv(counts_b.map(|c| c as u64));
 
-    assert_rejected(prove_and_verify(
-        |prover| {
-            let cols = [
-                &table_a,
-                &sub_a,
-                &table_b,
-                &sub_b,
-                &multiplicity_a,
-                &multiplicity_b,
-            ]
-            .map(|evals| commit(prover, evals))
-            .into_iter()
-            .collect::<SnarkResult<Vec<_>>>()?;
-            let ids: Vec<TrackerID> = cols.iter().map(TrackedPoly::id).collect();
-            let [table_a, sub_a, table_b, sub_b, m_a, m_b]: [TrackedPoly<B>; 6] =
-                cols.try_into().unwrap();
-            HintedLookupCheckPIOP::<B>::prove(
-                prover,
-                HintedLookupCheckProverInput {
-                    included_cols: vec![sub_a],
-                    super_col: table_a,
-                    super_col_multiplicity: m_a,
-                },
-            )?;
-            HintedLookupCheckPIOP::<B>::prove(
-                prover,
-                HintedLookupCheckProverInput {
-                    included_cols: vec![sub_b],
-                    super_col: table_b,
-                    super_col_multiplicity: m_b,
-                },
-            )?;
-            Ok(ids)
-        },
-        |verifier, ids| {
-            let [table_a, sub_a, table_b, sub_b, m_a, m_b]: [TrackedOracle<B>; 6] =
-                track_all(verifier, &ids)?.try_into().unwrap();
-            // Both relations are checked before either verdict is read, so
-            // a verifier that only compares totals gets to see them cancel.
-            let first = HintedLookupCheckPIOP::<B>::verify(
-                verifier,
-                HintedLookupCheckVerifierInput {
-                    included_tracked_col_oracles: vec![sub_a],
-                    super_tracked_col_oracle: table_a,
-                    super_col_multiplicity: m_a,
-                },
-            );
-            let second = HintedLookupCheckPIOP::<B>::verify(
-                verifier,
-                HintedLookupCheckVerifierInput {
-                    included_tracked_col_oracles: vec![sub_b],
-                    super_tracked_col_oracle: table_b,
-                    super_col_multiplicity: m_b,
-                },
-            );
-            first.and(second)
-        },
-    ));
+        assert_rejected(prove_and_verify(
+            |prover| {
+                let cols = [
+                    &table_a,
+                    &sub_a,
+                    &table_b,
+                    &sub_b,
+                    &multiplicity_a,
+                    &multiplicity_b,
+                ]
+                .map(|evals| commit(prover, evals))
+                .into_iter()
+                .collect::<SnarkResult<Vec<_>>>()?;
+                let ids: Vec<TrackerID> = cols.iter().map(TrackedPoly::id).collect();
+                let [table_a, sub_a, table_b, sub_b, m_a, m_b]: [TrackedPoly<B>; 6] =
+                    cols.try_into().unwrap();
+                HintedLookupCheckPIOP::<B>::prove(
+                    prover,
+                    HintedLookupCheckProverInput {
+                        included_cols: vec![sub_a],
+                        super_col: table_a,
+                        super_col_multiplicity: m_a,
+                    },
+                )?;
+                HintedLookupCheckPIOP::<B>::prove(
+                    prover,
+                    HintedLookupCheckProverInput {
+                        included_cols: vec![sub_b],
+                        super_col: table_b,
+                        super_col_multiplicity: m_b,
+                    },
+                )?;
+                Ok(ids)
+            },
+            |verifier, ids| {
+                let [table_a, sub_a, table_b, sub_b, m_a, m_b]: [TrackedOracle<B>; 6] =
+                    track_all(verifier, &ids)?.try_into().unwrap();
+                // Both relations are checked before either verdict is read, so
+                // a verifier that only compares totals gets to see them cancel.
+                let first = HintedLookupCheckPIOP::<B>::verify(
+                    verifier,
+                    HintedLookupCheckVerifierInput {
+                        included_tracked_col_oracles: vec![sub_a],
+                        super_tracked_col_oracle: table_a,
+                        super_col_multiplicity: m_a,
+                    },
+                );
+                let second = HintedLookupCheckPIOP::<B>::verify(
+                    verifier,
+                    HintedLookupCheckVerifierInput {
+                        included_tracked_col_oracles: vec![sub_b],
+                        super_tracked_col_oracle: table_b,
+                        super_col_multiplicity: m_b,
+                    },
+                );
+                first.and(second)
+            },
+        ));
+    });
 }
 
 /// Two lookup groups whose subs each hold a value found only in the other
@@ -1492,32 +1599,34 @@ fn two_relations_with_cancelling_errors_are_rejected() {
 /// so only a per-table check tells this apart from a true statement.
 #[test]
 fn lookup_groups_do_not_share_tables() {
-    let run = |sub_a: &[F], sub_b: &[F]| {
-        prove_and_verify(
-            |prover| {
-                let table_a = commit(prover, &fv(0..8))?;
-                let table_b = commit(prover, &fv(8..16))?;
-                let sub_a = commit(prover, sub_a)?;
-                let sub_b = commit(prover, sub_b)?;
-                prover.add_mv_lookup_claim(table_a.id(), sub_a.id())?;
-                prover.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
-                Ok([table_a.id(), table_b.id(), sub_a.id(), sub_b.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                verifier.add_mv_lookup_claim(oracles[0].id(), oracles[2].id())?;
-                verifier.add_mv_lookup_claim(oracles[1].id(), oracles[3].id())
-            },
-        )
-    };
-    assert_accepted(run(
-        &fv([0, 1, 2, 3, 4, 5, 6, 7]),
-        &fv([8, 9, 10, 11, 12, 13, 14, 15]),
-    ));
-    assert_rejected(run(
-        &fv([0, 1, 2, 3, 4, 5, 6, 8]),
-        &fv([7, 9, 10, 11, 12, 13, 14, 15]),
-    ));
+    under_each_protocol(|_| {
+        let run = |sub_a: &[F], sub_b: &[F]| {
+            prove_and_verify(
+                |prover| {
+                    let table_a = commit(prover, &fv(0..8))?;
+                    let table_b = commit(prover, &fv(8..16))?;
+                    let sub_a = commit(prover, sub_a)?;
+                    let sub_b = commit(prover, sub_b)?;
+                    prover.add_mv_lookup_claim(table_a.id(), sub_a.id())?;
+                    prover.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
+                    Ok([table_a.id(), table_b.id(), sub_a.id(), sub_b.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    verifier.add_mv_lookup_claim(oracles[0].id(), oracles[2].id())?;
+                    verifier.add_mv_lookup_claim(oracles[1].id(), oracles[3].id())
+                },
+            )
+        };
+        assert_accepted(run(
+            &fv([0, 1, 2, 3, 4, 5, 6, 7]),
+            &fv([8, 9, 10, 11, 12, 13, 14, 15]),
+        ));
+        assert_rejected(run(
+            &fv([0, 1, 2, 3, 4, 5, 6, 8]),
+            &fv([7, 9, 10, 11, 12, 13, 14, 15]),
+        ));
+    });
 }
 
 /// The prover proves `good ⊆ table`; the verifier is told `other ⊆ table`.
@@ -1526,76 +1635,80 @@ fn lookup_groups_do_not_share_tables() {
 /// the lookup to the column it was proved for can reject this.
 #[test]
 fn verifier_statement_swap_column_is_rejected() {
-    let table = fv(0..16);
-    let good = fv((0..16).map(|i| (i * 3) % 16));
-    let other = fv((0..16).map(|i| (i * 5) % 8));
-    let run = |swap: bool| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &table)?;
-                let good = commit(prover, &good)?;
-                let other_p = commit(prover, &other)?;
-                prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
-                prover.add_mv_lookup_claim(table.id(), good.id())?;
-                Ok([table.id(), good.id(), other_p.id()])
-            },
-            |verifier, ids| {
-                let oracles = track_all(verifier, &ids)?;
-                verifier.add_mv_sumcheck_claim(oracles[2].id(), sum(&other));
-                let sub = if swap { &oracles[2] } else { &oracles[1] };
-                verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
-            },
-        )
-    };
-    assert_accepted(run(false));
-    assert_rejected_by_verifier(run(true));
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let good = fv((0..16).map(|i| (i * 3) % 16));
+        let other = fv((0..16).map(|i| (i * 5) % 8));
+        let run = |swap: bool| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &table)?;
+                    let good = commit(prover, &good)?;
+                    let other_p = commit(prover, &other)?;
+                    prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
+                    prover.add_mv_lookup_claim(table.id(), good.id())?;
+                    Ok([table.id(), good.id(), other_p.id()])
+                },
+                |verifier, ids| {
+                    let oracles = track_all(verifier, &ids)?;
+                    verifier.add_mv_sumcheck_claim(oracles[2].id(), sum(&other));
+                    let sub = if swap { &oracles[2] } else { &oracles[1] };
+                    verifier.add_mv_lookup_claim(oracles[0].id(), sub.id())
+                },
+            )
+        };
+        assert_accepted(run(false));
+        assert_rejected_by_verifier(run(true));
+    });
 }
 
 /// As above for the multiplicity of a hinted lookup: proved with the true
 /// counts, mirrored with another committed column.
 #[test]
 fn verifier_statement_swap_multiplicity_is_rejected() {
-    let table = fv(0..16);
-    let sub = fv((0..16).map(|i| (i * 2) % 16));
-    let good = fv((0..16).map(|i| if i % 2 == 0 { 2 } else { 0 }));
-    // Same total as `good`, different rows.
-    let other = fv((0..16).map(|i| if i % 2 == 1 { 2 } else { 0 }));
-    let run = |swap: bool| {
-        prove_and_verify(
-            |prover| {
-                let table = commit(prover, &table)?;
-                let sub = commit(prover, &sub)?;
-                let good = commit(prover, &good)?;
-                let other_p = commit(prover, &other)?;
-                let ids = [table.id(), sub.id(), good.id(), other_p.id()];
-                prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
-                HintedLookupCheckPIOP::<B>::prove(
-                    prover,
-                    HintedLookupCheckProverInput {
-                        included_cols: vec![sub],
-                        super_col: table,
-                        super_col_multiplicity: good,
-                    },
-                )?;
-                Ok(ids)
-            },
-            |verifier, ids| {
-                let [table, sub, good, other_o]: [TrackedOracle<B>; 4] =
-                    track_all(verifier, &ids)?.try_into().unwrap();
-                verifier.add_mv_sumcheck_claim(other_o.id(), sum(&other));
-                HintedLookupCheckPIOP::<B>::verify(
-                    verifier,
-                    HintedLookupCheckVerifierInput {
-                        included_tracked_col_oracles: vec![sub],
-                        super_tracked_col_oracle: table,
-                        super_col_multiplicity: if swap { other_o } else { good },
-                    },
-                )
-            },
-        )
-    };
-    assert_accepted(run(false));
-    assert_rejected_by_verifier(run(true));
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let sub = fv((0..16).map(|i| (i * 2) % 16));
+        let good = fv((0..16).map(|i| if i % 2 == 0 { 2 } else { 0 }));
+        // Same total as `good`, different rows.
+        let other = fv((0..16).map(|i| if i % 2 == 1 { 2 } else { 0 }));
+        let run = |swap: bool| {
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &table)?;
+                    let sub = commit(prover, &sub)?;
+                    let good = commit(prover, &good)?;
+                    let other_p = commit(prover, &other)?;
+                    let ids = [table.id(), sub.id(), good.id(), other_p.id()];
+                    prover.add_mv_sumcheck_claim(other_p.id(), sum(&other))?;
+                    HintedLookupCheckPIOP::<B>::prove(
+                        prover,
+                        HintedLookupCheckProverInput {
+                            included_cols: vec![sub],
+                            super_col: table,
+                            super_col_multiplicity: good,
+                        },
+                    )?;
+                    Ok(ids)
+                },
+                |verifier, ids| {
+                    let [table, sub, good, other_o]: [TrackedOracle<B>; 4] =
+                        track_all(verifier, &ids)?.try_into().unwrap();
+                    verifier.add_mv_sumcheck_claim(other_o.id(), sum(&other));
+                    HintedLookupCheckPIOP::<B>::verify(
+                        verifier,
+                        HintedLookupCheckVerifierInput {
+                            included_tracked_col_oracles: vec![sub],
+                            super_tracked_col_oracle: table,
+                            super_col_multiplicity: if swap { other_o } else { good },
+                        },
+                    )
+                },
+            )
+        };
+        assert_accepted(run(false));
+        assert_rejected_by_verifier(run(true));
+    });
 }
 
 /// The prover makes two lookup claims against two tables; the verifier
@@ -1627,15 +1740,19 @@ fn mirrored_lookup_claims_e2e(mirrored: usize) -> SnarkResult<()> {
 /// a different statement, even though what it does check is true.
 #[test]
 fn verifier_missing_lookup_claim_is_rejected() {
-    assert_accepted(mirrored_lookup_claims_e2e(2));
-    assert_rejected_by_verifier(mirrored_lookup_claims_e2e(1));
-    assert_rejected_by_verifier(mirrored_lookup_claims_e2e(0));
+    under_each_protocol(|_| {
+        assert_accepted(mirrored_lookup_claims_e2e(2));
+        assert_rejected_by_verifier(mirrored_lookup_claims_e2e(1));
+        assert_rejected_by_verifier(mirrored_lookup_claims_e2e(0));
+    });
 }
 
 /// The extra claim is true, but the prover never proved it.
 #[test]
 fn verifier_extra_lookup_claim_is_rejected() {
-    assert_rejected_by_verifier(mirrored_lookup_claims_e2e(3));
+    under_each_protocol(|_| {
+        assert_rejected_by_verifier(mirrored_lookup_claims_e2e(3));
+    });
 }
 
 /// The column behind the ordinary claim of [`proof_with_lookups`].
@@ -1687,41 +1804,56 @@ fn verify_proof_with_lookups(
 
 #[test]
 fn snark_proof_with_lookup_roundtrips_and_verifies() {
-    let (proof, mut verifier, ids) = proof_with_lookups();
-    let bytes = proof.to_bytes().unwrap();
-    assert_eq!(bytes[0], PROOF_ENCODING_VERSION);
+    under_each_protocol(|protocol| {
+        let (proof, mut verifier, ids) = proof_with_lookups();
+        let bytes = proof.to_bytes().unwrap();
+        assert_eq!(bytes[0], PROOF_ENCODING_VERSION);
 
-    let decoded = SNARKProof::<B>::from_bytes(&bytes).unwrap();
-    assert_eq!(decoded.to_bytes().unwrap(), bytes);
-    // Both tables are reduced in one batch, which the decoded proof keeps.
-    assert_eq!(proof.logup_gkr_subproofs.len(), 1);
-    assert_eq!(decoded.logup_gkr_subproofs, proof.logup_gkr_subproofs);
-    verifier.set_proof(decoded);
-    assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));
+        let decoded = SNARKProof::<B>::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.to_bytes().unwrap(), bytes);
+        match protocol {
+            // Both tables are reduced in one batch.
+            LookupProtocol::LogUpGkr => assert_eq!(proof.logup_gkr_subproofs.len(), 1),
+            // A sum for the virtual sub column, one for the other and one
+            // for each table.
+            LookupProtocol::LogUp => {
+                assert!(proof.logup_gkr_subproofs.is_empty());
+                assert_eq!(logup_sums(&proof).len(), 4);
+            }
+        }
+        assert_eq!(decoded.logup_gkr_subproofs, proof.logup_gkr_subproofs);
+        assert_eq!(decoded.lookup_messages, proof.lookup_messages);
+        verifier.set_proof(decoded);
+        assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));
+    });
 }
 
 /// The version tag is the one of proofs that name their lookup protocol,
 /// and a proof tagged with the version before it is not decoded.
 #[test]
 fn snark_proof_tagged_with_the_previous_encoding_version_is_refused() {
-    let (proof, _, _) = proof_with_lookups();
-    let mut bytes = proof.to_bytes().unwrap();
-    assert_eq!(bytes[0], 5);
-    bytes[0] = 4;
-    assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+    under_each_protocol(|_| {
+        let (proof, _, _) = proof_with_lookups();
+        let mut bytes = proof.to_bytes().unwrap();
+        assert_eq!(bytes[0], 5);
+        bytes[0] = 4;
+        assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+    });
 }
 
 /// Every byte of a serialized proof belongs to exactly one top-level part of
 /// the size breakdown; the one byte left over is the version tag.
 #[test]
 fn size_breakdown_parts_sum_to_total() {
-    let (proof, ..) = proof_with_lookups();
-    let breakdown = proof
-        .size_breakdown()
-        .expect("a proof has a size breakdown");
-    assert_eq!(breakdown.size, proof.to_bytes().unwrap().len());
-    let parts: usize = breakdown.parts.values().map(|part| part.size).sum();
-    assert_eq!(parts + 1, breakdown.size);
+    under_each_protocol(|_| {
+        let (proof, ..) = proof_with_lookups();
+        let breakdown = proof
+            .size_breakdown()
+            .expect("a proof has a size breakdown");
+        assert_eq!(breakdown.size, proof.to_bytes().unwrap().len());
+        let parts: usize = breakdown.parts.values().map(|part| part.size).sum();
+        assert_eq!(parts + 1, breakdown.size);
+    });
 }
 
 /// A keyed sum whose numerator is `multiplicity · activator`, or the bare
@@ -1807,12 +1939,16 @@ fn activator_numerator_semantics(deferred: bool) {
 
 #[test]
 fn keyed_sum_activator_numerator_semantics() {
-    activator_numerator_semantics(false);
+    under_each_protocol(|_| {
+        activator_numerator_semantics(false);
+    });
 }
 
 #[test]
 fn deferred_keyed_sum_activator_numerator_semantics() {
-    activator_numerator_semantics(true);
+    under_each_protocol(|_| {
+        activator_numerator_semantics(true);
+    });
 }
 
 // ─── Keyed sums claimed for the proof's batch ────────────────────────────
@@ -1822,197 +1958,217 @@ fn deferred_keyed_sum_activator_numerator_semantics() {
 /// in one LogUp-GKR batch; proved on the spot, each is a batch of its own.
 #[test]
 fn deferred_keyed_sum_claims_share_one_gkr() {
-    let summed = fv((0..16).map(|i| i * i));
-    let table_a = fv(0..16);
-    let table_b = fv((0..8).map(|i| i * 9));
-    let sub_a1 = fv((0..16).map(|i| (i * 3) % 16));
-    let sub_a2 = fv((0..64).map(|i| i % 11));
-    let sub_b = fv((0..8).map(|i| ((i * 3) % 8) * 9));
-    let perm_f = fv(0..32);
-    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
-    let weighted_f = fv((0..8).map(|i| i + 100));
-    let weighted_mf = fv((0..8).map(|i| i + 1));
-    let weighted_g = fv((0..32).map(|i| (i % 8) + 100));
-    let weighted_mg = fv((0..32).map(|i| if i < 8 { i + 1 } else { 0 }));
-    let cols = [
-        &summed,
-        &table_a,
-        &table_b,
-        &sub_a1,
-        &sub_a2,
-        &sub_b,
-        &perm_f,
-        &perm_g,
-        &weighted_f,
-        &weighted_mf,
-        &weighted_g,
-        &weighted_mg,
-    ];
+    under_each_protocol(|protocol| {
+        let summed = fv((0..16).map(|i| i * i));
+        let table_a = fv(0..16);
+        let table_b = fv((0..8).map(|i| i * 9));
+        let sub_a1 = fv((0..16).map(|i| (i * 3) % 16));
+        let sub_a2 = fv((0..64).map(|i| i % 11));
+        let sub_b = fv((0..8).map(|i| ((i * 3) % 8) * 9));
+        let perm_f = fv(0..32);
+        let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+        let weighted_f = fv((0..8).map(|i| i + 100));
+        let weighted_mf = fv((0..8).map(|i| i + 1));
+        let weighted_g = fv((0..32).map(|i| (i % 8) + 100));
+        let weighted_mg = fv((0..32).map(|i| if i < 8 { i + 1 } else { 0 }));
+        let cols = [
+            &summed,
+            &table_a,
+            &table_b,
+            &sub_a1,
+            &sub_a2,
+            &sub_b,
+            &perm_f,
+            &perm_g,
+            &weighted_f,
+            &weighted_mf,
+            &weighted_g,
+            &weighted_mg,
+        ];
 
-    let run = |deferred: bool| {
-        proof_of_accepted(
-            |prover| {
-                let handles = cols
-                    .iter()
-                    .map(|evals| commit(prover, evals))
-                    .collect::<SnarkResult<Vec<_>>>()?;
-                let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
-                let [
-                    summed_p,
-                    table_a,
-                    table_b,
-                    sub_a1,
-                    sub_a2,
-                    sub_b,
-                    perm_f,
-                    perm_g,
-                    weighted_f,
-                    weighted_mf,
-                    weighted_g,
-                    weighted_mg,
-                ]: [TrackedPoly<B>; 12] = handles.try_into().unwrap();
-                let keyed_sum = |prover: &mut ArgProver<B>, input| {
-                    if deferred {
-                        prover.add_mv_keyed_sum_claim(input)
-                    } else {
-                        KeyedSumcheck::<B>::prove(prover, input)
-                    }
-                };
-                prover.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
-                keyed_sum(
-                    prover,
-                    KeyedSumcheckProverInput {
-                        fxs: vec![perm_f],
-                        gxs: vec![perm_g],
-                        mfxs: vec![None],
-                        mgxs: vec![None],
-                    },
-                )?;
-                prover.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
-                prover.add_mv_sumcheck_claim(summed_p.id(), sum(&summed))?;
-                keyed_sum(
-                    prover,
-                    KeyedSumcheckProverInput {
-                        fxs: vec![weighted_f],
-                        gxs: vec![weighted_g],
-                        mfxs: vec![Some(weighted_mf)],
-                        mgxs: vec![Some(weighted_mg)],
-                    },
-                )?;
-                prover.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
-                Ok(ids)
-            },
-            |verifier, ids| {
-                let [
-                    summed_v,
-                    table_a,
-                    table_b,
-                    sub_a1,
-                    sub_a2,
-                    sub_b,
-                    perm_f,
-                    perm_g,
-                    weighted_f,
-                    weighted_mf,
-                    weighted_g,
-                    weighted_mg,
-                ]: [TrackedOracle<B>; 12] = track_all(verifier, &ids)?.try_into().unwrap();
-                let keyed_sum = |verifier: &mut ArgVerifier<B>, input| {
-                    if deferred {
-                        verifier.add_mv_keyed_sum_claim(input)
-                    } else {
-                        KeyedSumcheck::<B>::verify(verifier, input)
-                    }
-                };
-                verifier.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
-                keyed_sum(
-                    verifier,
-                    KeyedSumcheckVerifierInput {
-                        fxs: vec![perm_f],
-                        gxs: vec![perm_g],
-                        mfxs: vec![None],
-                        mgxs: vec![None],
-                    },
-                )?;
-                verifier.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
-                verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
-                keyed_sum(
-                    verifier,
-                    KeyedSumcheckVerifierInput {
-                        fxs: vec![weighted_f],
-                        gxs: vec![weighted_g],
-                        mfxs: vec![Some(weighted_mf)],
-                        mgxs: vec![Some(weighted_mg)],
-                    },
-                )?;
-                verifier.add_mv_lookup_claim(table_a.id(), sub_a2.id())
-            },
-        )
-    };
-    let proof = run(true).expect("a true statement must be accepted");
-    assert_eq!(proof.logup_gkr_subproofs.len(), 1);
-    let on_the_spot = run(false).expect("a true statement must be accepted");
-    assert_eq!(on_the_spot.logup_gkr_subproofs.len(), 3);
+        let run = |deferred: bool| {
+            proof_of_accepted(
+                |prover| {
+                    let handles = cols
+                        .iter()
+                        .map(|evals| commit(prover, evals))
+                        .collect::<SnarkResult<Vec<_>>>()?;
+                    let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
+                    let [
+                        summed_p,
+                        table_a,
+                        table_b,
+                        sub_a1,
+                        sub_a2,
+                        sub_b,
+                        perm_f,
+                        perm_g,
+                        weighted_f,
+                        weighted_mf,
+                        weighted_g,
+                        weighted_mg,
+                    ]: [TrackedPoly<B>; 12] = handles.try_into().unwrap();
+                    let keyed_sum = |prover: &mut ArgProver<B>, input| {
+                        if deferred {
+                            prover.add_mv_keyed_sum_claim(input)
+                        } else {
+                            KeyedSumcheck::<B>::prove(prover, input)
+                        }
+                    };
+                    prover.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                    keyed_sum(
+                        prover,
+                        KeyedSumcheckProverInput {
+                            fxs: vec![perm_f],
+                            gxs: vec![perm_g],
+                            mfxs: vec![None],
+                            mgxs: vec![None],
+                        },
+                    )?;
+                    prover.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
+                    prover.add_mv_sumcheck_claim(summed_p.id(), sum(&summed))?;
+                    keyed_sum(
+                        prover,
+                        KeyedSumcheckProverInput {
+                            fxs: vec![weighted_f],
+                            gxs: vec![weighted_g],
+                            mfxs: vec![Some(weighted_mf)],
+                            mgxs: vec![Some(weighted_mg)],
+                        },
+                    )?;
+                    prover.add_mv_lookup_claim(table_a.id(), sub_a2.id())?;
+                    Ok(ids)
+                },
+                |verifier, ids| {
+                    let [
+                        summed_v,
+                        table_a,
+                        table_b,
+                        sub_a1,
+                        sub_a2,
+                        sub_b,
+                        perm_f,
+                        perm_g,
+                        weighted_f,
+                        weighted_mf,
+                        weighted_g,
+                        weighted_mg,
+                    ]: [TrackedOracle<B>; 12] = track_all(verifier, &ids)?.try_into().unwrap();
+                    let keyed_sum = |verifier: &mut ArgVerifier<B>, input| {
+                        if deferred {
+                            verifier.add_mv_keyed_sum_claim(input)
+                        } else {
+                            KeyedSumcheck::<B>::verify(verifier, input)
+                        }
+                    };
+                    verifier.add_mv_lookup_claim(table_a.id(), sub_a1.id())?;
+                    keyed_sum(
+                        verifier,
+                        KeyedSumcheckVerifierInput {
+                            fxs: vec![perm_f],
+                            gxs: vec![perm_g],
+                            mfxs: vec![None],
+                            mgxs: vec![None],
+                        },
+                    )?;
+                    verifier.add_mv_lookup_claim(table_b.id(), sub_b.id())?;
+                    verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
+                    keyed_sum(
+                        verifier,
+                        KeyedSumcheckVerifierInput {
+                            fxs: vec![weighted_f],
+                            gxs: vec![weighted_g],
+                            mfxs: vec![Some(weighted_mf)],
+                            mgxs: vec![Some(weighted_mg)],
+                        },
+                    )?;
+                    verifier.add_mv_lookup_claim(table_a.id(), sub_a2.id())
+                },
+            )
+        };
+        let proof = run(true).expect("a true statement must be accepted");
+        let on_the_spot = run(false).expect("a true statement must be accepted");
+        match protocol {
+            LookupProtocol::LogUpGkr => {
+                assert_eq!(proof.logup_gkr_subproofs.len(), 1);
+                assert_eq!(on_the_spot.logup_gkr_subproofs.len(), 3);
+            }
+            // LogUp has nothing to share between relations: a helper and a
+            // sum for each of the nine columns, none of which has a
+            // neighbour to share a helper with, whenever its relation is
+            // reduced.
+            LookupProtocol::LogUp => {
+                assert!(proof.logup_gkr_subproofs.is_empty());
+                assert!(on_the_spot.logup_gkr_subproofs.is_empty());
+                assert_eq!(logup_sums(&proof).len(), 9);
+                assert_eq!(logup_sums(&on_the_spot).len(), 9);
+            }
+        }
+    });
 }
 
 /// Keyed sums claimed for later with nothing else in the proof: true ones
 /// are accepted and a false one is rejected, alone and among true ones.
 #[test]
 fn deferred_false_keyed_sum_is_rejected() {
-    let f = fv(0..32);
-    let g = fv((0..32).map(|i| (i * 5 + 3) % 32));
-    let mut not_a_permutation = g.clone();
-    not_a_permutation[9] = F::from(99u64);
-    let keys = fv((0..8).map(|i| i + 100));
-    let weights = fv((0..8).map(|i| i + 1));
-    let mut wrong_weights = weights.clone();
-    wrong_weights[3] += F::one();
+    under_each_protocol(|_| {
+        let f = fv(0..32);
+        let g = fv((0..32).map(|i| (i * 5 + 3) % 32));
+        let mut not_a_permutation = g.clone();
+        not_a_permutation[9] = F::from(99u64);
+        let keys = fv((0..8).map(|i| i + 100));
+        let weights = fv((0..8).map(|i| i + 1));
+        let mut wrong_weights = weights.clone();
+        wrong_weights[3] += F::one();
 
-    let permutation = [(f.clone(), None)];
-    let permuted = [(g, None)];
-    let broken = [(not_a_permutation, None)];
-    let weighted = [(keys.clone(), Some(weights))];
-    let misweighted = [(keys, Some(wrong_weights))];
+        let permutation = [(f.clone(), None)];
+        let permuted = [(g, None)];
+        let broken = [(not_a_permutation, None)];
+        let weighted = [(keys.clone(), Some(weights))];
+        let misweighted = [(keys, Some(wrong_weights))];
 
-    assert_accepted(deferred_keyed_e2e(&[(&permutation, &permuted)]));
-    assert_accepted(deferred_keyed_e2e(&[
-        (&permutation, &permuted),
-        (&weighted, &weighted),
-        (&permuted, &permutation),
-    ]));
-
-    assert_rejected(deferred_keyed_e2e(&[(&permutation, &broken)]));
-    assert_rejected(deferred_keyed_e2e(&[(&weighted, &misweighted)]));
-    for at in 0..3 {
-        let mut relations: Vec<KeyedRelation> = vec![
+        assert_accepted(deferred_keyed_e2e(&[(&permutation, &permuted)]));
+        assert_accepted(deferred_keyed_e2e(&[
             (&permutation, &permuted),
             (&weighted, &weighted),
             (&permuted, &permutation),
-        ];
-        relations[at] = (&weighted, &misweighted);
-        assert_rejected(deferred_keyed_e2e(&relations));
-    }
+        ]));
+
+        assert_rejected(deferred_keyed_e2e(&[(&permutation, &broken)]));
+        assert_rejected(deferred_keyed_e2e(&[(&weighted, &misweighted)]));
+        for at in 0..3 {
+            let mut relations: Vec<KeyedRelation> = vec![
+                (&permutation, &permuted),
+                (&weighted, &weighted),
+                (&permuted, &permutation),
+            ];
+            relations[at] = (&weighted, &misweighted);
+            assert_rejected(deferred_keyed_e2e(&relations));
+        }
+    });
 }
 
 /// Two keyed sums claimed for later, each false, whose four sides balance
 /// when added up. Each relation has to balance on its own.
 #[test]
 fn deferred_keyed_sums_with_cancelling_errors_are_rejected() {
-    let a = [(fv(0..8), None)];
-    let b = [(fv(100..108), None)];
-    let both = [a[0].clone(), b[0].clone()];
-    let both_swapped = [b[0].clone(), a[0].clone()];
+    under_each_protocol(|_| {
+        let a = [(fv(0..8), None)];
+        let b = [(fv(100..108), None)];
+        let both = [a[0].clone(), b[0].clone()];
+        let both_swapped = [b[0].clone(), a[0].clone()];
 
-    assert_accepted(deferred_keyed_e2e(&[(&both, &both_swapped)]));
-    assert_rejected(deferred_keyed_e2e(&[(&a, &b), (&b, &a)]));
+        assert_accepted(deferred_keyed_e2e(&[(&both, &both_swapped)]));
+        assert_rejected(deferred_keyed_e2e(&[(&a, &b), (&b, &a)]));
 
-    // The same with weights: each relation credits the other's key.
-    let key = |k: u64| fv([k; 4]);
-    let weights = |w: u64| Some(fv((0..4).map(|i| w + i)));
-    let x = [(key(7), weights(1)), (fv(0..4), None)];
-    let x_other = [(key(9), weights(1)), (fv(0..4), None)];
-    assert_accepted(deferred_keyed_e2e(&[(&x, &x), (&x_other, &x_other)]));
-    assert_rejected(deferred_keyed_e2e(&[(&x, &x_other), (&x_other, &x)]));
+        // The same with weights: each relation credits the other's key.
+        let key = |k: u64| fv([k; 4]);
+        let weights = |w: u64| Some(fv((0..4).map(|i| w + i)));
+        let x = [(key(7), weights(1)), (fv(0..4), None)];
+        let x_other = [(key(9), weights(1)), (fv(0..4), None)];
+        assert_accepted(deferred_keyed_e2e(&[(&x, &x), (&x_other, &x_other)]));
+        assert_rejected(deferred_keyed_e2e(&[(&x, &x_other), (&x_other, &x)]));
+    });
 }
 
 /// Three true keyed sums of one shape; the prover claims the first two.
@@ -2030,123 +2186,131 @@ fn mirrored_deferred_claims_e2e(mirrored: &[usize]) -> SnarkResult<()> {
 /// checking a different statement, even though what it does check is true.
 #[test]
 fn verifier_missing_deferred_keyed_sum_is_rejected() {
-    assert_accepted(mirrored_deferred_claims_e2e(&[0, 1]));
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0]));
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1]));
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[]));
+    under_each_protocol(|_| {
+        assert_accepted(mirrored_deferred_claims_e2e(&[0, 1]));
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0]));
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1]));
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[]));
+    });
 }
 
 /// The extra keyed sum is true, but the prover never proved it.
 #[test]
 fn verifier_extra_deferred_keyed_sum_is_rejected() {
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 1, 2]));
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 2]));
+    under_each_protocol(|_| {
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 1, 2]));
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[0, 2]));
+    });
 }
 
 /// Both keyed sums are true and of one shape, so the batch looks the same in
 /// either order; its claims are still tied to the columns in the prover's.
 #[test]
 fn verifier_reordering_deferred_keyed_sums_is_rejected() {
-    assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1, 0]));
+    under_each_protocol(|_| {
+        assert_rejected_by_verifier(mirrored_deferred_claims_e2e(&[1, 0]));
+    });
 }
 
 /// A keyed sum is checked for its shape when it is claimed, on both sides,
 /// and a refused claim leaves nothing behind.
 #[test]
 fn deferred_keyed_sum_claim_checks_its_shape() {
-    let f = fv(0..16);
-    let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
-    // `(fxs, mfxs, gxs, mgxs)` lengths.
-    let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
+    under_each_protocol(|_| {
+        let f = fv(0..16);
+        let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
+        // `(fxs, mfxs, gxs, mgxs)` lengths.
+        let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
 
-    assert_accepted(prove_and_verify(
-        |prover| {
-            let f = commit(prover, &f)?;
-            let g = commit(prover, &g)?;
-            let ids = [f.id(), g.id()];
-            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
-                fxs: vec![f.clone(); fxs],
-                mfxs: vec![None; mfxs],
-                gxs: vec![g.clone(); gxs],
-                mgxs: vec![None; mgxs],
-            };
-            for shape in malformed {
-                let err = prover
-                    .add_mv_keyed_sum_claim(input(shape))
-                    .expect_err("a malformed keyed sum must be refused");
-                assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
-            }
-            prover.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))?;
-            Ok(ids)
-        },
-        |verifier, ids| {
-            let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
-            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
-                fxs: vec![f.clone(); fxs],
-                mfxs: vec![None; mfxs],
-                gxs: vec![g.clone(); gxs],
-                mgxs: vec![None; mgxs],
-            };
-            for shape in malformed {
-                let err = verifier
-                    .add_mv_keyed_sum_claim(input(shape))
-                    .expect_err("a malformed keyed sum must be refused");
-                assert_verifier_error(err);
-            }
-            verifier.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))
-        },
-    ));
+        assert_accepted(prove_and_verify(
+            |prover| {
+                let f = commit(prover, &f)?;
+                let g = commit(prover, &g)?;
+                let ids = [f.id(), g.id()];
+                let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
+                    fxs: vec![f.clone(); fxs],
+                    mfxs: vec![None; mfxs],
+                    gxs: vec![g.clone(); gxs],
+                    mgxs: vec![None; mgxs],
+                };
+                for shape in malformed {
+                    let err = prover
+                        .add_mv_keyed_sum_claim(input(shape))
+                        .expect_err("a malformed keyed sum must be refused");
+                    assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
+                }
+                prover.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))?;
+                Ok(ids)
+            },
+            |verifier, ids| {
+                let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
+                let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
+                    fxs: vec![f.clone(); fxs],
+                    mfxs: vec![None; mfxs],
+                    gxs: vec![g.clone(); gxs],
+                    mgxs: vec![None; mgxs],
+                };
+                for shape in malformed {
+                    let err = verifier
+                        .add_mv_keyed_sum_claim(input(shape))
+                        .expect_err("a malformed keyed sum must be refused");
+                    assert_verifier_error(err);
+                }
+                verifier.add_mv_keyed_sum_claim(input((1, 1, 1, 1)))
+            },
+        ));
+    });
 }
 
 /// Proving the PIOP on the spot refuses the same shapes on both sides, and
 /// writes nothing for them: the well-formed relation that follows verifies.
 #[test]
 fn keyed_sumcheck_checks_its_shape_on_both_sides() {
-    let f = fv(0..16);
-    let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
-    // `(fxs, mfxs, gxs, mgxs)` lengths.
-    let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
+    under_each_protocol(|_| {
+        let f = fv(0..16);
+        let g = fv((0..16).map(|i| (i * 5 + 3) % 16));
+        // `(fxs, mfxs, gxs, mgxs)` lengths.
+        let malformed = [(0, 0, 1, 1), (1, 0, 1, 1), (1, 1, 0, 0), (1, 1, 1, 2)];
 
-    assert_accepted(prove_and_verify(
-        |prover| {
-            let f = commit(prover, &f)?;
-            let g = commit(prover, &g)?;
-            let ids = [f.id(), g.id()];
-            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
-                fxs: vec![f.clone(); fxs],
-                mfxs: vec![None; mfxs],
-                gxs: vec![g.clone(); gxs],
-                mgxs: vec![None; mgxs],
-            };
-            for shape in malformed {
-                let err = KeyedSumcheck::<B>::prove(prover, input(shape))
-                    .expect_err("a malformed keyed sum must be refused");
-                assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
-            }
-            KeyedSumcheck::<B>::prove(prover, input((1, 1, 1, 1)))?;
-            Ok(ids)
-        },
-        |verifier, ids| {
-            let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
-            let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
-                fxs: vec![f.clone(); fxs],
-                mfxs: vec![None; mfxs],
-                gxs: vec![g.clone(); gxs],
-                mgxs: vec![None; mgxs],
-            };
-            for shape in malformed {
-                let err = KeyedSumcheck::<B>::verify(verifier, input(shape))
-                    .expect_err("a malformed keyed sum must be refused");
-                assert_verifier_error(err);
-            }
-            KeyedSumcheck::<B>::verify(verifier, input((1, 1, 1, 1)))
-        },
-    ));
+        assert_accepted(prove_and_verify(
+            |prover| {
+                let f = commit(prover, &f)?;
+                let g = commit(prover, &g)?;
+                let ids = [f.id(), g.id()];
+                let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckProverInput {
+                    fxs: vec![f.clone(); fxs],
+                    mfxs: vec![None; mfxs],
+                    gxs: vec![g.clone(); gxs],
+                    mgxs: vec![None; mgxs],
+                };
+                for shape in malformed {
+                    let err = KeyedSumcheck::<B>::prove(prover, input(shape))
+                        .expect_err("a malformed keyed sum must be refused");
+                    assert!(matches!(err, SnarkError::ProverError(_)), "got {err:?}");
+                }
+                KeyedSumcheck::<B>::prove(prover, input((1, 1, 1, 1)))?;
+                Ok(ids)
+            },
+            |verifier, ids| {
+                let [f, g]: [TrackedOracle<B>; 2] = track_all(verifier, &ids)?.try_into().unwrap();
+                let input = |(fxs, mfxs, gxs, mgxs)| KeyedSumcheckVerifierInput {
+                    fxs: vec![f.clone(); fxs],
+                    mfxs: vec![None; mfxs],
+                    gxs: vec![g.clone(); gxs],
+                    mgxs: vec![None; mgxs],
+                };
+                for shape in malformed {
+                    let err = KeyedSumcheck::<B>::verify(verifier, input(shape))
+                        .expect_err("a malformed keyed sum must be refused");
+                    assert_verifier_error(err);
+                }
+                KeyedSumcheck::<B>::verify(verifier, input((1, 1, 1, 1)))
+            },
+        ));
+    });
 }
 
 // ─── The lookup protocol as a choice ─────────────────────────────────────
-
-const PROTOCOLS: [LookupProtocol; 2] = [LookupProtocol::LogUp, LookupProtocol::LogUpGkr];
 
 fn other(protocol: LookupProtocol) -> LookupProtocol {
     match protocol {
@@ -2394,4 +2558,174 @@ fn proof_bytes_with_a_flipped_protocol_tag_do_not_decode() {
         *bytes.last_mut().unwrap() = flipped;
         assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
     }
+}
+
+/// A lookup of two sub columns of one size, a keyed sum with weights and an
+/// unrelated sumcheck claim, proved under `prover` and put to a verifier of
+/// `verifier` as `tamper` leaves the proof.
+fn lookups_e2e(
+    prover: LookupProtocol,
+    verifier: LookupProtocol,
+    tamper: impl FnOnce(&mut SNARKProof<B>),
+) -> SnarkResult<()> {
+    let (mut prover, mut verifier) = setup_under(prover, verifier);
+    let table = fv(0..16);
+    let weights = fv((0..8).map(|i| i + 1));
+    let keys = fv((0..8).map(|i| 2 * i));
+    let mut counts = vec![F::zero(); 16];
+    for (key, weight) in keys.iter().zip(&weights) {
+        let at = table.iter().position(|v| v == key).unwrap();
+        counts[at] += weight;
+    }
+    let cols = [
+        table,
+        fv((0..32).map(|i| (i * 5) % 16)),
+        fv((0..32).map(|i| (i * 7 + 3) % 16)),
+        keys,
+        weights,
+        counts,
+        summed_column(),
+    ]
+    .map(|evals| commit(&mut prover, &evals).unwrap());
+    let ids = cols.each_ref().map(TrackedPoly::id);
+    let [table, sub_a, sub_b, keys, weights, counts, summed] = cols;
+    prover.add_mv_lookup_claim(table.id(), sub_a.id())?;
+    prover.add_mv_lookup_claim(table.id(), sub_b.id())?;
+    prover.add_mv_keyed_sum_claim(KeyedSumcheckProverInput {
+        fxs: vec![keys],
+        mfxs: vec![Some(weights)],
+        gxs: vec![table],
+        mgxs: vec![Some(counts)],
+    })?;
+    prover.add_mv_sumcheck_claim(summed.id(), sum(&summed_column()))?;
+    let mut proof = prover.build_proof()?;
+    tamper(&mut proof);
+
+    verifier.set_proof_ref(&proof);
+    let [table, sub_a, sub_b, keys, weights, counts, summed]: [TrackedOracle<B>; 7] =
+        track_all(&mut verifier, &ids)?.try_into().unwrap();
+    verifier.add_mv_lookup_claim(table.id(), sub_a.id())?;
+    verifier.add_mv_lookup_claim(table.id(), sub_b.id())?;
+    verifier.add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+        fxs: vec![keys],
+        mfxs: vec![Some(weights)],
+        gxs: vec![table],
+        mgxs: vec![Some(counts)],
+    })?;
+    verifier.add_mv_sumcheck_claim(summed.id(), sum(&summed_column()));
+    verifier.verify()
+}
+
+/// With lookups in the proof as without: a verifier of the prover's
+/// protocol accepts, and one of the other refuses by a check of its own,
+/// in both directions, never by running into what the proof lacks.
+#[test]
+fn verifier_of_another_protocol_refuses_a_proof_with_lookups() {
+    for protocol in PROTOCOLS {
+        assert_accepted(lookups_e2e(protocol, protocol, |_| ()));
+        assert_check_failed(lookups_e2e(protocol, other(protocol), |_| ()));
+    }
+}
+
+/// A LogUp proof and a LogUp-GKR proof of one statement, each renamed to
+/// the other protocol, with the messages of that protocol missing or made
+/// up: refused by the verifier it was made for and by the one it now names.
+#[test]
+fn proof_with_lookups_renamed_to_another_protocol_is_rejected() {
+    let as_logup = |proof: &mut SNARKProof<B>| {
+        proof.lookup_messages = LookupMessages::LogUp {
+            sums: vec![F::one(); 5],
+        }
+    };
+    let as_gkr = |proof: &mut SNARKProof<B>| proof.lookup_messages = LookupMessages::LogUpGkr;
+    let (logup, gkr) = (LookupProtocol::LogUp, LookupProtocol::LogUpGkr);
+    assert_check_failed(lookups_e2e(gkr, gkr, as_logup));
+    assert_rejected_by_verifier(lookups_e2e(gkr, logup, as_logup));
+    assert_check_failed(lookups_e2e(logup, logup, as_gkr));
+    assert_rejected_by_verifier(lookups_e2e(logup, gkr, as_gkr));
+}
+
+/// The tag of a LogUp proof sits before its sums. Set to a byte that names
+/// no protocol, the bytes do not decode. Flipped to LogUp-GKR's they do, as
+/// a proof without sums, since nothing reads the bytes past the tag; that
+/// proof is refused by the verifier it was made for, which is told of
+/// another protocol, and by a LogUp-GKR verifier, which shares no challenge
+/// with its prover.
+#[test]
+fn logup_proof_with_a_flipped_protocol_tag_is_rejected() {
+    let (logup, gkr) = (LookupProtocol::LogUp, LookupProtocol::LogUpGkr);
+    let flip = |to: Option<u8>| {
+        move |proof: &mut SNARKProof<B>| {
+            let mut bytes = proof.to_bytes().unwrap();
+            // The two sub columns share a helper: a sum for them, for
+            // their table, and for each side of the keyed sum.
+            assert_eq!(logup_sums(proof).len(), 4);
+            let tag_at = bytes.len() - 1 - 8 - 32 * 4;
+            let Some(to) = to else {
+                bytes[tag_at] ^= 1;
+                *proof = SNARKProof::<B>::from_bytes(&bytes).unwrap();
+                assert_eq!(proof.lookup_messages, LookupMessages::LogUpGkr);
+                return;
+            };
+            bytes[tag_at] = to;
+            assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+        }
+    };
+    assert_check_failed(lookups_e2e(logup, logup, flip(None)));
+    assert_rejected_by_verifier(lookups_e2e(logup, gkr, flip(None)));
+    for unknown in [2, 0xff] {
+        assert_accepted(lookups_e2e(logup, logup, flip(Some(unknown))));
+    }
+}
+
+fn with_logup_sums(change: impl FnOnce(&mut Vec<F>)) -> impl FnOnce(&mut SNARKProof<B>) {
+    |proof| match &mut proof.lookup_messages {
+        LookupMessages::LogUp { sums } => change(sums),
+        LookupMessages::LogUpGkr => panic!("not a LogUp proof"),
+    }
+}
+
+/// The sums a LogUp proof sends are in the transcript: any of them changed
+/// after the fact, alone or with another one changed the other way so that
+/// the two sides of the relation still balance, leaves a proof whose
+/// sumcheck is about other sums and other challenges.
+#[test]
+fn logup_sum_changed_after_the_fact_is_rejected() {
+    let logup = LookupProtocol::LogUp;
+    for at in 0..4 {
+        let bump = with_logup_sums(|sums| sums[at] += F::one());
+        assert_rejected_by_verifier(lookups_e2e(logup, logup, bump));
+    }
+    // The helper of the two sub columns and the table they are looked up
+    // in are the two sides of one relation; so are the keys and the table
+    // of the keyed sum.
+    for (f, g) in [(0, 1), (2, 3)] {
+        let shift = with_logup_sums(|sums| {
+            sums[f] += F::one();
+            sums[g] += F::one();
+        });
+        assert_rejected_by_verifier(lookups_e2e(logup, logup, shift));
+    }
+}
+
+/// A proof with fewer sums than the verifier has terms, or with more, is
+/// refused with an error: the verifier reads the sums in order and must
+/// have read every one of them.
+#[test]
+fn logup_proof_with_missing_or_extra_sums_is_an_error_not_a_panic() {
+    let logup = LookupProtocol::LogUp;
+    for kept in 0..4 {
+        let cut = with_logup_sums(|sums| sums.truncate(kept));
+        assert_check_failed(lookups_e2e(logup, logup, cut));
+    }
+    let extra = with_logup_sums(|sums| sums.push(F::zero()));
+    assert_check_failed(lookups_e2e(logup, logup, extra));
+    let repeated = with_logup_sums(|sums| sums.extend_from_within(..));
+    assert_check_failed(lookups_e2e(logup, logup, repeated));
+    // A LogUp-GKR proof has no place for sums, and a LogUp proof is not
+    // read for GKR subproofs: one that carries some anyway is refused.
+    let with_subproof = |proof: &mut SNARKProof<B>| {
+        proof.logup_gkr_subproofs.push(Default::default());
+    };
+    assert_check_failed(lookups_e2e(logup, logup, with_subproof));
 }

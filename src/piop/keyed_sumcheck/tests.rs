@@ -1,16 +1,21 @@
 //! The keyed-sum reduction from inside the crate: provers that cheat while
 //! staying consistent with the transcript, the layout of the GKR batch, and
 //! the two sides staying in step.
+//!
+//! What does not depend on how a batch is laid out is tested under both
+//! lookup protocols ([`under_each_protocol`]); the rest is about LogUp-GKR,
+//! or says in its name that it is about LogUp.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::Cell, collections::BTreeMap, sync::Arc};
 
-use ark_ff::{One, Zero};
+use ark_ff::{Field, One, Zero};
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalSerialize, Compress};
+use either::Either;
 use indexmap::IndexMap;
 
 use super::{
-    KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput,
+    KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput, logup,
     reduction::{
         Batch, ColumnEvals, InstancePlan, KeyedSumRelation, KeyedTerm, Operand, Party,
         ProvingParty, Reduction, Side, check_batch_sums, plan_instances, prove_keyed_sums,
@@ -35,12 +40,14 @@ use crate::{
         structs::{polynomial::TrackedPoly, proof::SNARKProof},
         tracker::ProverTracker,
     },
-    setup::KeyGenerator,
-    test_utils::prelude_with_vars,
+    setup::{
+        KeyGenerator,
+        structs::{SNARKPk, SNARKVk},
+    },
     tracker_core::TrackerCore,
     types::{
         CommitmentBinding, LookupProtocol, SharedArgConfig, SumcheckSubproof, TrackerID,
-        artifact::Artifact,
+        artifact::Artifact, claim::TrackerZerocheckClaim,
     },
     verifier::{
         ArgVerifier,
@@ -55,25 +62,47 @@ type F = <B as SnarkBackend>::F;
 /// No column here has more than 2^8 rows.
 const SRS_NV: usize = 10;
 
-fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
-    prelude_with_vars::<B>(SRS_NV).unwrap()
+thread_local! {
+    /// The lookup protocol of the pairs this thread's test sets up.
+    /// LogUp-GKR unless the test runs [`under_each_protocol`]: most of this
+    /// file is about how that protocol lays a batch out.
+    static PROTOCOL: Cell<LookupProtocol> = const { Cell::new(LookupProtocol::LogUpGkr) };
 }
 
-/// A pair whose sides are configured as given. An honest pair is given the
-/// same configuration.
-fn setup_with_configs(
-    prover: SharedArgConfig,
-    verifier: SharedArgConfig,
-) -> (ArgProver<B>, ArgVerifier<B>) {
-    let (pk, vk) = KeyGenerator::<B>::new()
+/// Runs `test` once under each lookup protocol, for what holds whichever
+/// protocol reduces the relations: every pair `test` sets up is configured
+/// for the protocol of the run, and `test` is told which one that is for
+/// the few things that differ. The protocol is printed, to show in a
+/// failure which run it was.
+fn under_each_protocol(test: impl Fn(LookupProtocol)) {
+    for protocol in [LookupProtocol::LogUp, LookupProtocol::LogUpGkr] {
+        println!("under {protocol}");
+        PROTOCOL.set(protocol);
+        test(protocol);
+    }
+}
+
+/// The configuration of a pair. Its protocol is named here, whatever the
+/// environment says.
+fn config() -> SharedArgConfig {
+    SharedArgConfig {
+        lookup_protocol: PROTOCOL.get(),
+        ..SharedArgConfig::default()
+    }
+}
+
+fn keys() -> (SNARKPk<B>, SNARKVk<B>) {
+    KeyGenerator::<B>::new()
         .with_num_mv_vars(SRS_NV)
         .gen_keys()
-        .unwrap();
-    let prover = ProverTracker::new_from_pk_with_config(pk, prover).unwrap();
-    let verifier = VerifierTracker::new_from_vk_with_config(vk, verifier).unwrap();
+        .unwrap()
+}
+
+fn setup() -> (ArgProver<B>, ArgVerifier<B>) {
+    let (pk, vk) = keys();
     (
-        ArgProver::new_from_tracker(prover),
-        ArgVerifier::new_from_tracker(verifier),
+        ArgProver::new_from_pk_with_config(pk, config()).unwrap(),
+        ArgVerifier::new_from_vk_with_config(vk, config()).unwrap(),
     )
 }
 
@@ -82,9 +111,15 @@ fn setup_with_configs(
 fn setup_with_budgets(prover: usize, verifier: usize) -> (ArgProver<B>, ArgVerifier<B>) {
     let config = |logup_gkr_run_budget| SharedArgConfig {
         logup_gkr_run_budget,
-        ..SharedArgConfig::default()
+        ..config()
     };
-    setup_with_configs(config(prover), config(verifier))
+    let (pk, vk) = keys();
+    let prover = ProverTracker::new_from_pk_with_config(pk, config(prover)).unwrap();
+    let verifier = VerifierTracker::new_from_vk_with_config(vk, config(verifier)).unwrap();
+    (
+        ArgProver::new_from_tracker(prover),
+        ArgVerifier::new_from_tracker(verifier),
+    )
 }
 
 fn fv(vals: impl IntoIterator<Item = u64>) -> Vec<F> {
@@ -303,7 +338,9 @@ impl Session {
     }
 
     /// The honest prover, or with `evals` a prover that runs the GKR on
-    /// tables of its own choosing in place of some committed columns.
+    /// tables of its own choosing in place of some committed columns; under
+    /// LogUp, one that commits to the helpers of those tables and sends
+    /// their sums.
     fn prove_with(&mut self, evals: ColumnEvals<F>) -> SnarkResult<()> {
         prove_keyed_sums(&mut self.prover, &self.relations, evals)
     }
@@ -344,6 +381,57 @@ impl Session {
         let tracker = self.prover.tracker();
         let mut tracker = tracker.borrow_mut();
         reduce_keyed_sums(&mut *tracker, &mut party, &self.relations).map(drop)
+    }
+
+    /// A LogUp prover that commits to the helpers it should and adds
+    /// `shifts[n]` to the `n`-th sum it sends, where there is one. It
+    /// stays consistent with what it sent: the shifted sums are the ones
+    /// in its transcript and in its claims.
+    fn prove_shifting_sums(&mut self, shifts: &[F]) -> SnarkResult<()> {
+        struct Shifting<'a> {
+            honest: logup::ProvingParty<F>,
+            shifts: &'a [F],
+            sent: usize,
+        }
+        impl Shifting<'_> {
+            fn send(&mut self, tracker: &mut ProverTracker<B>, sum: F) -> F {
+                let sum = sum + self.shifts.get(self.sent).copied().unwrap_or_default();
+                self.sent += 1;
+                tracker.send_logup_sum(sum);
+                sum
+            }
+        }
+        impl logup::Party<ProverTracker<B>> for Shifting<'_> {
+            fn helper(
+                &mut self,
+                tracker: &mut ProverTracker<B>,
+                cols: &[TrackerID],
+                mult: Option<TrackerID>,
+                gamma: F,
+            ) -> SnarkResult<(TrackerID, F)> {
+                let (helper, sum) = self.honest.commit_helper(tracker, cols, mult, gamma)?;
+                Ok((helper, self.send(tracker, sum)))
+            }
+
+            fn sum(&mut self, tracker: &mut ProverTracker<B>, poly: TrackerID) -> SnarkResult<F> {
+                let sum = self.honest.sum_of(tracker, poly)?;
+                Ok(self.send(tracker, sum))
+            }
+
+            fn reject(&self, reason: String) -> SnarkError {
+                logup::Party::<ProverTracker<B>>::reject(&self.honest, reason)
+            }
+        }
+        let mut party = Shifting {
+            honest: logup::ProvingParty {
+                evals: ColumnEvals::new(),
+            },
+            shifts,
+            sent: 0,
+        };
+        let tracker = self.prover.tracker();
+        let mut tracker = tracker.borrow_mut();
+        logup::reduce_keyed_sums(&mut *tracker, &mut party, &self.relations).map(drop)
     }
 
     fn plan(&self) -> Vec<InstancePlan<F>> {
@@ -393,6 +481,11 @@ impl Session {
 /// the roots. What must stop it is the input claims: under `honest-prover`
 /// its own tracker refuses the false sums, otherwise the verifier rejects
 /// the sumchecks they went into. Returns the proof it got that far with.
+///
+/// The same goes for a LogUp prover whose helpers are those of other
+/// tables, or whose sums are not those of its helpers: its sums balance,
+/// and it is stopped by the claims the reduction leaves, on the helpers
+/// and on their sums.
 fn assert_stopped_by_the_input_claims(
     mut session: Session,
     cheat: impl FnOnce(&mut Session) -> SnarkResult<()>,
@@ -429,26 +522,28 @@ fn lookup_session(table: &[F], counted: &[Vec<F>], committed: &[Vec<F>]) -> Sess
 /// every GKR check passes and the two sides balance.
 #[test]
 fn gkr_on_fake_leaves_with_true_column_claim_is_rejected() {
-    let table = fv(0..8);
-    for (sub_nv, n_subs, fake_at) in [(3, 1, 0), (5, 1, 0), (2, 1, 0), (3, 3, 0), (3, 3, 2)] {
-        let fake: Vec<Vec<F>> = (0..n_subs).map(|s| in_table(sub_nv, 8, s)).collect();
-        let mut committed = fake.clone();
-        committed[fake_at][1] = F::from(9u64);
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        for (sub_nv, n_subs, fake_at) in [(3, 1, 0), (5, 1, 0), (2, 1, 0), (3, 3, 0), (3, 3, 2)] {
+            let fake: Vec<Vec<F>> = (0..n_subs).map(|s| in_table(sub_nv, 8, s)).collect();
+            let mut committed = fake.clone();
+            committed[fake_at][1] = F::from(9u64);
 
-        // The same statement about the fake columns is true.
-        lookup_session(&table, &fake, &fake)
-            .prove_and_verify()
-            .unwrap();
-        // An honest prover on the committed columns fails at the roots.
-        match lookup_session(&table, &fake, &committed).prove_and_verify() {
-            Err(Rejected::Reduction(err)) => assert_verifier_error(err),
-            other => panic!("expected the roots to differ, got {other:?}"),
+            // The same statement about the fake columns is true.
+            lookup_session(&table, &fake, &fake)
+                .prove_and_verify()
+                .unwrap();
+            // An honest prover on the committed columns fails at the roots.
+            match lookup_session(&table, &fake, &committed).prove_and_verify() {
+                Err(Rejected::Reduction(err)) => assert_verifier_error(err),
+                other => panic!("expected the roots to differ, got {other:?}"),
+            }
+
+            let session = lookup_session(&table, &fake, &committed);
+            let evals = BTreeMap::from([(session.ids[2 + fake_at], fake[fake_at].clone())]);
+            assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
         }
-
-        let session = lookup_session(&table, &fake, &committed);
-        let evals = BTreeMap::from([(session.ids[2 + fake_at], fake[fake_at].clone())]);
-        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
-    }
+    });
 }
 
 /// The committed multiplicities are wrong and the prover runs the GKR on
@@ -456,34 +551,36 @@ fn gkr_on_fake_leaves_with_true_column_claim_is_rejected() {
 /// weights have fewer rows than it.
 #[test]
 fn gkr_on_fake_numerators_with_true_multiplicity_claim_is_rejected() {
-    let table = fv(0..8);
-    let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
 
-    let right = tally(&table, &[(&sub, None)]);
-    let mut wrong = right.clone();
-    wrong[1] -= F::one();
-    wrong[2] += F::one();
-    let session = |multiplicity: &[F]| {
-        let columns = [table.clone(), multiplicity.to_vec(), sub.clone()];
-        Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])])
-    };
-    session(&right).prove_and_verify().unwrap();
-    let cheater = session(&wrong);
-    let evals = BTreeMap::from([(cheater.ids[1], right)]);
-    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        let right = tally(&table, &[(&sub, None)]);
+        let mut wrong = right.clone();
+        wrong[1] -= F::one();
+        wrong[2] += F::one();
+        let session = |multiplicity: &[F]| {
+            let columns = [table.clone(), multiplicity.to_vec(), sub.clone()];
+            Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])])
+        };
+        session(&right).prove_and_verify().unwrap();
+        let cheater = session(&wrong);
+        let evals = BTreeMap::from([(cheater.ids[1], right)]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
 
-    let weights = fv([2, 3]);
-    let mut wrong = weights.clone();
-    wrong[1] += F::one();
-    let counts = tally(&table, &[(&sub, Some(&weights))]);
-    let session = |weights: &[F]| {
-        let columns = [table.clone(), counts.clone(), sub.clone(), weights.to_vec()];
-        Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
-    };
-    session(&weights).prove_and_verify().unwrap();
-    let cheater = session(&wrong);
-    let evals = BTreeMap::from([(cheater.ids[3], weights)]);
-    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        let weights = fv([2, 3]);
+        let mut wrong = weights.clone();
+        wrong[1] += F::one();
+        let counts = tally(&table, &[(&sub, Some(&weights))]);
+        let session = |weights: &[F]| {
+            let columns = [table.clone(), counts.clone(), sub.clone(), weights.to_vec()];
+            Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
+        };
+        session(&weights).prove_and_verify().unwrap();
+        let cheater = session(&wrong);
+        let evals = BTreeMap::from([(cheater.ids[3], weights)]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    });
 }
 
 /// The masks of the input layers are the GKR's claims on them, and nothing
@@ -598,36 +695,38 @@ fn tampered_root_of_an_nv0_values_instance_is_rejected() {
 
 #[test]
 fn relation_with_an_nv0_instance_of_each_kind_verifies() {
-    let table = fv(0..8);
-    let session = |unit_key: u64, key: u64, weight: u64| {
-        let mut counts = vec![F::zero(); 8];
-        counts[7] = F::one();
-        counts[5] = F::from(3u64);
-        let columns = [
-            table.clone(),
-            counts,
-            fv([unit_key]),
-            fv([key]),
-            fv([weight]),
-        ];
-        let f = vec![(2, None), (3, Some(4))];
-        Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
-    };
-    let honest = session(7, 5, 3);
-    let kinds: Vec<(usize, bool)> = honest
-        .plan()
-        .iter()
-        .map(|instance| (instance.n_vars(), instance.mults.is_none()))
-        .collect();
-    assert_eq!(kinds, [(0, true), (0, false), (3, false)]);
-    honest.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let session = |unit_key: u64, key: u64, weight: u64| {
+            let mut counts = vec![F::zero(); 8];
+            counts[7] = F::one();
+            counts[5] = F::from(3u64);
+            let columns = [
+                table.clone(),
+                counts,
+                fv([unit_key]),
+                fv([key]),
+                fv([weight]),
+            ];
+            let f = vec![(2, None), (3, Some(4))];
+            Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
+        };
+        let honest = session(7, 5, 3);
+        let kinds: Vec<(usize, bool)> = honest
+            .plan()
+            .iter()
+            .map(|instance| (instance.n_vars(), instance.mults.is_none()))
+            .collect();
+        assert_eq!(kinds, [(0, true), (0, false), (3, false)]);
+        honest.prove_and_verify().unwrap();
 
-    for (unit_key, key, weight) in [(6, 5, 3), (7, 4, 3), (7, 5, 2)] {
-        match session(unit_key, key, weight).prove_and_verify() {
-            Err(Rejected::Reduction(err)) => assert_verifier_error(err),
-            other => panic!("expected the roots to differ, got {other:?}"),
+        for (unit_key, key, weight) in [(6, 5, 3), (7, 4, 3), (7, 5, 2)] {
+            match session(unit_key, key, weight).prove_and_verify() {
+                Err(Rejected::Reduction(err)) => assert_verifier_error(err),
+                other => panic!("expected the roots to differ, got {other:?}"),
+            }
         }
-    }
+    });
 }
 
 /// Whether an instance has numerators of its own follows the statement: a
@@ -686,51 +785,67 @@ fn with_claim_map_entry(proof: &SNARKProof<B>, id: TrackerID, value: F) -> SNARK
 /// instances.
 #[test]
 fn raw_claim_ignores_proof_map() {
-    let table = fv(0..8);
-    let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
-    let one_lookup = |wide_nv: usize| narrow_lookup_session(&table, &sub, &sub, wide_nv);
-    let two_lookups = |wide_nv: usize| {
-        let subs = two_lookup_subs();
-        let mut columns = two_lookup_columns(&subs, &subs);
-        columns.push(fv((0..1u64 << wide_nv).map(|i| i * i + 1)));
-        columns.push(fv((0..1u64 << wide_nv).map(|i| 3 * i + 2)));
-        Session::new(&columns, &[&[8, 9]], &two_lookup_relations(false))
-    };
-    let sessions: [&dyn Fn(usize) -> Session; 2] = [&one_lookup, &two_lookups];
-    for (session, (wide_nv, buckets)) in sessions
-        .into_iter()
-        .flat_map(|session| [(session, (4, 1)), (session, (8, 2))])
-    {
-        let mut session = session(wide_nv);
-        session.prove_with(ColumnEvals::new()).unwrap();
-        let claims = session.prover.tracker().borrow().sumcheck_claims_snapshot();
-        let raw: Vec<(TrackerID, F)> = claims
-            .iter()
-            .filter(|(_, _, raw)| *raw)
-            .map(|(id, sum, _)| (*id, *sum))
-            .collect();
-        // The sub columns, the tables and the multiplicities, each kind in
-        // one instance.
-        assert_eq!(raw.len(), 3);
-        assert_eq!(claims.len(), 4);
+    under_each_protocol(|protocol| {
+        let table = fv(0..8);
+        let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
+        let one_lookup = |wide_nv: usize| narrow_lookup_session(&table, &sub, &sub, wide_nv);
+        let two_lookups = |wide_nv: usize| {
+            let subs = two_lookup_subs();
+            let mut columns = two_lookup_columns(&subs, &subs);
+            columns.push(fv((0..1u64 << wide_nv).map(|i| i * i + 1)));
+            columns.push(fv((0..1u64 << wide_nv).map(|i| 3 * i + 2)));
+            Session::new(&columns, &[&[8, 9]], &two_lookup_relations(false))
+        };
+        // What each session has in raw claims under LogUp: a sum for the
+        // sub column and one for the table, and with two lookups one for
+        // the two sub columns of each and one for each table.
+        let sessions: [(&dyn Fn(usize) -> Session, usize); 2] =
+            [(&one_lookup, 2), (&two_lookups, 4)];
+        for ((session, logup_sums), (wide_nv, buckets)) in sessions
+            .into_iter()
+            .flat_map(|session| [(session, (4, 1)), (session, (8, 2))])
+        {
+            let mut session = session(wide_nv);
+            session.prove_with(ColumnEvals::new()).unwrap();
+            let claims = session.prover.tracker().borrow().sumcheck_claims_snapshot();
+            let raw: Vec<(TrackerID, F)> = claims
+                .iter()
+                .filter(|(_, _, raw)| *raw)
+                .map(|(id, sum, _)| (*id, *sum))
+                .collect();
+            let reduced = match protocol {
+                // The sub columns, the tables and the multiplicities, each
+                // kind in one instance.
+                LookupProtocol::LogUpGkr => 3,
+                LookupProtocol::LogUp => logup_sums,
+            };
+            assert_eq!(raw.len(), reduced);
+            assert_eq!(claims.len(), reduced + 1);
 
-        let proof = session.prover.build_proof().unwrap();
-        let subproof = proof.sc_subproof.as_ref().unwrap();
-        assert_eq!(subproof.buckets().len(), buckets);
-        for (id, _) in &raw {
-            assert!(!subproof.sumcheck_claims().contains_key(id));
-        }
-        session.verify(&proof).unwrap();
+            let proof = session.prover.build_proof().unwrap();
+            let subproof = proof.sc_subproof.as_ref().unwrap();
+            // The helper checks of two lookups are enough claims on their
+            // rows for a sumcheck of their own beside either wide pair.
+            let buckets = match (protocol, logup_sums) {
+                (LookupProtocol::LogUp, 4) => 2,
+                _ => buckets,
+            };
+            assert_eq!(subproof.buckets().len(), buckets);
+            for (id, _) in &raw {
+                assert!(!subproof.sumcheck_claims().contains_key(id));
+            }
+            session.verify(&proof).unwrap();
 
-        let global_scale = F::from(1u64 << (wide_nv - 3));
-        for (id, sum) in raw {
-            for entry in [sum, sum * global_scale, sum + F::one(), F::zero()] {
-                session
-                    .verify(&with_claim_map_entry(&proof, id, entry))
-                    .unwrap();
+            let global_scale = F::from(1u64 << (wide_nv - 3));
+            for (id, sum) in raw {
+                for entry in [sum, sum * global_scale, sum + F::one(), F::zero()] {
+                    session
+                        .verify(&with_claim_map_entry(&proof, id, entry))
+                        .unwrap();
+                }
             }
         }
-    }
+    });
 }
 
 /// Were the verifier to take the claim map's word for an input claim, it
@@ -741,43 +856,45 @@ fn raw_claim_ignores_proof_map() {
 /// and writes into the map what the verifier would need to read.
 #[test]
 fn scaled_column_attack_through_the_proof_map_is_rejected() {
-    let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
-    for (wide_nv, buckets) in [(4, 1), (8, 2)] {
-        let scale = F::from(1u64 << (wide_nv - 3));
-        let table: Vec<F> = (0..8u64).map(|j| F::from(j) * scale).collect();
-        let scaled: Vec<F> = sub.iter().map(|v| *v * scale).collect();
+    under_each_protocol(|_| {
+        let sub = fv([1, 1, 2, 3, 5, 5, 5, 7]);
+        for (wide_nv, buckets) in [(4, 1), (8, 2)] {
+            let scale = F::from(1u64 << (wide_nv - 3));
+            let table: Vec<F> = (0..8u64).map(|j| F::from(j) * scale).collect();
+            let scaled: Vec<F> = sub.iter().map(|v| *v * scale).collect();
 
-        narrow_lookup_session(&table, &scaled, &scaled, wide_nv)
-            .prove_and_verify()
-            .unwrap();
+            narrow_lookup_session(&table, &scaled, &scaled, wide_nv)
+                .prove_and_verify()
+                .unwrap();
 
-        let mut session = narrow_lookup_session(&table, &sub, &scaled, wide_nv);
-        let evals = BTreeMap::from([(session.ids[2], scaled)]);
-        let cheated = session.prove_with(evals);
-        if cfg!(feature = "honest-prover") {
-            assert!(matches!(cheated, Err(SnarkError::ProverError(_))));
-            continue;
-        }
-        cheated.unwrap();
+            let mut session = narrow_lookup_session(&table, &sub, &scaled, wide_nv);
+            let evals = BTreeMap::from([(session.ids[2], scaled)]);
+            let cheated = session.prove_with(evals);
+            if cfg!(feature = "honest-prover") {
+                assert!(matches!(cheated, Err(SnarkError::ProverError(_))));
+                continue;
+            }
+            cheated.unwrap();
 
-        // The first input claim is the sub column's; its value is the
-        // scaled column at the GKR's point.
-        let tracker = session.prover.tracker();
-        let (claimed, value, _) = tracker.borrow().sumcheck_claims_snapshot()[1];
-        let true_sum = value / scale;
-        tracker.borrow_mut().set_sumcheck_claim(claimed, true_sum);
+            // The first input claim is the sub column's; its value is the
+            // scaled column at the GKR's point.
+            let tracker = session.prover.tracker();
+            let (claimed, value, _) = tracker.borrow().sumcheck_claims_snapshot()[1];
+            let true_sum = value / scale;
+            tracker.borrow_mut().set_sumcheck_claim(claimed, true_sum);
 
-        let proof = session.prover.build_proof().unwrap();
-        assert_eq!(proof.sc_subproof.as_ref().unwrap().buckets().len(), buckets);
-        let entries = [value, true_sum, value * scale, true_sum * scale];
-        let forged = entries.map(|entry| with_claim_map_entry(&proof, claimed, entry));
-        for proof in std::iter::once(&proof).chain(&forged) {
-            match session.verify(proof) {
-                Err(Rejected::Claims(err)) => assert_verifier_error(err),
-                other => panic!("expected the input claims to fail, got {other:?}"),
+            let proof = session.prover.build_proof().unwrap();
+            assert_eq!(proof.sc_subproof.as_ref().unwrap().buckets().len(), buckets);
+            let entries = [value, true_sum, value * scale, true_sum * scale];
+            let forged = entries.map(|entry| with_claim_map_entry(&proof, claimed, entry));
+            for proof in std::iter::once(&proof).chain(&forged) {
+                match session.verify(proof) {
+                    Err(Rejected::Claims(err)) => assert_verifier_error(err),
+                    other => panic!("expected the input claims to fail, got {other:?}"),
+                }
             }
         }
-    }
+    });
 }
 
 /// The sum of an instance's fractions, as one fraction.
@@ -823,54 +940,58 @@ fn balances_under(session: &Session, plan: &[InstancePlan<F>], gammas: &[F]) -> 
 /// both, the two sides are the same sum.
 #[test]
 fn relations_whose_errors_cancel_over_the_batch_are_rejected() {
-    let a = fv(0..8);
-    let b = fv((0..8).map(|i| i + 100));
-    let columns = [a, b];
-    let entry = |column: usize| vec![(column, None)];
-    let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
+    under_each_protocol(|_| {
+        let a = fv(0..8);
+        let b = fv((0..8).map(|i| i + 100));
+        let columns = [a, b];
+        let entry = |column: usize| vec![(column, None)];
+        let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
 
-    // As one relation the four columns balance.
-    let together = [(vec![(0, None), (1, None)], vec![(1, None), (0, None)])];
-    let mut merged = Session::new(&columns, &[&[0]], &together);
-    let merged_plan = merged.plan();
-    assert!(balances_under(&merged, &merged_plan, &[gamma]));
-    merged.prove_with(ColumnEvals::new()).unwrap();
-    let merged_proof = merged.prover.build_proof().unwrap();
-    merged.verify(&merged_proof).unwrap();
+        // As one relation the four columns balance.
+        let together = [(vec![(0, None), (1, None)], vec![(1, None), (0, None)])];
+        let mut merged = Session::new(&columns, &[&[0]], &together);
+        let merged_plan = merged.plan();
+        assert!(balances_under(&merged, &merged_plan, &[gamma]));
+        merged.prove_with(ColumnEvals::new()).unwrap();
+        let merged_proof = merged.prover.build_proof().unwrap();
+        merged.verify(&merged_proof).unwrap();
 
-    // As two relations they are laid out as before, column for column: all
-    // that differs is the relation of every second entry.
-    let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
-    let session = Session::new(&columns, &[&[0]], &apart);
-    let plan = session.plan();
-    assert_eq!(
-        layout(&plan),
-        [
-            (Side::F, 3, 1, true, false, false),
-            (Side::G, 3, 1, true, false, false),
-        ]
-    );
-    for (instance, merged_instance) in plan.iter().zip(&merged_plan) {
-        assert_eq!(instance.cols, merged_instance.cols);
-        assert_eq!(instance.relations, [0, 1]);
-        assert_eq!(merged_instance.relations, [0, 0]);
-    }
-    // So with one gamma for both relations the comparison would hold. With
-    // one each it does not.
-    assert!(balances_under(&session, &plan, &[gamma, gamma]));
-    assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
-    let apart_relations = session.relations.clone();
-    assert_eq!(session.ids, merged.ids);
-    assert_rejected_in_the_reduction(session.prove_and_verify());
+        // As two relations they are laid out as before, column for column: all
+        // that differs is the relation of every second entry.
+        let apart = [(entry(0), entry(1)), (entry(1), entry(0))];
+        let session = Session::new(&columns, &[&[0]], &apart);
+        let plan = session.plan();
+        assert_eq!(
+            layout(&plan),
+            [
+                (Side::F, 3, 1, true, false, false),
+                (Side::G, 3, 1, true, false, false),
+            ]
+        );
+        for (instance, merged_instance) in plan.iter().zip(&merged_plan) {
+            assert_eq!(instance.cols, merged_instance.cols);
+            assert_eq!(instance.relations, [0, 1]);
+            assert_eq!(merged_instance.relations, [0, 0]);
+        }
+        // So with one gamma for both relations the comparison would hold. With
+        // one each it does not.
+        assert!(balances_under(&session, &plan, &[gamma, gamma]));
+        assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
+        let apart_relations = session.relations.clone();
+        assert_eq!(session.ids, merged.ids);
+        assert_rejected_in_the_reduction(session.prove_and_verify());
 
-    // Nor is the proof of the one relation a proof of the two: they have
-    // the same instances and differ in their gammas alone.
-    merged.relations = apart_relations;
-    assert_rejected_in_the_reduction(merged.verify(&merged_proof));
+        // Nor is the proof of the one relation a proof of the two: they have
+        // the same instances and differ in their gammas alone.
+        merged.relations = apart_relations;
+        assert_rejected_in_the_reduction(merged.verify(&merged_proof));
 
-    // A true relation does not vouch for a false one next to it.
-    let mixed = [(entry(0), entry(0)), (entry(0), entry(1))];
-    assert_rejected_in_the_reduction(Session::new(&columns, &[&[0]], &mixed).prove_and_verify());
+        // A true relation does not vouch for a false one next to it.
+        let mixed = [(entry(0), entry(0)), (entry(0), entry(1))];
+        assert_rejected_in_the_reduction(
+            Session::new(&columns, &[&[0]], &mixed).prove_and_verify(),
+        );
+    });
 }
 
 // ─── Instances shared by relations ───────────────────────────────────────
@@ -928,40 +1049,42 @@ fn two_lookups(columns: &[Vec<F>], merged: bool) -> Session {
 /// laid out in the same instances.
 #[test]
 fn value_out_of_its_table_is_rejected_at_every_position_of_a_stack_of_two_relations() {
-    let subs = two_lookup_subs();
-    let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
-    let honest = two_lookups(&two_lookup_columns(&subs, &subs), false);
-    let plan = honest.plan();
-    assert_eq!(
-        layout(&plan),
-        [
-            (Side::F, 3, 2, true, false, false),
-            (Side::G, 3, 1, false, false, false),
-        ]
-    );
-    assert_eq!(plan[0].relations, [0, 0, 1, 1]);
-    assert_eq!(plan[1].relations, [0, 1]);
-    assert!(balances_under(&honest, &plan, &[gamma, other_gamma]));
-    honest.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let subs = two_lookup_subs();
+        let [gamma, other_gamma] = [F::from(1000u64), F::from(2000u64)];
+        let honest = two_lookups(&two_lookup_columns(&subs, &subs), false);
+        let plan = honest.plan();
+        assert_eq!(
+            layout(&plan),
+            [
+                (Side::F, 3, 2, true, false, false),
+                (Side::G, 3, 1, false, false, false),
+            ]
+        );
+        assert_eq!(plan[0].relations, [0, 0, 1, 1]);
+        assert_eq!(plan[1].relations, [0, 1]);
+        assert!(balances_under(&honest, &plan, &[gamma, other_gamma]));
+        honest.prove_and_verify().unwrap();
 
-    for at in 0..4 {
-        let mut neither = subs.clone();
-        neither[at][5] = F::from(999u64);
-        let columns = two_lookup_columns(&neither, &neither);
-        assert_rejected_in_the_reduction(two_lookups(&columns, false).prove_and_verify());
+        for at in 0..4 {
+            let mut neither = subs.clone();
+            neither[at][5] = F::from(999u64);
+            let columns = two_lookup_columns(&neither, &neither);
+            assert_rejected_in_the_reduction(two_lookups(&columns, false).prove_and_verify());
 
-        let mut other_table = subs.clone();
-        other_table[at][5] = F::from(if at < 2 { 103u64 } else { 3 });
-        let columns = two_lookup_columns(&other_table, &other_table);
-        let merged = two_lookups(&columns, true);
-        assert_eq!(layout(&merged.plan()), layout(&plan));
-        merged.prove_and_verify().unwrap();
-        let session = two_lookups(&columns, false);
-        assert_eq!(session.plan(), plan);
-        assert!(balances_under(&session, &plan, &[gamma, gamma]));
-        assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
-        assert_rejected_in_the_reduction(session.prove_and_verify());
-    }
+            let mut other_table = subs.clone();
+            other_table[at][5] = F::from(if at < 2 { 103u64 } else { 3 });
+            let columns = two_lookup_columns(&other_table, &other_table);
+            let merged = two_lookups(&columns, true);
+            assert_eq!(layout(&merged.plan()), layout(&plan));
+            merged.prove_and_verify().unwrap();
+            let session = two_lookups(&columns, false);
+            assert_eq!(session.plan(), plan);
+            assert!(balances_under(&session, &plan, &[gamma, gamma]));
+            assert!(!balances_under(&session, &plan, &[gamma, other_gamma]));
+            assert_rejected_in_the_reduction(session.prove_and_verify());
+        }
+    });
 }
 
 /// A stack of two relations has one claim on its columns, with the gammas
@@ -2139,74 +2262,76 @@ fn lookups_into_tables_of_one_size_share_their_instances() {
 /// that the table shares with no other, and proves no other lookup.
 #[test]
 fn multiplicities_of_another_size_than_their_tables_prove_the_same_lookups() {
-    let tables = [fv(0..8), fv(100..108)];
-    // The second sub column holds every value of its table once.
-    let subs = [in_table(3, 8, 1), fv((0..8).map(|i| 100 + (i * 3) % 8))];
-    let counts = tally(&tables[0], &[(&subs[0], None)]);
-    let session = |subs: &[Vec<F>; 2], first: &[F], second: &[F]| {
-        let columns = [
-            tables[0].clone(),
-            first.to_vec(),
-            tables[1].clone(),
-            second.to_vec(),
-            subs[0].clone(),
-            subs[1].clone(),
-        ];
-        let relations = [
-            (vec![(4, None)], vec![(0, Some(1))]),
-            (vec![(5, None)], vec![(2, Some(3))]),
-        ];
-        Session::new(&columns, &[], &relations)
-    };
-    let unit = (Side::F, 3, 1, true, false, false);
+    under_each_protocol(|_| {
+        let tables = [fv(0..8), fv(100..108)];
+        // The second sub column holds every value of its table once.
+        let subs = [in_table(3, 8, 1), fv((0..8).map(|i| 100 + (i * 3) % 8))];
+        let counts = tally(&tables[0], &[(&subs[0], None)]);
+        let session = |subs: &[Vec<F>; 2], first: &[F], second: &[F]| {
+            let columns = [
+                tables[0].clone(),
+                first.to_vec(),
+                tables[1].clone(),
+                second.to_vec(),
+                subs[0].clone(),
+                subs[1].clone(),
+            ];
+            let relations = [
+                (vec![(4, None)], vec![(0, Some(1))]),
+                (vec![(5, None)], vec![(2, Some(3))]),
+            ];
+            Session::new(&columns, &[], &relations)
+        };
+        let unit = (Side::F, 3, 1, true, false, false);
 
-    // As long as their tables, which then share a stack.
-    let same = session(&subs, &counts, &fv([1; 8]));
-    assert_eq!(
-        layout(&same.plan()),
-        [unit, (Side::G, 3, 1, false, false, false)]
-    );
-    same.prove_and_verify().unwrap();
-
-    // Twice as long for the first table, the counts in either half or half
-    // of them in each, and half as long for the second.
-    let zeros = vec![F::zero(); 8];
-    let halved: Vec<F> = counts.iter().map(|c| *c / F::from(2u64)).collect();
-    let long = [
-        [&counts[..], &zeros[..]].concat(),
-        [&zeros[..], &counts[..]].concat(),
-        [&halved[..], &halved[..]].concat(),
-    ];
-    let short = fv([1; 4]);
-    for long in &long {
-        let other = session(&subs, long, &short);
+        // As long as their tables, which then share a stack.
+        let same = session(&subs, &counts, &fv([1; 8]));
         assert_eq!(
-            layout(&other.plan()),
-            [
-                unit,
-                (Side::G, 4, 0, false, false, false),
-                (Side::G, 3, 0, false, false, false)
-            ]
+            layout(&same.plan()),
+            [unit, (Side::G, 3, 1, false, false, false)]
         );
-        other.prove_and_verify().unwrap();
+        same.prove_and_verify().unwrap();
 
-        // A count too many in the half the table is repeated into.
-        let mut miscounted = long.clone();
-        miscounted[11] += F::one();
-        let session = session(&subs, &miscounted, &short);
-        assert_rejected_in_the_reduction(session.prove_and_verify());
-    }
-    assert_rejected_in_the_reduction(
-        session(&subs, &long[0], &fv([1, 1, 1, 2])).prove_and_verify(),
-    );
+        // Twice as long for the first table, the counts in either half or half
+        // of them in each, and half as long for the second.
+        let zeros = vec![F::zero(); 8];
+        let halved: Vec<F> = counts.iter().map(|c| *c / F::from(2u64)).collect();
+        let long = [
+            [&counts[..], &zeros[..]].concat(),
+            [&zeros[..], &counts[..]].concat(),
+            [&halved[..], &halved[..]].concat(),
+        ];
+        let short = fv([1; 4]);
+        for long in &long {
+            let other = session(&subs, long, &short);
+            assert_eq!(
+                layout(&other.plan()),
+                [
+                    unit,
+                    (Side::G, 4, 0, false, false, false),
+                    (Side::G, 3, 0, false, false, false)
+                ]
+            );
+            other.prove_and_verify().unwrap();
 
-    // A value of the other table in either sub column.
-    for (sub, value) in [(0, 100u64), (1, 0)] {
-        let mut subs = subs.clone();
-        subs[sub][5] = F::from(value);
-        let session = session(&subs, &long[0], &short);
-        assert_rejected_in_the_reduction(session.prove_and_verify());
-    }
+            // A count too many in the half the table is repeated into.
+            let mut miscounted = long.clone();
+            miscounted[11] += F::one();
+            let session = session(&subs, &miscounted, &short);
+            assert_rejected_in_the_reduction(session.prove_and_verify());
+        }
+        assert_rejected_in_the_reduction(
+            session(&subs, &long[0], &fv([1, 1, 1, 2])).prove_and_verify(),
+        );
+
+        // A value of the other table in either sub column.
+        for (sub, value) in [(0, 100u64), (1, 0)] {
+            let mut subs = subs.clone();
+            subs[sub][5] = F::from(value);
+            let session = session(&subs, &long[0], &short);
+            assert_rejected_in_the_reduction(session.prove_and_verify());
+        }
+    });
 }
 
 /// A column of a keyed sum with its optional multiplicity.
@@ -2405,43 +2530,45 @@ fn constant_entries_stand_alone_among_stacked_ones() {
 /// other constants, sound in itself, is not a proof of that statement.
 #[test]
 fn constant_operands_are_checked_against_the_gkr_claims() {
-    let table = fv(0..16);
-    let keys = in_table(3, 16, 1);
-    let weights = fv(1..9);
-    // One constant column, one constant multiplicity.
-    let relation = |session: &Session, constant: u64, constant_weight: u64| {
-        let value = |v: u64| KeyedTerm::Constant {
-            value: F::from(v),
-            nv: 3,
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let keys = in_table(3, 16, 1);
+        let weights = fv(1..9);
+        // One constant column, one constant multiplicity.
+        let relation = |session: &Session, constant: u64, constant_weight: u64| {
+            let value = |v: u64| KeyedTerm::Constant {
+                value: F::from(v),
+                nv: 3,
+            };
+            KeyedSumRelation {
+                fxs: vec![value(constant), KeyedTerm::Poly(session.ids[2])],
+                mfxs: vec![
+                    Some(KeyedTerm::Poly(session.ids[3])),
+                    Some(value(constant_weight)),
+                ],
+                gxs: vec![KeyedTerm::Poly(session.ids[0])],
+                mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+            }
         };
-        KeyedSumRelation {
-            fxs: vec![value(constant), KeyedTerm::Poly(session.ids[2])],
-            mfxs: vec![
-                Some(KeyedTerm::Poly(session.ids[3])),
-                Some(value(constant_weight)),
-            ],
-            gxs: vec![KeyedTerm::Poly(session.ids[0])],
-            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
-        }
-    };
-    let counts = tally(
-        &table,
-        &[(&fv([7; 8]), Some(&weights)), (&keys, Some(&fv([4; 8])))],
-    );
-    let columns = [table, counts, keys, weights];
-    let mut session = Session::new(&columns, &[], &[]);
-    session.relations = vec![relation(&session, 7, 4)];
-    session.prove_with(ColumnEvals::new()).unwrap();
-    let proof = session.prover.build_proof().unwrap();
-    session.verify(&proof).unwrap();
+        let counts = tally(
+            &table,
+            &[(&fv([7; 8]), Some(&weights)), (&keys, Some(&fv([4; 8])))],
+        );
+        let columns = [table, counts, keys, weights];
+        let mut session = Session::new(&columns, &[], &[]);
+        session.relations = vec![relation(&session, 7, 4)];
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        session.verify(&proof).unwrap();
 
-    for (constant, constant_weight) in [(8, 4), (7, 5)] {
-        session.relations = vec![relation(&session, constant, constant_weight)];
-        match session.verify(&proof) {
-            Err(Rejected::Reduction(err)) => assert_verifier_error(err),
-            other => panic!("expected the constant to be compared, got {other:?}"),
+        for (constant, constant_weight) in [(8, 4), (7, 5)] {
+            session.relations = vec![relation(&session, constant, constant_weight)];
+            match session.verify(&proof) {
+                Err(Rejected::Reduction(err)) => assert_verifier_error(err),
+                other => panic!("expected the constant to be compared, got {other:?}"),
+            }
         }
-    }
+    });
 }
 
 /// An entry with a constant operand stands alone and is still an entry of
@@ -2449,45 +2576,47 @@ fn constant_operands_are_checked_against_the_gkr_claims() {
 /// not the first one's.
 #[test]
 fn constant_entry_has_the_gamma_of_its_relation() {
-    let table = fv(0..16);
-    let keys = in_table(3, 16, 1);
-    let weights = fv(1..9);
-    let counts = tally(&table, &[(&fv([7; 8]), Some(&weights)), (&keys, None)]);
-    let columns = [table, counts, keys, weights, fv(0..8), fv((0..8).rev())];
-    // A permutation, then a lookup of a constant column and a committed
-    // one.
-    let session = |constant: u64| {
-        let mut session = Session::new(&columns, &[], &[(vec![(4, None)], vec![(5, None)])]);
-        session.relations.push(KeyedSumRelation {
-            fxs: vec![
-                KeyedTerm::Constant {
-                    value: F::from(constant),
-                    nv: 3,
-                },
-                KeyedTerm::Poly(session.ids[2]),
-            ],
-            mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), None],
-            gxs: vec![KeyedTerm::Poly(session.ids[0])],
-            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
-        });
-        session
-    };
-    let honest = session(7);
-    let plan = honest.plan();
-    assert_eq!(
-        layout(&plan),
-        [
-            (Side::F, 3, 1, true, false, false),
-            (Side::G, 3, 0, true, false, false),
-            (Side::F, 3, 0, false, true, false),
-            (Side::G, 4, 0, false, false, false),
-        ]
-    );
-    assert_eq!(plan[0].relations, [0, 1]);
-    assert_eq!(plan[2].relations, [1]);
-    honest.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let keys = in_table(3, 16, 1);
+        let weights = fv(1..9);
+        let counts = tally(&table, &[(&fv([7; 8]), Some(&weights)), (&keys, None)]);
+        let columns = [table, counts, keys, weights, fv(0..8), fv((0..8).rev())];
+        // A permutation, then a lookup of a constant column and a committed
+        // one.
+        let session = |constant: u64| {
+            let mut session = Session::new(&columns, &[], &[(vec![(4, None)], vec![(5, None)])]);
+            session.relations.push(KeyedSumRelation {
+                fxs: vec![
+                    KeyedTerm::Constant {
+                        value: F::from(constant),
+                        nv: 3,
+                    },
+                    KeyedTerm::Poly(session.ids[2]),
+                ],
+                mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), None],
+                gxs: vec![KeyedTerm::Poly(session.ids[0])],
+                mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+            });
+            session
+        };
+        let honest = session(7);
+        let plan = honest.plan();
+        assert_eq!(
+            layout(&plan),
+            [
+                (Side::F, 3, 1, true, false, false),
+                (Side::G, 3, 0, true, false, false),
+                (Side::F, 3, 0, false, true, false),
+                (Side::G, 4, 0, false, false, false),
+            ]
+        );
+        assert_eq!(plan[0].relations, [0, 1]);
+        assert_eq!(plan[2].relations, [1]);
+        honest.prove_and_verify().unwrap();
 
-    assert_rejected_in_the_reduction(session(16).prove_and_verify());
+        assert_rejected_in_the_reduction(session(16).prove_and_verify());
+    });
 }
 
 /// A product of a one-row polynomial and an `n`-variable one has `n`
@@ -2496,101 +2625,105 @@ fn constant_entry_has_the_gamma_of_its_relation() {
 /// of the instances are the tracker's.
 #[test]
 fn products_with_a_one_row_factor_take_their_size_from_the_tracker() {
-    let table = fv((0..16).map(|i| 3 * i));
-    let run = |scalar: u64, committed_scalar: bool| -> SnarkResult<()> {
-        let (mut prover, mut verifier) = setup();
-        let cols: Vec<Vec<F>> = (0..4).map(|s| in_table(3, 16, s)).collect();
-        let scaled: Vec<Vec<F>> = cols
-            .iter()
-            .map(|col| col.iter().map(|v| *v * F::from(3u64)).collect())
-            .collect();
-        let scaled: Vec<(&[F], Option<&[F]>)> = scaled.iter().map(|col| (&col[..], None)).collect();
+    under_each_protocol(|_| {
+        let table = fv((0..16).map(|i| 3 * i));
+        let run = |scalar: u64, committed_scalar: bool| -> SnarkResult<()> {
+            let (mut prover, mut verifier) = setup();
+            let cols: Vec<Vec<F>> = (0..4).map(|s| in_table(3, 16, s)).collect();
+            let scaled: Vec<Vec<F>> = cols
+                .iter()
+                .map(|col| col.iter().map(|v| *v * F::from(3u64)).collect())
+                .collect();
+            let scaled: Vec<(&[F], Option<&[F]>)> =
+                scaled.iter().map(|col| (&col[..], None)).collect();
 
-        let table_p = commit(&mut prover, &table);
-        let cols_p: Vec<TrackedPoly<B>> = cols.iter().map(|c| commit(&mut prover, c)).collect();
-        // A committed one-row polynomial is a constant handle; a tracked
-        // one is a polynomial like any other.
-        let scalar_p = if committed_scalar {
-            commit(&mut prover, &fv([scalar]))
-        } else {
-            prover.track_mat_mv_poly(mle(&fv([scalar])))
-        };
-        let products_p = [
-            &scalar_p * &cols_p[0],
-            &cols_p[1] * &scalar_p,
-            &scalar_p * &cols_p[2],
-            &cols_p[3] * &scalar_p,
-        ];
-        let mut ids = vec![table_p.id()];
-        ids.extend(cols_p.iter().map(TrackedPoly::id));
-        if committed_scalar {
-            ids.push(scalar_p.id());
-        }
-        // Two products through a lookup, two as columns of a keyed sum
-        // whose other side is again the table.
-        let [lookup_a, lookup_b, keyed_a, keyed_b] = products_p;
-        prover.add_mv_lookup_claim(table_p.id(), lookup_a.id())?;
-        prover.add_mv_lookup_claim(table_p.id(), lookup_b.id())?;
-        let keyed_counts = tally(&table, &scaled[2..]);
-        let keyed_counts_p = commit(&mut prover, &keyed_counts);
-        ids.push(keyed_counts_p.id());
-        KeyedSumcheck::<B>::prove(
-            &mut prover,
-            KeyedSumcheckProverInput {
-                fxs: vec![table_p.clone()],
-                mfxs: vec![Some(keyed_counts_p)],
-                gxs: vec![keyed_a, keyed_b],
-                mgxs: vec![None, None],
-            },
-        )?;
-        let proof = prover.build_proof()?;
+            let table_p = commit(&mut prover, &table);
+            let cols_p: Vec<TrackedPoly<B>> = cols.iter().map(|c| commit(&mut prover, c)).collect();
+            // A committed one-row polynomial is a constant handle; a tracked
+            // one is a polynomial like any other.
+            let scalar_p = if committed_scalar {
+                commit(&mut prover, &fv([scalar]))
+            } else {
+                prover.track_mat_mv_poly(mle(&fv([scalar])))
+            };
+            let products_p = [
+                &scalar_p * &cols_p[0],
+                &cols_p[1] * &scalar_p,
+                &scalar_p * &cols_p[2],
+                &cols_p[3] * &scalar_p,
+            ];
+            let mut ids = vec![table_p.id()];
+            ids.extend(cols_p.iter().map(TrackedPoly::id));
+            if committed_scalar {
+                ids.push(scalar_p.id());
+            }
+            // Two products through a lookup, two as columns of a keyed sum
+            // whose other side is again the table.
+            let [lookup_a, lookup_b, keyed_a, keyed_b] = products_p;
+            prover.add_mv_lookup_claim(table_p.id(), lookup_a.id())?;
+            prover.add_mv_lookup_claim(table_p.id(), lookup_b.id())?;
+            let keyed_counts = tally(&table, &scaled[2..]);
+            let keyed_counts_p = commit(&mut prover, &keyed_counts);
+            ids.push(keyed_counts_p.id());
+            KeyedSumcheck::<B>::prove(
+                &mut prover,
+                KeyedSumcheckProverInput {
+                    fxs: vec![table_p.clone()],
+                    mfxs: vec![Some(keyed_counts_p)],
+                    gxs: vec![keyed_a, keyed_b],
+                    mgxs: vec![None, None],
+                },
+            )?;
+            let proof = prover.build_proof()?;
 
-        verifier.set_proof_ref(&proof);
-        let n_committed = if committed_scalar { 6 } else { 5 };
-        let mut oracles: Vec<TrackedOracle<B>> = Vec::new();
-        for id in &ids[..n_committed] {
-            oracles.push(verifier.track_mv_com_by_id(*id)?);
-        }
-        let scalar_v = if committed_scalar {
-            oracles[5].clone()
-        } else {
-            verifier.track_base_oracle(Oracle::new_multivariate(0, move |_| Ok(F::from(scalar))))
+            verifier.set_proof_ref(&proof);
+            let n_committed = if committed_scalar { 6 } else { 5 };
+            let mut oracles: Vec<TrackedOracle<B>> = Vec::new();
+            for id in &ids[..n_committed] {
+                oracles.push(verifier.track_mv_com_by_id(*id)?);
+            }
+            let scalar_v = if committed_scalar {
+                oracles[5].clone()
+            } else {
+                verifier
+                    .track_base_oracle(Oracle::new_multivariate(0, move |_| Ok(F::from(scalar))))
+            };
+            let (table_v, cols_v) = (&oracles[0], &oracles[1..5]);
+            let [lookup_a, lookup_b, keyed_a, keyed_b] = [
+                &scalar_v * &cols_v[0],
+                &cols_v[1] * &scalar_v,
+                &scalar_v * &cols_v[2],
+                &cols_v[3] * &scalar_v,
+            ];
+            // The verifier's handles disagree with each other and with the
+            // tracker, which has three variables for all four.
+            assert_eq!((lookup_a.log_size(), lookup_b.log_size()), (0, 3));
+            for product in [&lookup_a, &lookup_b, &keyed_a, &keyed_b] {
+                let nv = verifier.tracker().borrow().oracle_log_size(product.id());
+                assert_eq!(nv, Some(3));
+            }
+            verifier.add_mv_lookup_claim(table_v.id(), lookup_a.id())?;
+            verifier.add_mv_lookup_claim(table_v.id(), lookup_b.id())?;
+            let keyed_counts_v = verifier.track_mv_com_by_id(*ids.last().unwrap())?;
+            KeyedSumcheck::<B>::verify(
+                &mut verifier,
+                KeyedSumcheckVerifierInput {
+                    fxs: vec![table_v.clone()],
+                    mfxs: vec![Some(keyed_counts_v)],
+                    gxs: vec![keyed_a, keyed_b],
+                    mgxs: vec![None, None],
+                },
+            )?;
+            verifier.verify()?;
+            assert_in_sync(&prover, &verifier);
+            Ok(())
         };
-        let (table_v, cols_v) = (&oracles[0], &oracles[1..5]);
-        let [lookup_a, lookup_b, keyed_a, keyed_b] = [
-            &scalar_v * &cols_v[0],
-            &cols_v[1] * &scalar_v,
-            &scalar_v * &cols_v[2],
-            &cols_v[3] * &scalar_v,
-        ];
-        // The verifier's handles disagree with each other and with the
-        // tracker, which has three variables for all four.
-        assert_eq!((lookup_a.log_size(), lookup_b.log_size()), (0, 3));
-        for product in [&lookup_a, &lookup_b, &keyed_a, &keyed_b] {
-            let nv = verifier.tracker().borrow().oracle_log_size(product.id());
-            assert_eq!(nv, Some(3));
+        for committed_scalar in [true, false] {
+            run(3, committed_scalar).unwrap();
+            // Times 5 the columns leave the table.
+            assert_false_statement_rejected(run(5, committed_scalar));
         }
-        verifier.add_mv_lookup_claim(table_v.id(), lookup_a.id())?;
-        verifier.add_mv_lookup_claim(table_v.id(), lookup_b.id())?;
-        let keyed_counts_v = verifier.track_mv_com_by_id(*ids.last().unwrap())?;
-        KeyedSumcheck::<B>::verify(
-            &mut verifier,
-            KeyedSumcheckVerifierInput {
-                fxs: vec![table_v.clone()],
-                mfxs: vec![Some(keyed_counts_v)],
-                gxs: vec![keyed_a, keyed_b],
-                mgxs: vec![None, None],
-            },
-        )?;
-        verifier.verify()?;
-        assert_in_sync(&prover, &verifier);
-        Ok(())
-    };
-    for committed_scalar in [true, false] {
-        run(3, committed_scalar).unwrap();
-        // Times 5 the columns leave the table.
-        assert_false_statement_rejected(run(5, committed_scalar));
-    }
+    });
 }
 
 // ─── Honest-prover check ─────────────────────────────────────────────────
@@ -2601,51 +2734,53 @@ fn products_with_a_one_row_factor_take_their_size_from_the_tracker() {
 /// repeating.
 #[test]
 fn honest_check_agrees_with_protocol_on_mixed_col_mult_nv() {
-    let table = fv(0..8);
-    // `(column rows, weight rows)` on the `f` side.
-    for (col_rows, weight_rows) in [(1, 8), (8, 32), (32, 8), (2, 16), (16, 1), (8, 8)] {
-        let col = fv((0..col_rows).map(|i| (i * 3 + 1) % 8));
-        let weights = fv((0..weight_rows).map(|i| i + 1));
-        let fs = vec![(col, Some(weights))];
-        let truth = table_side(&table, &fs);
-        // What a check that pairs rows without repeating would balance.
-        let rows = col_rows.min(weight_rows) as usize;
-        let truncated = table_side(
-            &table,
-            &[(
-                fs[0].0[..rows].to_vec(),
-                Some(fs[0].1.as_ref().unwrap()[..rows].to_vec()),
-            )],
-        );
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        // `(column rows, weight rows)` on the `f` side.
+        for (col_rows, weight_rows) in [(1, 8), (8, 32), (32, 8), (2, 16), (16, 1), (8, 8)] {
+            let col = fv((0..col_rows).map(|i| (i * 3 + 1) % 8));
+            let weights = fv((0..weight_rows).map(|i| i + 1));
+            let fs = vec![(col, Some(weights))];
+            let truth = table_side(&table, &fs);
+            // What a check that pairs rows without repeating would balance.
+            let rows = col_rows.min(weight_rows) as usize;
+            let truncated = table_side(
+                &table,
+                &[(
+                    fs[0].0[..rows].to_vec(),
+                    Some(fs[0].1.as_ref().unwrap()[..rows].to_vec()),
+                )],
+            );
 
-        for (gs, holds) in [(&truth, true), (&truncated, col_rows == weight_rows)] {
-            #[cfg(feature = "honest-prover")]
-            {
-                let (mut prover, _) = setup();
-                let mut handles = |cols: &[KeyedCol]| {
-                    let col = commit(&mut prover, &cols[0].0);
-                    let mult = commit(&mut prover, cols[0].1.as_ref().unwrap());
-                    (vec![col], vec![Some(mult)])
-                };
-                let (fxs, mfxs) = handles(&fs);
-                let (gxs, mgxs) = handles(gs);
-                let input = KeyedSumcheckProverInput {
-                    fxs,
-                    gxs,
-                    mfxs,
-                    mgxs,
-                };
-                let checked = KeyedSumcheck::<B>::honest_prover_check_helper(&input);
-                assert_eq!(checked.is_ok(), holds, "{col_rows} x {weight_rows}");
-            }
-            let proved = keyed_e2e(&fs, gs);
-            if holds {
-                proved.unwrap();
-            } else {
-                assert_false_statement_rejected(proved);
+            for (gs, holds) in [(&truth, true), (&truncated, col_rows == weight_rows)] {
+                #[cfg(feature = "honest-prover")]
+                {
+                    let (mut prover, _) = setup();
+                    let mut handles = |cols: &[KeyedCol]| {
+                        let col = commit(&mut prover, &cols[0].0);
+                        let mult = commit(&mut prover, cols[0].1.as_ref().unwrap());
+                        (vec![col], vec![Some(mult)])
+                    };
+                    let (fxs, mfxs) = handles(&fs);
+                    let (gxs, mgxs) = handles(gs);
+                    let input = KeyedSumcheckProverInput {
+                        fxs,
+                        gxs,
+                        mfxs,
+                        mgxs,
+                    };
+                    let checked = KeyedSumcheck::<B>::honest_prover_check_helper(&input);
+                    assert_eq!(checked.is_ok(), holds, "{col_rows} x {weight_rows}");
+                }
+                let proved = keyed_e2e(&fs, gs);
+                if holds {
+                    proved.unwrap();
+                } else {
+                    assert_false_statement_rejected(proved);
+                }
             }
         }
-    }
+    });
 }
 
 // ─── Parity ──────────────────────────────────────────────────────────────
@@ -2656,187 +2791,204 @@ fn honest_check_agrees_with_protocol_on_mixed_col_mult_nv() {
 /// either compiles anything, both hold the same ids, claims and transcript.
 #[test]
 fn both_sides_are_in_step_after_reducing_their_lookup_claims() {
-    let table_a = fv(0..16);
-    let table_b = fv((0..8).map(|i| i * 9));
-    let subs_a: Vec<Vec<F>> = vec![
-        in_table(4, 16, 1),
-        in_table(6, 16, 2),
-        in_table(4, 16, 3),
-        in_table(2, 16, 4),
-        in_table(4, 16, 5),
-    ];
-    let subs_b: Vec<Vec<F>> = vec![
-        fv((0..8).map(|i| ((i * 3) % 8) * 9)),
-        fv((0..8).map(|i| ((i * 5) % 8) * 9)),
-    ];
-    let data_c = fv((0..32).map(|i| if i < 25 { i } else { 900 + i }));
-    let act_c = fv((0..32).map(|i| u64::from(i < 25)));
-    let summed = fv((0..16).map(|i| i * i));
-    let perm_f = fv(0..32);
-    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
-    let weighted_f = fv((0..8).map(|i| i + 100));
-    let weights = fv(1..9);
+    under_each_protocol(|protocol| {
+        let table_a = fv(0..16);
+        let table_b = fv((0..8).map(|i| i * 9));
+        let subs_a: Vec<Vec<F>> = vec![
+            in_table(4, 16, 1),
+            in_table(6, 16, 2),
+            in_table(4, 16, 3),
+            in_table(2, 16, 4),
+            in_table(4, 16, 5),
+        ];
+        let subs_b: Vec<Vec<F>> = vec![
+            fv((0..8).map(|i| ((i * 3) % 8) * 9)),
+            fv((0..8).map(|i| ((i * 5) % 8) * 9)),
+        ];
+        let data_c = fv((0..32).map(|i| if i < 25 { i } else { 900 + i }));
+        let act_c = fv((0..32).map(|i| u64::from(i < 25)));
+        let summed = fv((0..16).map(|i| i * i));
+        let perm_f = fv(0..32);
+        let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+        let weighted_f = fv((0..8).map(|i| i + 100));
+        let weights = fv(1..9);
 
-    let (mut prover, mut verifier) = setup();
-    let mut committed = Vec::new();
-    let mut commit_all = |prover: &mut ArgProver<B>, cols: &[&Vec<F>]| -> Vec<TrackedPoly<B>> {
-        let handles: Vec<_> = cols.iter().map(|col| commit(prover, col)).collect();
-        committed.extend(handles.iter().map(TrackedPoly::id));
-        handles
-    };
-    let cols: Vec<&Vec<F>> = [&table_a, &table_b, &data_c, &act_c, &summed]
-        .into_iter()
-        .chain(&subs_a)
-        .chain(&subs_b)
-        .chain([&perm_f, &perm_g, &weighted_f, &weights])
-        .collect();
-    let handles = commit_all(&mut prover, &cols);
-    let (table_a_p, table_b_p, data_p, act_p, summed_p) = (
-        &handles[0],
-        &handles[1],
-        &handles[2],
-        &handles[3],
-        &handles[4],
-    );
-    let (subs_a_p, subs_b_p, rest_p) = (&handles[5..10], &handles[10..12], &handles[12..]);
-    let table_c_p = prover.track_mat_mv_poly(mle(&fv(0..32)));
-    let sub_c_p = data_p * act_p;
+        let (mut prover, mut verifier) = setup();
+        let mut committed = Vec::new();
+        let mut commit_all = |prover: &mut ArgProver<B>, cols: &[&Vec<F>]| -> Vec<TrackedPoly<B>> {
+            let handles: Vec<_> = cols.iter().map(|col| commit(prover, col)).collect();
+            committed.extend(handles.iter().map(TrackedPoly::id));
+            handles
+        };
+        let cols: Vec<&Vec<F>> = [&table_a, &table_b, &data_c, &act_c, &summed]
+            .into_iter()
+            .chain(&subs_a)
+            .chain(&subs_b)
+            .chain([&perm_f, &perm_g, &weighted_f, &weights])
+            .collect();
+        let handles = commit_all(&mut prover, &cols);
+        let (table_a_p, table_b_p, data_p, act_p, summed_p) = (
+            &handles[0],
+            &handles[1],
+            &handles[2],
+            &handles[3],
+            &handles[4],
+        );
+        let (subs_a_p, subs_b_p, rest_p) = (&handles[5..10], &handles[10..12], &handles[12..]);
+        let table_c_p = prover.track_mat_mv_poly(mle(&fv(0..32)));
+        let sub_c_p = data_p * act_p;
 
-    prover
-        .add_mv_sumcheck_claim(summed_p.id(), sum(&summed))
-        .unwrap();
-    for sub in &subs_a_p[..3] {
         prover
-            .add_mv_lookup_claim(table_a_p.id(), sub.id())
+            .add_mv_sumcheck_claim(summed_p.id(), sum(&summed))
             .unwrap();
-    }
-    KeyedSumcheck::<B>::prove(
-        &mut prover,
-        KeyedSumcheckProverInput {
-            fxs: vec![rest_p[0].clone()],
-            gxs: vec![rest_p[1].clone()],
-            mfxs: vec![None],
-            mgxs: vec![None],
-        },
-    )
-    .unwrap();
-    let after_first_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
-    for sub in subs_b_p {
+        for sub in &subs_a_p[..3] {
+            prover
+                .add_mv_lookup_claim(table_a_p.id(), sub.id())
+                .unwrap();
+        }
+        KeyedSumcheck::<B>::prove(
+            &mut prover,
+            KeyedSumcheckProverInput {
+                fxs: vec![rest_p[0].clone()],
+                gxs: vec![rest_p[1].clone()],
+                mfxs: vec![None],
+                mgxs: vec![None],
+            },
+        )
+        .unwrap();
+        let after_first_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        for sub in subs_b_p {
+            prover
+                .add_mv_lookup_claim(table_b_p.id(), sub.id())
+                .unwrap();
+        }
         prover
-            .add_mv_lookup_claim(table_b_p.id(), sub.id())
+            .add_mv_lookup_claim(table_c_p.id(), sub_c_p.id())
             .unwrap();
-    }
-    prover
-        .add_mv_lookup_claim(table_c_p.id(), sub_c_p.id())
+        for sub in &subs_a_p[3..] {
+            prover
+                .add_mv_lookup_claim(table_a_p.id(), sub.id())
+                .unwrap();
+        }
+        KeyedSumcheck::<B>::prove(
+            &mut prover,
+            KeyedSumcheckProverInput {
+                fxs: vec![rest_p[2].clone()],
+                gxs: vec![rest_p[2].clone()],
+                mfxs: vec![Some(rest_p[3].clone())],
+                mgxs: vec![Some(rest_p[3].clone())],
+            },
+        )
         .unwrap();
-    for sub in &subs_a_p[3..] {
-        prover
-            .add_mv_lookup_claim(table_a_p.id(), sub.id())
-            .unwrap();
-    }
-    KeyedSumcheck::<B>::prove(
-        &mut prover,
-        KeyedSumcheckProverInput {
-            fxs: vec![rest_p[2].clone()],
-            gxs: vec![rest_p[2].clone()],
-            mfxs: vec![Some(rest_p[3].clone())],
-            mgxs: vec![Some(rest_p[3].clone())],
-        },
-    )
-    .unwrap();
-    let after_second_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        let after_second_piop = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
 
-    // The proof comes from a copy, so that the prover itself stops right
-    // after its reduction.
-    let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
-        .build_proof()
+        // The proof comes from a copy, so that the prover itself stops right
+        // after its reduction.
+        let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
+            .build_proof()
+            .unwrap();
+        prover.reduce_lookup_claims().unwrap();
+        match protocol {
+            // Three tables: one batch, with the sub columns of each in
+            // stacks. The first table has a pair and a single of 16 rows, a
+            // column of 64 and one of 4; the second a pair of 8 rows; the
+            // third one column.
+            LookupProtocol::LogUpGkr => {
+                assert_eq!(proof.logup_gkr_subproofs.len(), 3);
+                let batch = [
+                    (5, true),
+                    (4, true),
+                    (6, true),
+                    (2, true),
+                    (4, false),
+                    (4, true),
+                    (3, false),
+                    (5, true),
+                    (5, false),
+                ];
+                assert_eq!(
+                    Some(proof.logup_gkr_subproofs[2].messages.len()),
+                    proof_len(&gkr_shape(&batch))
+                );
+            }
+            // A sum per helper and none shared between relations: two for
+            // each keyed sum proved on the spot, then one for each sub
+            // column of the first table, no two neighbours of which have
+            // one size, and for the table; one for the two sub columns of
+            // the second table together and for their table; one for the
+            // third table's sub column and for the table.
+            LookupProtocol::LogUp => {
+                assert!(proof.logup_gkr_subproofs.is_empty());
+                assert_eq!(proof.lookup_messages.sums().len(), 2 + 2 + 6 + 2 + 2);
+            }
+        }
+
+        verifier.set_proof_ref(&proof);
+        let oracles: Vec<TrackedOracle<B>> = committed
+            .iter()
+            .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
+            .collect();
+        let (table_a_v, table_b_v, data_v, act_v, summed_v) = (
+            &oracles[0],
+            &oracles[1],
+            &oracles[2],
+            &oracles[3],
+            &oracles[4],
+        );
+        let (subs_a_v, subs_b_v, rest_v) = (&oracles[5..10], &oracles[10..12], &oracles[12..]);
+        let table_c = mle(&fv(0..32));
+        let table_c_v = verifier
+            .track_base_oracle(Oracle::new_multivariate(5, move |point: Vec<F>| {
+                Ok(table_c.evaluate(&point[..5].to_vec()))
+            }));
+        let sub_c_v = data_v * act_v;
+
+        verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
+        for sub in &subs_a_v[..3] {
+            verifier
+                .add_mv_lookup_claim(table_a_v.id(), sub.id())
+                .unwrap();
+        }
+        KeyedSumcheck::<B>::verify(
+            &mut verifier,
+            KeyedSumcheckVerifierInput {
+                fxs: vec![rest_v[0].clone()],
+                gxs: vec![rest_v[1].clone()],
+                mfxs: vec![None],
+                mgxs: vec![None],
+            },
+        )
         .unwrap();
-    prover.reduce_lookup_claims().unwrap();
-    // Three tables: one batch, with the sub columns of each in stacks.
-    // The first table has a pair and a single of 16 rows, a column of 64
-    // and one of 4; the second a pair of 8 rows; the third one column.
-    assert_eq!(proof.logup_gkr_subproofs.len(), 3);
-    let batch = [
-        (5, true),
-        (4, true),
-        (6, true),
-        (2, true),
-        (4, false),
-        (4, true),
-        (3, false),
-        (5, true),
-        (5, false),
-    ];
-    assert_eq!(
-        Some(proof.logup_gkr_subproofs[2].messages.len()),
-        proof_len(&gkr_shape(&batch))
-    );
-
-    verifier.set_proof_ref(&proof);
-    let oracles: Vec<TrackedOracle<B>> = committed
-        .iter()
-        .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
-        .collect();
-    let (table_a_v, table_b_v, data_v, act_v, summed_v) = (
-        &oracles[0],
-        &oracles[1],
-        &oracles[2],
-        &oracles[3],
-        &oracles[4],
-    );
-    let (subs_a_v, subs_b_v, rest_v) = (&oracles[5..10], &oracles[10..12], &oracles[12..]);
-    let table_c = mle(&fv(0..32));
-    let table_c_v = verifier
-        .track_base_oracle(Oracle::new_multivariate(5, move |point: Vec<F>| {
-            Ok(table_c.evaluate(&point[..5].to_vec()))
-        }));
-    let sub_c_v = data_v * act_v;
-
-    verifier.add_mv_sumcheck_claim(summed_v.id(), sum(&summed));
-    for sub in &subs_a_v[..3] {
+        assert_in_sync(&after_first_piop, &verifier);
+        for sub in subs_b_v {
+            verifier
+                .add_mv_lookup_claim(table_b_v.id(), sub.id())
+                .unwrap();
+        }
         verifier
-            .add_mv_lookup_claim(table_a_v.id(), sub.id())
+            .add_mv_lookup_claim(table_c_v.id(), sub_c_v.id())
             .unwrap();
-    }
-    KeyedSumcheck::<B>::verify(
-        &mut verifier,
-        KeyedSumcheckVerifierInput {
-            fxs: vec![rest_v[0].clone()],
-            gxs: vec![rest_v[1].clone()],
-            mfxs: vec![None],
-            mgxs: vec![None],
-        },
-    )
-    .unwrap();
-    assert_in_sync(&after_first_piop, &verifier);
-    for sub in subs_b_v {
-        verifier
-            .add_mv_lookup_claim(table_b_v.id(), sub.id())
-            .unwrap();
-    }
-    verifier
-        .add_mv_lookup_claim(table_c_v.id(), sub_c_v.id())
+        for sub in &subs_a_v[3..] {
+            verifier
+                .add_mv_lookup_claim(table_a_v.id(), sub.id())
+                .unwrap();
+        }
+        KeyedSumcheck::<B>::verify(
+            &mut verifier,
+            KeyedSumcheckVerifierInput {
+                fxs: vec![rest_v[2].clone()],
+                gxs: vec![rest_v[2].clone()],
+                mfxs: vec![Some(rest_v[3].clone())],
+                mgxs: vec![Some(rest_v[3].clone())],
+            },
+        )
         .unwrap();
-    for sub in &subs_a_v[3..] {
-        verifier
-            .add_mv_lookup_claim(table_a_v.id(), sub.id())
-            .unwrap();
-    }
-    KeyedSumcheck::<B>::verify(
-        &mut verifier,
-        KeyedSumcheckVerifierInput {
-            fxs: vec![rest_v[2].clone()],
-            gxs: vec![rest_v[2].clone()],
-            mfxs: vec![Some(rest_v[3].clone())],
-            mgxs: vec![Some(rest_v[3].clone())],
-        },
-    )
-    .unwrap();
-    assert_in_sync(&after_second_piop, &verifier);
+        assert_in_sync(&after_second_piop, &verifier);
 
-    verifier.reduce_lookup_claims().unwrap();
-    assert_in_sync(&prover, &verifier);
-    verifier.verify().unwrap();
+        verifier.reduce_lookup_claims().unwrap();
+        assert_in_sync(&prover, &verifier);
+        verifier.verify().unwrap();
+    });
 }
 
 /// Keyed sums claimed for later, between lookup claims. Claiming them moves
@@ -2845,104 +2997,126 @@ fn both_sides_are_in_step_after_reducing_their_lookup_claims() {
 /// claims and transcript.
 #[test]
 fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
-    let table = fv(0..16);
-    let subs = [in_table(4, 16, 1), in_table(6, 16, 2)];
-    let perm_f = fv(0..32);
-    let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
-    let keys = fv((0..8).map(|i| i + 100));
-    let weights = fv(1..9);
+    under_each_protocol(|protocol| {
+        let table = fv(0..16);
+        let subs = [in_table(4, 16, 1), in_table(6, 16, 2)];
+        let perm_f = fv(0..32);
+        let perm_g = fv((0..32).map(|i| (i * 13 + 5) % 32));
+        let keys = fv((0..8).map(|i| i + 100));
+        let weights = fv(1..9);
 
-    let (mut prover, mut verifier) = setup();
-    let cols = [
-        &table, &subs[0], &subs[1], &perm_f, &perm_g, &keys, &weights,
-    ];
-    let handles: Vec<TrackedPoly<B>> = cols.iter().map(|col| commit(&mut prover, col)).collect();
-    let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
-    let permutation = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
-        fxs: vec![h[3].clone()],
-        gxs: vec![h[4].clone()],
-        mfxs: vec![None],
-        mgxs: vec![None],
-    };
-    let weighted = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
-        fxs: vec![h[5].clone()],
-        gxs: vec![h[5].clone()],
-        mfxs: vec![Some(h[6].clone())],
-        mgxs: vec![Some(h[6].clone())],
-    };
-
-    let before_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
-    prover
-        .add_mv_keyed_sum_claim(permutation(&handles))
-        .unwrap();
-    prover.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
-    prover.add_mv_keyed_sum_claim(weighted(&handles)).unwrap();
-    prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
-    let after_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
-
-    let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
-        .build_proof()
-        .unwrap();
-    prover.reduce_lookup_claims().unwrap();
-    // One batch: the two subs and their table, then the permutation, then
-    // the weighted keys, with numerators of their own where a multiplicity
-    // is named.
-    let shape = gkr_shape(&[
-        (4, true),
-        (6, true),
-        (4, false),
-        (5, true),
-        (5, true),
-        (3, false),
-        (3, false),
-    ]);
-    assert_eq!(shape.len(), 3 + 2 + 2);
-    assert_one_run(&proof, &shape);
-    // The subproof opens with the first layer of every instance in instance
-    // order, four values each at these sizes, and a first layer gives its
-    // instance's root. Each relation balances on the roots at its own
-    // places and on no others.
-    let roots: Vec<[F; 2]> = proof.logup_gkr_subproofs[0].messages[..4 * shape.len()]
-        .chunks(4)
-        .map(|mask| [mask[0] * mask[3] + mask[1] * mask[2], mask[2] * mask[3]])
-        .collect();
-    let total = |roots: &[[F; 2]]| roots.iter().map(|[p, q]| *p / q).sum::<F>();
-    assert_eq!(total(&roots[..2]), total(&roots[2..3]));
-    assert_eq!(total(&roots[3..4]), total(&roots[4..5]));
-    assert_eq!(total(&roots[5..6]), total(&roots[6..]));
-    assert_ne!(total(&roots[..1]), total(&roots[2..3]));
-    assert_ne!(total(&roots[2..3]), total(&roots[3..4]));
-    assert_ne!(total(&roots[4..5]), total(&roots[5..6]));
-
-    verifier.set_proof_ref(&proof);
-    let oracles: Vec<TrackedOracle<B>> = ids
-        .iter()
-        .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
-        .collect();
-    assert_in_sync(&before_claims, &verifier);
-    verifier
-        .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
-            fxs: vec![oracles[3].clone()],
-            gxs: vec![oracles[4].clone()],
+        let (mut prover, mut verifier) = setup();
+        let cols = [
+            &table, &subs[0], &subs[1], &perm_f, &perm_g, &keys, &weights,
+        ];
+        let handles: Vec<TrackedPoly<B>> =
+            cols.iter().map(|col| commit(&mut prover, col)).collect();
+        let ids: Vec<TrackerID> = handles.iter().map(TrackedPoly::id).collect();
+        let permutation = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
+            fxs: vec![h[3].clone()],
+            gxs: vec![h[4].clone()],
             mfxs: vec![None],
             mgxs: vec![None],
-        })
-        .unwrap();
-    verifier.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
-    verifier
-        .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
-            fxs: vec![oracles[5].clone()],
-            gxs: vec![oracles[5].clone()],
-            mfxs: vec![Some(oracles[6].clone())],
-            mgxs: vec![Some(oracles[6].clone())],
-        })
-        .unwrap();
-    verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
-    assert_in_sync(&after_claims, &verifier);
+        };
+        let weighted = |h: &[TrackedPoly<B>]| KeyedSumcheckProverInput {
+            fxs: vec![h[5].clone()],
+            gxs: vec![h[5].clone()],
+            mfxs: vec![Some(h[6].clone())],
+            mgxs: vec![Some(h[6].clone())],
+        };
 
-    verifier.reduce_lookup_claims().unwrap();
-    assert_in_sync(&prover, &verifier);
-    verifier.verify().unwrap();
+        let before_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+        prover
+            .add_mv_keyed_sum_claim(permutation(&handles))
+            .unwrap();
+        prover.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
+        prover.add_mv_keyed_sum_claim(weighted(&handles)).unwrap();
+        prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+        let after_claims = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+
+        let proof = ArgProver::new_from_tracker(prover.tracker().borrow().clone())
+            .build_proof()
+            .unwrap();
+        prover.reduce_lookup_claims().unwrap();
+        match protocol {
+            LookupProtocol::LogUpGkr => {
+                // One batch: the two subs and their table, then the
+                // permutation, then the weighted keys, with numerators of
+                // their own where a multiplicity is named.
+                let shape = gkr_shape(&[
+                    (4, true),
+                    (6, true),
+                    (4, false),
+                    (5, true),
+                    (5, true),
+                    (3, false),
+                    (3, false),
+                ]);
+                assert_eq!(shape.len(), 3 + 2 + 2);
+                assert_one_run(&proof, &shape);
+                // The subproof opens with the first layer of every instance
+                // in instance order, four values each at these sizes, and a
+                // first layer gives its instance's root. Each relation
+                // balances on the roots at its own places and on no others.
+                let roots: Vec<[F; 2]> = proof.logup_gkr_subproofs[0].messages[..4 * shape.len()]
+                    .chunks(4)
+                    .map(|mask| [mask[0] * mask[3] + mask[1] * mask[2], mask[2] * mask[3]])
+                    .collect();
+                let total = |roots: &[[F; 2]]| roots.iter().map(|[p, q]| *p / q).sum::<F>();
+                assert_eq!(total(&roots[..2]), total(&roots[2..3]));
+                assert_eq!(total(&roots[3..4]), total(&roots[4..5]));
+                assert_eq!(total(&roots[5..6]), total(&roots[6..]));
+                assert_ne!(total(&roots[..1]), total(&roots[2..3]));
+                assert_ne!(total(&roots[2..3]), total(&roots[3..4]));
+                assert_ne!(total(&roots[4..5]), total(&roots[5..6]));
+            }
+            // The same relations in the same order, a sum per column: the
+            // two sub columns, of different sizes, and their table, the
+            // two sides of the permutation, the two of the weighted keys.
+            // Each relation balances on its own sums and on no others.
+            LookupProtocol::LogUp => {
+                assert!(proof.logup_gkr_subproofs.is_empty());
+                let sums = proof.lookup_messages.sums();
+                assert_eq!(sums.len(), 3 + 2 + 2);
+                assert_eq!(sums[0] + sums[1], sums[2]);
+                assert_eq!(sums[3], sums[4]);
+                assert_eq!(sums[5], sums[6]);
+                assert_ne!(sums[0], sums[2]);
+                assert_ne!(sums[2], sums[3]);
+                assert_ne!(sums[4], sums[5]);
+            }
+        }
+
+        verifier.set_proof_ref(&proof);
+        let oracles: Vec<TrackedOracle<B>> = ids
+            .iter()
+            .map(|id| verifier.track_mv_com_by_id(*id).unwrap())
+            .collect();
+        assert_in_sync(&before_claims, &verifier);
+        verifier
+            .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+                fxs: vec![oracles[3].clone()],
+                gxs: vec![oracles[4].clone()],
+                mfxs: vec![None],
+                mgxs: vec![None],
+            })
+            .unwrap();
+        verifier.add_mv_lookup_claim(ids[0], ids[1]).unwrap();
+        verifier
+            .add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+                fxs: vec![oracles[5].clone()],
+                gxs: vec![oracles[5].clone()],
+                mfxs: vec![Some(oracles[6].clone())],
+                mgxs: vec![Some(oracles[6].clone())],
+            })
+            .unwrap();
+        verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+        assert_in_sync(&after_claims, &verifier);
+
+        verifier.reduce_lookup_claims().unwrap();
+        assert_in_sync(&prover, &verifier);
+        verifier.verify().unwrap();
+    });
 }
 
 // ─── Fast paths of the prover ────────────────────────────────────────────
@@ -3134,6 +3308,210 @@ fn proof_by_the_fast_paths_is_the_proof_by_the_slow_ones() {
     verifier.verify().unwrap();
 }
 
+// ─── LogUp: the sums and the helpers ─────────────────────────────────────
+
+/// A lookup of three sub columns of different sizes, so that each has a
+/// helper and a sum of its own, sent in this order before the table's.
+fn three_sub_lookup(table: &[F], subs: &[Vec<F>; 3]) -> Session {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    lookup_session(table, subs, subs)
+}
+
+/// The sums a LogUp prover sends are in the transcript before anything
+/// further is drawn, and the sumcheck is about those. A prover that adds to
+/// the sum of one column what it takes off another's, or adds the same to
+/// one sum on each side, has two sides that still balance: the verifier's
+/// comparison passes, and it is the sumcheck of the sums that fails. Were
+/// the sums read from a place the transcript does not bind, the prover
+/// could choose such a pair after seeing how the claims are batched.
+#[test]
+fn logup_sums_that_make_up_for_each_other_are_rejected() {
+    let table = fv(0..16);
+    let subs = [in_table(3, 16, 1), in_table(4, 16, 2), in_table(5, 16, 3)];
+    let (d, zero) = (F::from(5u64), F::zero());
+
+    let mut honest = three_sub_lookup(&table, &subs);
+    honest.prove_shifting_sums(&[]).unwrap();
+    let proof = honest.prover.build_proof().unwrap();
+    assert_eq!(proof.lookup_messages.sums().len(), 4);
+    honest.verify(&proof).unwrap();
+
+    for shifts in [[d, -d, zero, zero], [zero, d, zero, d], [-d, -d, d, -d]] {
+        let session = three_sub_lookup(&table, &subs);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_shifting_sums(&shifts));
+    }
+
+    // A sum that is off with nothing to make up for it does not get past
+    // the comparison of the two sides.
+    if !cfg!(feature = "honest-prover") {
+        let mut session = three_sub_lookup(&table, &subs);
+        session.prove_shifting_sums(&[zero, zero, d]).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert!(matches!(
+            session.verify(&proof),
+            Err(Rejected::Reduction(SnarkError::VerifierError(_)))
+        ));
+    }
+}
+
+/// A false lookup, a value outside the table, whose prover sends for the
+/// table the sum that the sub columns come to instead of the table's own.
+/// The two sides balance and every helper is the right one; the table's
+/// sum is not the sum of its helper, which the sumcheck finds.
+#[test]
+fn logup_sum_that_balances_a_false_lookup_is_rejected() {
+    let table = fv(0..16);
+    let mut subs = [in_table(3, 16, 1), in_table(4, 16, 2), in_table(5, 16, 3)];
+    subs[1][5] = F::from(100u64);
+    let counted = {
+        let mut counted = subs.clone();
+        counted[1][5] = F::zero();
+        counted
+    };
+    let session = || {
+        PROTOCOL.set(LookupProtocol::LogUp);
+        lookup_session(&table, &counted, &subs)
+    };
+
+    // The honest sums of the false statement, which do not balance. The
+    // prover's messages up to the last sum do not depend on that sum, so a
+    // second run has the same `gamma` and the same sums before it.
+    let mut honest = session();
+    honest.prove_shifting_sums(&[]).unwrap();
+    let proof = honest.prover.build_proof().unwrap();
+    let sums = proof.lookup_messages.sums().to_vec();
+    let gap = sums[0] + sums[1] + sums[2] - sums[3];
+    assert!(!gap.is_zero());
+    assert!(matches!(
+        honest.verify(&proof),
+        Err(Rejected::Reduction(SnarkError::VerifierError(_)))
+    ));
+
+    let zero = F::zero();
+    assert_stopped_by_the_input_claims(session(), |session| {
+        session.prove_shifting_sums(&[zero, zero, zero, gap])
+    });
+}
+
+/// The size of a helper is the prover's to choose with its commitment, and
+/// the term's sum runs over the helper's hypercube. A column of 8 rows is
+/// not a permutation of itself written twice, but its helper written twice
+/// is a helper of the column on 16 rows, every claim about which is true,
+/// and sums to twice as much. The verifier takes a helper of its column's
+/// size and no other.
+#[test]
+fn logup_helper_of_another_size_than_its_column_is_refused() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let column = fv((0..8).map(|i| 3 * i + 1));
+    let twice = [column.clone(), column.clone()].concat();
+    let relation = (vec![(0, None)], vec![(1, None)]);
+    let mut session = Session::new(&[column.clone(), twice], &[], &[relation]);
+    let ids = session.ids.clone();
+    {
+        // The reduction by hand: the prover's own schedule would refuse
+        // the helper as the verifier's does.
+        let tracker = session.prover.tracker();
+        let mut tracker = tracker.borrow_mut();
+        let tracker = &mut *tracker;
+        let gamma = tracker.get_and_append_challenge(b"gamma").unwrap();
+        let inverses: Vec<F> = column
+            .iter()
+            .map(|value| (*value - gamma).inverse().unwrap())
+            .collect();
+        let wide = [inverses.clone(), inverses].concat();
+        let helper = tracker
+            .track_and_commit_mat_mv_p(&mle(&wide), false)
+            .unwrap()
+            .left()
+            .unwrap();
+        let wide_sum = sum(&wide);
+        tracker.send_logup_sum(wide_sum);
+        TrackerCore::append_field_element(tracker, b"keyed term sum", &wide_sum).unwrap();
+        tracker.push_raw_sumcheck_claim(helper, wide_sum).unwrap();
+        let product = tracker.mul_polys(ids[0], helper);
+        let shifted = tracker.mul_scalar(helper, gamma);
+        let rest = tracker.sub_polys(product, shifted);
+        let rest = tracker.add_scalar(rest, -F::one());
+        tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
+
+        let mut honest = logup::ProvingParty {
+            evals: ColumnEvals::new(),
+        };
+        let other_side = logup::Term::Single {
+            col: (Either::Left(ids[1]), 4),
+            mult: None,
+        };
+        let other_sum = logup::reduce_term(tracker, &mut honest, &other_side, gamma).unwrap();
+        // The two sides balance.
+        assert_eq!(wide_sum, other_sum);
+    }
+    let proof = session.prover.build_proof().unwrap();
+    assert!(matches!(
+        session.verify(&proof),
+        Err(Rejected::Reduction(SnarkError::VerifierError(_)))
+    ));
+}
+
+/// Which columns share a helper: two neighbours of one size on one side,
+/// neither with a multiplicity, each column in one pair at most. The proof
+/// carries a sum per helper.
+#[test]
+fn logup_pairs_adjacent_unit_columns_of_one_size() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let table = fv(0..16);
+    let small = |seed| in_table(3, 16, seed);
+    let weights = fv(1..9);
+    // 2..=6 are sub columns of 8 rows, 7 one of 16, 8 weights.
+    let subs = [small(1), small(2), small(3), small(4), small(5)];
+    let wide = in_table(4, 16, 6);
+    let entries: Vec<(&[F], Option<&[F]>)> = subs[..4]
+        .iter()
+        .map(|sub| (&sub[..], None))
+        .chain([(&wide[..], None), (&subs[4][..], Some(&weights[..]))])
+        .collect();
+    let mut columns = vec![table.clone(), tally(&table, &entries)];
+    columns.extend_from_slice(&subs);
+    columns.extend([wide.clone(), weights.clone()]);
+    // Three neighbours of one size, a wider column, a fourth of the first
+    // size, and one of that size with weights.
+    let f = vec![
+        (2, None),
+        (3, None),
+        (4, None),
+        (7, None),
+        (5, None),
+        (6, Some(8)),
+    ];
+    let session = Session::new(&columns, &[], &[(f, vec![(0, Some(1))])]);
+    let ids = &session.ids;
+    let plan = logup::plan_relations(&*session.prover.tracker().borrow(), &session.relations);
+    let single = |col: usize, nv, mult: Option<(usize, usize)>| logup::Term::Single {
+        col: (Either::Left(ids[col]), nv),
+        mult: mult.map(|(mult, nv)| (Either::Left(ids[mult]), nv)),
+    };
+    assert_eq!(
+        plan.unwrap(),
+        [[
+            vec![
+                logup::Term::Pair {
+                    cols: [ids[2], ids[3]],
+                    nv: 3
+                },
+                single(4, 3, None),
+                single(7, 4, None),
+                single(5, 3, None),
+                single(6, 3, Some((8, 3))),
+            ],
+            vec![single(0, 4, Some((1, 4)))],
+        ]]
+    );
+    let mut session = session;
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    assert_eq!(proof.lookup_messages.sums().len(), 6);
+    session.verify(&proof).unwrap();
+}
+
 // ─── The proof before the protocol was a choice ──────────────────────────
 
 /// What `prover` proves about [`fast_path_columns`] when its statement
@@ -3199,10 +3577,7 @@ fn logup_gkr_proof_is_the_one_from_before_the_protocol_was_a_choice() {
         lookup_protocol: LookupProtocol::LogUpGkr,
         ..SharedArgConfig::default()
     };
-    let (pk, _) = KeyGenerator::<B>::new()
-        .with_num_mv_vars(SRS_NV)
-        .gen_keys()
-        .unwrap();
+    let (pk, _) = keys();
     let unbound = ProverTracker::new_from_pk_unbound(pk.clone(), config.clone());
     let bytes = all_routes_proof(ArgProver::new_from_tracker(unbound))
         .to_bytes()
@@ -3325,40 +3700,42 @@ fn stacked_instance_lays_its_entries_out_by_row_then_entry() {
 /// prover runs the GKR on what the table counts.
 #[test]
 fn gkr_on_fake_leaves_of_a_stacked_weighted_instance_is_rejected() {
-    let table = fv(0..8);
-    // Columns 2 and 4 with the weights 3 and 5.
-    let entries = [
-        in_table(3, 8, 1),
-        fv(1..9),
-        in_table(3, 8, 2),
-        fv((0..8).map(|i| 3 * i + 2)),
-    ];
-    let counts = tally(
-        &table,
-        &[
-            (&entries[0], Some(&entries[1])),
-            (&entries[2], Some(&entries[3])),
-        ],
-    );
-    let session = |entries: &[Vec<F>; 4]| {
-        let mut columns = vec![table.clone(), counts.clone()];
-        columns.extend_from_slice(entries);
-        let f = vec![(2, Some(3)), (4, Some(5))];
-        Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
-    };
-    let honest = session(&entries);
-    let stacked = &honest.plan()[0];
-    assert_eq!((stacked.claim_nv, stacked.stack_log), (3, 1));
-    assert!(stacked.mults.is_some());
-    honest.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        // Columns 2 and 4 with the weights 3 and 5.
+        let entries = [
+            in_table(3, 8, 1),
+            fv(1..9),
+            in_table(3, 8, 2),
+            fv((0..8).map(|i| 3 * i + 2)),
+        ];
+        let counts = tally(
+            &table,
+            &[
+                (&entries[0], Some(&entries[1])),
+                (&entries[2], Some(&entries[3])),
+            ],
+        );
+        let session = |entries: &[Vec<F>; 4]| {
+            let mut columns = vec![table.clone(), counts.clone()];
+            columns.extend_from_slice(entries);
+            let f = vec![(2, Some(3)), (4, Some(5))];
+            Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
+        };
+        let honest = session(&entries);
+        let stacked = &honest.plan()[0];
+        assert_eq!((stacked.claim_nv, stacked.stack_log), (3, 1));
+        assert!(stacked.mults.is_some());
+        honest.prove_and_verify().unwrap();
 
-    for fake_at in 0..4 {
-        let mut committed = entries.clone();
-        committed[fake_at][5] += F::from(8u64);
-        let cheater = session(&committed);
-        let evals = BTreeMap::from([(cheater.ids[2 + fake_at], entries[fake_at].clone())]);
-        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
-    }
+        for fake_at in 0..4 {
+            let mut committed = entries.clone();
+            committed[fake_at][5] += F::from(8u64);
+            let cheater = session(&committed);
+            let evals = BTreeMap::from([(cheater.ids[2 + fake_at], entries[fake_at].clone())]);
+            assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        }
+    });
 }
 
 /// The table side is claimed like any other: the committed table lacks a
@@ -3366,16 +3743,18 @@ fn gkr_on_fake_leaves_of_a_stacked_weighted_instance_is_rejected() {
 /// it, with the committed multiplicities counting that one.
 #[test]
 fn gkr_on_a_fake_table_with_true_column_claim_is_rejected() {
-    let table = fv(0..8);
-    let mut sub = in_table(3, 8, 1);
-    sub[4] = F::from(9u64);
-    let mut fake_table = table.clone();
-    fake_table[0] = F::from(9u64);
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let mut sub = in_table(3, 8, 1);
+        sub[4] = F::from(9u64);
+        let mut fake_table = table.clone();
+        fake_table[0] = F::from(9u64);
 
-    let columns = [table, tally(&fake_table, &[(&sub, None)]), sub];
-    let session = Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])]);
-    let evals = BTreeMap::from([(session.ids[0], fake_table)]);
-    assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+        let columns = [table, tally(&fake_table, &[(&sub, None)]), sub];
+        let session = Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])]);
+        let evals = BTreeMap::from([(session.ids[0], fake_table)]);
+        assert_stopped_by_the_input_claims(session, |session| session.prove_with(evals));
+    });
 }
 
 /// A unit-numerator instance without variables has its root denominator as
@@ -3383,19 +3762,21 @@ fn gkr_on_a_fake_table_with_true_column_claim_is_rejected() {
 /// runs on 7.
 #[test]
 fn tampered_root_of_an_nv0_unit_instance_is_rejected() {
-    let table = fv(0..8);
-    let session = |key: u64| {
-        let columns = [table.clone(), tally(&table, &[(&fv([7]), None)]), fv([key])];
-        Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])])
-    };
-    let honest = session(7);
-    assert_eq!(honest.plan()[0].n_vars(), 0);
-    assert!(honest.plan()[0].mults.is_none());
-    honest.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let session = |key: u64| {
+            let columns = [table.clone(), tally(&table, &[(&fv([7]), None)]), fv([key])];
+            Session::new(&columns, &[], &[(vec![(2, None)], vec![(0, Some(1))])])
+        };
+        let honest = session(7);
+        assert_eq!(honest.plan()[0].n_vars(), 0);
+        assert!(honest.plan()[0].mults.is_none());
+        honest.prove_and_verify().unwrap();
 
-    let cheater = session(6);
-    let evals = BTreeMap::from([(cheater.ids[2], fv([7]))]);
-    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        let cheater = session(6);
+        let evals = BTreeMap::from([(cheater.ids[2], fv([7]))]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    });
 }
 
 /// An entry with one constant operand still has a claim on the other one:
@@ -3404,46 +3785,48 @@ fn tampered_root_of_an_nv0_unit_instance_is_rejected() {
 /// the GKR on what the table counts.
 #[test]
 fn gkr_on_fake_leaves_beside_a_constant_operand_is_rejected() {
-    let table = fv(0..16);
-    let keys = in_table(3, 16, 1);
-    let weights = fv(1..9);
-    let counts = tally(
-        &table,
-        &[(&fv([7; 8]), Some(&weights)), (&keys, Some(&fv([4; 8])))],
-    );
-    let session = |keys: &[F], weights: &[F]| {
-        let columns = [
-            table.clone(),
-            counts.clone(),
-            keys.to_vec(),
-            weights.to_vec(),
-        ];
-        let mut session = Session::new(&columns, &[], &[]);
-        let constant = |v: u64| KeyedTerm::Constant {
-            value: F::from(v),
-            nv: 3,
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let keys = in_table(3, 16, 1);
+        let weights = fv(1..9);
+        let counts = tally(
+            &table,
+            &[(&fv([7; 8]), Some(&weights)), (&keys, Some(&fv([4; 8])))],
+        );
+        let session = |keys: &[F], weights: &[F]| {
+            let columns = [
+                table.clone(),
+                counts.clone(),
+                keys.to_vec(),
+                weights.to_vec(),
+            ];
+            let mut session = Session::new(&columns, &[], &[]);
+            let constant = |v: u64| KeyedTerm::Constant {
+                value: F::from(v),
+                nv: 3,
+            };
+            session.relations = vec![KeyedSumRelation {
+                fxs: vec![constant(7), KeyedTerm::Poly(session.ids[2])],
+                mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), Some(constant(4))],
+                gxs: vec![KeyedTerm::Poly(session.ids[0])],
+                mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+            }];
+            session
         };
-        session.relations = vec![KeyedSumRelation {
-            fxs: vec![constant(7), KeyedTerm::Poly(session.ids[2])],
-            mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), Some(constant(4))],
-            gxs: vec![KeyedTerm::Poly(session.ids[0])],
-            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
-        }];
-        session
-    };
-    session(&keys, &weights).prove_and_verify().unwrap();
+        session(&keys, &weights).prove_and_verify().unwrap();
 
-    let mut bad_weights = weights.clone();
-    bad_weights[2] += F::one();
-    let cheater = session(&keys, &bad_weights);
-    let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
-    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        let mut bad_weights = weights.clone();
+        bad_weights[2] += F::one();
+        let cheater = session(&keys, &bad_weights);
+        let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
 
-    let mut bad_keys = keys.clone();
-    bad_keys[2] = F::from(16u64);
-    let cheater = session(&bad_keys, &weights);
-    let evals = BTreeMap::from([(cheater.ids[2], keys.clone())]);
-    assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        let mut bad_keys = keys.clone();
+        bad_keys[2] = F::from(16u64);
+        let cheater = session(&bad_keys, &weights);
+        let evals = BTreeMap::from([(cheater.ids[2], keys.clone())]);
+        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+    });
 }
 
 /// An input claim is a sum over the hypercube the tracker holds for the
@@ -3651,37 +4034,39 @@ fn gammas_are_drawn_per_relation_in_order_after_every_multiplicity() {
 /// one among others does not move theirs.
 #[test]
 fn relation_without_entries_draws_no_gamma() {
-    let empty = || KeyedSumRelation::<F> {
-        fxs: Vec::new(),
-        mfxs: Vec::new(),
-        gxs: Vec::new(),
-        mgxs: Vec::new(),
-    };
-    let columns = [fv(0..8), fv((0..8).rev())];
-    let next_challenge = |session: &Session| {
-        let tracker = session.prover.tracker().borrow().clone();
-        let mut prover = ArgProver::new_from_tracker(tracker);
-        prover.get_and_append_challenge(b"probe").unwrap()
-    };
+    under_each_protocol(|_| {
+        let empty = || KeyedSumRelation::<F> {
+            fxs: Vec::new(),
+            mfxs: Vec::new(),
+            gxs: Vec::new(),
+            mgxs: Vec::new(),
+        };
+        let columns = [fv(0..8), fv((0..8).rev())];
+        let next_challenge = |session: &Session| {
+            let tracker = session.prover.tracker().borrow().clone();
+            let mut prover = ArgProver::new_from_tracker(tracker);
+            prover.get_and_append_challenge(b"probe").unwrap()
+        };
 
-    let mut session = Session::new(&columns, &[], &[]);
-    let untouched = next_challenge(&session);
-    session.relations = vec![empty(), empty()];
-    session.prove_with(ColumnEvals::new()).unwrap();
-    assert_eq!(next_challenge(&session), untouched);
+        let mut session = Session::new(&columns, &[], &[]);
+        let untouched = next_challenge(&session);
+        session.relations = vec![empty(), empty()];
+        session.prove_with(ColumnEvals::new()).unwrap();
+        assert_eq!(next_challenge(&session), untouched);
 
-    let permutation = (vec![(0, None)], vec![(1, None)]);
-    let both = [permutation.clone(), permutation];
-    let mut plain = Session::new(&columns, &[], &both);
-    let mut padded = Session::new(&columns, &[], &both);
-    padded.relations.insert(1, empty());
-    assert_eq!(padded.plan()[0].relations, [0, 2]);
-    plain.prove_with(ColumnEvals::new()).unwrap();
-    padded.prove_with(ColumnEvals::new()).unwrap();
-    assert_ne!(next_challenge(&plain), untouched);
-    assert_eq!(next_challenge(&padded), next_challenge(&plain));
-    let proof = padded.prover.build_proof().unwrap();
-    padded.verify(&proof).unwrap();
+        let permutation = (vec![(0, None)], vec![(1, None)]);
+        let both = [permutation.clone(), permutation];
+        let mut plain = Session::new(&columns, &[], &both);
+        let mut padded = Session::new(&columns, &[], &both);
+        padded.relations.insert(1, empty());
+        assert_eq!(padded.plan()[0].relations, [0, 2]);
+        plain.prove_with(ColumnEvals::new()).unwrap();
+        padded.prove_with(ColumnEvals::new()).unwrap();
+        assert_ne!(next_challenge(&plain), untouched);
+        assert_eq!(next_challenge(&padded), next_challenge(&plain));
+        let proof = padded.prover.build_proof().unwrap();
+        padded.verify(&proof).unwrap();
+    });
 }
 
 /// A relation with entries on one side only says that side sums to zero as
@@ -3690,34 +4075,36 @@ fn relation_without_entries_draws_no_gamma() {
 /// that cancel key by key do.
 #[test]
 fn relation_with_one_side_has_a_gamma_of_its_own() {
-    let minus = |v: u64| -F::from(v);
-    // 1/(1 - X) + 1/(-1 - X) is zero at X = 0 and nowhere else.
-    let columns = [vec![F::one(), minus(1)]];
-    for sides in [(vec![(0, None)], vec![]), (vec![], vec![(0, None)])] {
-        let session = Session::new(&columns, &[], &[sides]);
+    under_each_protocol(|_| {
+        let minus = |v: u64| -F::from(v);
+        // 1/(1 - X) + 1/(-1 - X) is zero at X = 0 and nowhere else.
+        let columns = [vec![F::one(), minus(1)]];
+        for sides in [(vec![(0, None)], vec![]), (vec![], vec![(0, None)])] {
+            let session = Session::new(&columns, &[], &[sides]);
+            assert_rejected_in_the_reduction(session.prove_and_verify());
+        }
+
+        // The same beside a relation that holds.
+        let columns = [vec![F::one(), minus(1)], fv(0..8), fv((0..8).rev())];
+        let relations = [
+            (vec![(1, None)], vec![(2, None)]),
+            (vec![(0, None)], vec![]),
+        ];
+        let session = Session::new(&columns, &[], &relations);
         assert_rejected_in_the_reduction(session.prove_and_verify());
-    }
 
-    // The same beside a relation that holds.
-    let columns = [vec![F::one(), minus(1)], fv(0..8), fv((0..8).rev())];
-    let relations = [
-        (vec![(1, None)], vec![(2, None)]),
-        (vec![(0, None)], vec![]),
-    ];
-    let session = Session::new(&columns, &[], &relations);
-    assert_rejected_in_the_reduction(session.prove_and_verify());
-
-    // Weights that cancel on every key: the one side is zero whatever
-    // `gamma` is.
-    let columns = [
-        fv([5, 5, 7, 7]),
-        vec![F::one(), minus(1), F::from(2u64), minus(2)],
-    ];
-    for sides in [(vec![(0, Some(1))], vec![]), (vec![], vec![(0, Some(1))])] {
-        Session::new(&columns, &[], &[sides])
-            .prove_and_verify()
-            .unwrap();
-    }
+        // Weights that cancel on every key: the one side is zero whatever
+        // `gamma` is.
+        let columns = [
+            fv([5, 5, 7, 7]),
+            vec![F::one(), minus(1), F::from(2u64), minus(2)],
+        ];
+        for sides in [(vec![(0, Some(1))], vec![]), (vec![], vec![(0, Some(1))])] {
+            Session::new(&columns, &[], &[sides])
+                .prove_and_verify()
+                .unwrap();
+        }
+    });
 }
 
 /// A stack counts towards the run budget with all its entries: four
@@ -3750,27 +4137,29 @@ fn gkr_run_budget_counts_a_stack_at_its_full_height() {
 /// one; each stack takes its own multiplicities, the single one included.
 #[test]
 fn every_stack_of_a_weighted_group_takes_its_own_multiplicities() {
-    let table = fv(0..16);
-    let fs: Vec<KeyedCol> = (0..3)
-        .map(|s| {
-            let weights = fv((0..8).map(|i| 10 * s + i + 1));
-            (in_table(3, 16, s), Some(weights))
-        })
-        .collect();
-    let g = table_side(&table, &fs);
-    let (plan, _) = keyed_e2e(&fs, &g).unwrap();
-    assert_eq!(
-        layout(&plan)[..2],
-        [
-            (Side::F, 3, 1, false, false, false),
-            (Side::F, 3, 0, false, false, false),
-        ]
-    );
-    for at in 0..3 {
-        let mut fs = fs.clone();
-        fs[at].1.as_mut().unwrap()[1] += F::one();
-        assert_false_statement_rejected(keyed_e2e(&fs, &g));
-    }
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let fs: Vec<KeyedCol> = (0..3)
+            .map(|s| {
+                let weights = fv((0..8).map(|i| 10 * s + i + 1));
+                (in_table(3, 16, s), Some(weights))
+            })
+            .collect();
+        let g = table_side(&table, &fs);
+        let (plan, _) = keyed_e2e(&fs, &g).unwrap();
+        assert_eq!(
+            layout(&plan)[..2],
+            [
+                (Side::F, 3, 1, false, false, false),
+                (Side::F, 3, 0, false, false, false),
+            ]
+        );
+        for at in 0..3 {
+            let mut fs = fs.clone();
+            fs[at].1.as_mut().unwrap()[1] += F::one();
+            assert_false_statement_rejected(keyed_e2e(&fs, &g));
+        }
+    });
 }
 
 /// A constant multiplicity of 1 is still a multiplicity: its term runs over
@@ -3778,41 +4167,45 @@ fn every_stack_of_a_weighted_group_takes_its_own_multiplicities() {
 /// keeps numerators of its own.
 #[test]
 fn constant_one_multiplicity_wider_than_its_column_is_a_values_instance() {
-    let table = fv(0..8);
-    let col = fv([1, 3, 3, 6]);
-    // Eight rows of weight 1 over a column of four: every row counts twice.
-    let counts = tally(&table, &[(&col, Some(&fv([1; 8])))]);
-    let columns = [table, counts, col];
-    let mut session = Session::new(&columns, &[], &[]);
-    session.relations = vec![KeyedSumRelation {
-        fxs: vec![KeyedTerm::Poly(session.ids[2])],
-        mfxs: vec![Some(KeyedTerm::Constant {
-            value: F::one(),
-            nv: 3,
-        })],
-        gxs: vec![KeyedTerm::Poly(session.ids[0])],
-        mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
-    }];
-    let plan = session.plan();
-    assert_eq!((plan[0].claim_nv, plan[0].stack_log), (3, 0));
-    assert!(!plan[0].shape().numerator_is_one);
-    session.prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let col = fv([1, 3, 3, 6]);
+        // Eight rows of weight 1 over a column of four: every row counts twice.
+        let counts = tally(&table, &[(&col, Some(&fv([1; 8])))]);
+        let columns = [table, counts, col];
+        let mut session = Session::new(&columns, &[], &[]);
+        session.relations = vec![KeyedSumRelation {
+            fxs: vec![KeyedTerm::Poly(session.ids[2])],
+            mfxs: vec![Some(KeyedTerm::Constant {
+                value: F::one(),
+                nv: 3,
+            })],
+            gxs: vec![KeyedTerm::Poly(session.ids[0])],
+            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+        }];
+        let plan = session.plan();
+        assert_eq!((plan[0].claim_nv, plan[0].stack_log), (3, 0));
+        assert!(!plan[0].shape().numerator_is_one);
+        session.prove_and_verify().unwrap();
+    });
 }
 
 /// An id neither side tracks is refused when the batch is laid out, before
 /// any tracker call that would panic on it.
 #[test]
 fn keyed_sum_naming_an_untracked_polynomial_is_refused() {
-    let columns = [fv(0..8), fv(0..8)];
-    let session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
-    let unknown = KeyedTerm::Poly(TrackerID::from_usize(900));
-    let relation = KeyedSumRelation {
-        fxs: vec![unknown],
-        mfxs: vec![None],
-        gxs: vec![KeyedTerm::Poly(session.ids[1])],
-        mgxs: vec![None],
-    };
-    assert!(plan_of(&session.prover.tracker().borrow(), &[relation]).is_err());
+    under_each_protocol(|_| {
+        let columns = [fv(0..8), fv(0..8)];
+        let session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
+        let unknown = KeyedTerm::Poly(TrackerID::from_usize(900));
+        let relation = KeyedSumRelation {
+            fxs: vec![unknown],
+            mfxs: vec![None],
+            gxs: vec![KeyedTerm::Poly(session.ids[1])],
+            mgxs: vec![None],
+        };
+        assert!(plan_of(&session.prover.tracker().borrow(), &[relation]).is_err());
+    });
 }
 
 /// A weighted column that stands alone on the `f` side has a claim on the
@@ -3823,57 +4216,62 @@ fn keyed_sum_naming_an_untracked_polynomial_is_refused() {
 /// counts.
 #[test]
 fn gkr_on_fake_leaves_of_a_weighted_entry_is_rejected() {
-    let table = fv(0..8);
-    for (col_rows, weight_rows) in [(8, 8), (4, 8), (8, 1)] {
-        let col = fv((0..col_rows).map(|i| (i * 3 + 1) % 8));
-        let weights = fv((0..weight_rows).map(|i| i + 2));
-        let counts = tally(&table, &[(&col, Some(&weights))]);
-        let session = |col: &[F], weights: &[F]| {
-            let columns = [
-                table.clone(),
-                counts.clone(),
-                col.to_vec(),
-                weights.to_vec(),
-            ];
-            Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
-        };
-        session(&col, &weights).prove_and_verify().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        for (col_rows, weight_rows) in [(8, 8), (4, 8), (8, 1)] {
+            let col = fv((0..col_rows).map(|i| (i * 3 + 1) % 8));
+            let weights = fv((0..weight_rows).map(|i| i + 2));
+            let counts = tally(&table, &[(&col, Some(&weights))]);
+            let session = |col: &[F], weights: &[F]| {
+                let columns = [
+                    table.clone(),
+                    counts.clone(),
+                    col.to_vec(),
+                    weights.to_vec(),
+                ];
+                Session::new(&columns, &[], &[(vec![(2, Some(3))], vec![(0, Some(1))])])
+            };
+            session(&col, &weights).prove_and_verify().unwrap();
 
-        let mut bad_col = col.clone();
-        bad_col[0] += F::from(8u64);
-        let cheater = session(&bad_col, &weights);
-        let evals = BTreeMap::from([(cheater.ids[2], col.clone())]);
-        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+            let mut bad_col = col.clone();
+            bad_col[0] += F::from(8u64);
+            let cheater = session(&bad_col, &weights);
+            let evals = BTreeMap::from([(cheater.ids[2], col.clone())]);
+            assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
 
-        let mut bad_weights = weights.clone();
-        bad_weights[0] += F::one();
-        let cheater = session(&col, &bad_weights);
-        let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
-        assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
-    }
+            let mut bad_weights = weights.clone();
+            bad_weights[0] += F::one();
+            let cheater = session(&col, &bad_weights);
+            let evals = BTreeMap::from([(cheater.ids[3], weights.clone())]);
+            assert_stopped_by_the_input_claims(cheater, |session| session.prove_with(evals));
+        }
+    });
 }
 
 /// Lookup groups are reduced in the order their tables were first claimed
 /// in, on both sides, also when a table committed later is claimed first.
 #[test]
 fn lookup_groups_are_reduced_in_the_order_of_their_first_claim() {
-    let tables = [fv(0..8), fv((0..8).map(|i| i + 100))];
-    let subs = [in_table(3, 8, 1), fv((0..16).map(|i| (i * 5) % 8 + 100))];
-    let (mut prover, mut verifier) = setup();
-    let ids = [&tables[0], &tables[1], &subs[0], &subs[1]].map(|col| commit(&mut prover, col).id());
+    under_each_protocol(|_| {
+        let tables = [fv(0..8), fv((0..8).map(|i| i + 100))];
+        let subs = [in_table(3, 8, 1), fv((0..16).map(|i| (i * 5) % 8 + 100))];
+        let (mut prover, mut verifier) = setup();
+        let ids =
+            [&tables[0], &tables[1], &subs[0], &subs[1]].map(|col| commit(&mut prover, col).id());
 
-    prover.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
-    prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
-    let proof = prover.build_proof().unwrap();
+        prover.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
+        prover.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+        let proof = prover.build_proof().unwrap();
 
-    verifier.set_proof_ref(&proof);
-    for id in ids {
-        verifier.track_mv_com_by_id(id).unwrap();
-    }
-    verifier.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
-    verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
-    verifier.verify().unwrap();
-    assert_in_sync(&prover, &verifier);
+        verifier.set_proof_ref(&proof);
+        for id in ids {
+            verifier.track_mv_com_by_id(id).unwrap();
+        }
+        verifier.add_mv_lookup_claim(ids[1], ids[3]).unwrap();
+        verifier.add_mv_lookup_claim(ids[0], ids[2]).unwrap();
+        verifier.verify().unwrap();
+        assert_in_sync(&prover, &verifier);
+    });
 }
 
 /// Both sides give the same id to the same polynomial, not only equally
@@ -3883,23 +4281,25 @@ fn lookup_groups_are_reduced_in_the_order_of_their_first_claim() {
 /// both sides.
 #[test]
 fn both_sides_hold_polynomials_of_the_same_size_under_every_id() {
-    let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
-    for budget in [unsplit, 100] {
-        let mut session = MixedColumns::new().honest((budget, budget));
-        session.prove_with(ColumnEvals::new()).unwrap();
-        let after_reduction =
-            ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
-        let proof = session.prover.build_proof().unwrap();
-        let verifier = session.verify_reduction(&proof).unwrap();
-        // More than one size, or the order of the `eq`s would not show.
-        let sizes: std::collections::BTreeSet<usize> = session
-            .plan()
-            .iter()
-            .map(|instance| instance.claim_nv)
-            .collect();
-        assert!(sizes.len() > 2);
-        assert_in_sync(&after_reduction, &verifier);
-    }
+    under_each_protocol(|_| {
+        let unsplit = SharedArgConfig::default().logup_gkr_run_budget;
+        for budget in [unsplit, 100] {
+            let mut session = MixedColumns::new().honest((budget, budget));
+            session.prove_with(ColumnEvals::new()).unwrap();
+            let after_reduction =
+                ArgProver::new_from_tracker(session.prover.tracker().borrow().clone());
+            let proof = session.prover.build_proof().unwrap();
+            let verifier = session.verify_reduction(&proof).unwrap();
+            // More than one size, or the order of the `eq`s would not show.
+            let sizes: std::collections::BTreeSet<usize> = session
+                .plan()
+                .iter()
+                .map(|instance| instance.claim_nv)
+                .collect();
+            assert!(sizes.len() > 2);
+            assert_in_sync(&after_reduction, &verifier);
+        }
+    });
 }
 
 /// A window activator over every row, or over none, is a constant. The
@@ -3907,27 +4307,29 @@ fn both_sides_hold_polynomials_of_the_same_size_under_every_id() {
 /// factor gives them, like those under a window that is neither.
 #[test]
 fn claims_under_a_constant_window_activator_have_one_degree_on_both_sides() {
-    for active in [0, 8, 5] {
-        let (mut prover, mut verifier) = setup();
-        let table = commit(&mut prover, &fv(0..8));
-        let data = commit(&mut prover, &in_table(3, 8, 1));
-        let activator = prover.get_or_build_contig_one_poly(3, active).unwrap();
-        let sub = &data * &activator;
-        prover.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
-        let mut reduced = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
-        reduced.reduce_lookup_claims().unwrap();
-        let proof = prover.build_proof().unwrap();
+    under_each_protocol(|_| {
+        for active in [0, 8, 5] {
+            let (mut prover, mut verifier) = setup();
+            let table = commit(&mut prover, &fv(0..8));
+            let data = commit(&mut prover, &in_table(3, 8, 1));
+            let activator = prover.get_or_build_contig_one_poly(3, active).unwrap();
+            let sub = &data * &activator;
+            prover.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
+            let mut reduced = ArgProver::new_from_tracker(prover.tracker().borrow().clone());
+            reduced.reduce_lookup_claims().unwrap();
+            let proof = prover.build_proof().unwrap();
 
-        verifier.set_proof_ref(&proof);
-        let table = verifier.track_mv_com_by_id(table.id()).unwrap();
-        let data = verifier.track_mv_com_by_id(data.id()).unwrap();
-        let activator = verifier.get_or_build_contig_one_poly(3, active).unwrap();
-        let sub = &data * &activator;
-        verifier.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
-        verifier.reduce_lookup_claims().unwrap();
-        assert_in_sync(&reduced, &verifier);
-        verifier.verify().unwrap();
-    }
+            verifier.set_proof_ref(&proof);
+            let table = verifier.track_mv_com_by_id(table.id()).unwrap();
+            let data = verifier.track_mv_com_by_id(data.id()).unwrap();
+            let activator = verifier.get_or_build_contig_one_poly(3, active).unwrap();
+            let sub = &data * &activator;
+            verifier.add_mv_lookup_claim(table.id(), sub.id()).unwrap();
+            verifier.reduce_lookup_claims().unwrap();
+            assert_in_sync(&reduced, &verifier);
+            verifier.verify().unwrap();
+        }
+    });
 }
 
 // ─── A verdict that stays ────────────────────────────────────────────────
@@ -3939,49 +4341,53 @@ fn claims_under_a_constant_window_activator_have_one_degree_on_both_sides() {
 /// find; a verifier asked a second time must still know.
 #[test]
 fn rejected_lookup_stays_rejected_on_a_second_verify() {
-    let table = fv(0..8);
-    let mut sub = in_table(3, 8, 1);
-    sub[4] = F::from(9u64);
-    let (mut prover, mut verifier) = setup();
-    let table_id = commit(&mut prover, &table).id();
-    let sub_id = commit(&mut prover, &sub).id();
-    let counts_id = commit(&mut prover, &tally(&table, &[(&sub, None)])).id();
-    let relation = KeyedSumRelation {
-        fxs: vec![KeyedTerm::Poly(sub_id)],
-        mfxs: vec![None],
-        gxs: vec![KeyedTerm::Poly(table_id)],
-        mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
-    };
-    prove_keyed_sums(&mut prover, &[relation], ColumnEvals::new()).unwrap();
-    let proof = prover.build_proof().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let mut sub = in_table(3, 8, 1);
+        sub[4] = F::from(9u64);
+        let (mut prover, mut verifier) = setup();
+        let table_id = commit(&mut prover, &table).id();
+        let sub_id = commit(&mut prover, &sub).id();
+        let counts_id = commit(&mut prover, &tally(&table, &[(&sub, None)])).id();
+        let relation = KeyedSumRelation {
+            fxs: vec![KeyedTerm::Poly(sub_id)],
+            mfxs: vec![None],
+            gxs: vec![KeyedTerm::Poly(table_id)],
+            mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
+        };
+        prove_keyed_sums(&mut prover, &[relation], ColumnEvals::new()).unwrap();
+        let proof = prover.build_proof().unwrap();
 
-    verifier.set_proof_ref(&proof);
-    verifier.track_mv_com_by_id(table_id).unwrap();
-    verifier.track_mv_com_by_id(sub_id).unwrap();
-    verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
-    assert_verifier_error(verifier.verify().unwrap_err());
-    assert_verifier_error(verifier.verify().unwrap_err());
-    // Handing it the proof again does not take the reduction back.
-    verifier.set_proof_ref(&proof);
-    assert_verifier_error(verifier.verify().unwrap_err());
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(table_id).unwrap();
+        verifier.track_mv_com_by_id(sub_id).unwrap();
+        verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
+        assert_verifier_error(verifier.verify().unwrap_err());
+        assert_verifier_error(verifier.verify().unwrap_err());
+        // Handing it the proof again does not take the reduction back.
+        verifier.set_proof_ref(&proof);
+        assert_verifier_error(verifier.verify().unwrap_err());
+    });
 }
 
 /// The same when the keyed sum is checked on the spot and the caller goes
 /// on to `verify` although the check failed.
 #[test]
 fn rejected_keyed_sum_fails_the_verify_that_follows() {
-    let columns = [fv(0..8), fv([0, 1, 2, 3, 4, 5, 6, 6])];
-    let mut session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
-    session.prove_with(ColumnEvals::new()).unwrap();
-    let proof = session.prover.build_proof().unwrap();
+    under_each_protocol(|_| {
+        let columns = [fv(0..8), fv([0, 1, 2, 3, 4, 5, 6, 6])];
+        let mut session = Session::new(&columns, &[], &[(vec![(0, None)], vec![(1, None)])]);
+        session.prove_with(ColumnEvals::new()).unwrap();
+        let proof = session.prover.build_proof().unwrap();
 
-    let mut verifier = session.verifier.fork();
-    verifier.set_proof_ref(&proof);
-    for id in &session.ids {
-        verifier.track_mv_com_by_id(*id).unwrap();
-    }
-    assert_verifier_error(verify_keyed_sums(&mut verifier, &session.relations).unwrap_err());
-    assert_verifier_error(verifier.verify().unwrap_err());
+        let mut verifier = session.verifier.fork();
+        verifier.set_proof_ref(&proof);
+        for id in &session.ids {
+            verifier.track_mv_com_by_id(*id).unwrap();
+        }
+        assert_verifier_error(verify_keyed_sums(&mut verifier, &session.relations).unwrap_err());
+        assert_verifier_error(verifier.verify().unwrap_err());
+    });
 }
 
 /// The reduction can fail before it reaches the GKR: here the proof is from
@@ -3989,20 +4395,22 @@ fn rejected_keyed_sum_fails_the_verify_that_follows() {
 /// verifier asks for is not there. The claim is not forgotten with it.
 #[test]
 fn lookup_that_could_not_be_reduced_fails_every_later_verify() {
-    let table = fv(0..8);
-    let mut sub = in_table(3, 8, 1);
-    sub[4] = F::from(9u64);
-    let (mut prover, mut verifier) = setup();
-    let table_id = commit(&mut prover, &table).id();
-    let sub_id = commit(&mut prover, &sub).id();
-    prover.add_mv_sumcheck_claim(sub_id, sum(&sub)).unwrap();
-    let proof = prover.build_proof().unwrap();
+    under_each_protocol(|_| {
+        let table = fv(0..8);
+        let mut sub = in_table(3, 8, 1);
+        sub[4] = F::from(9u64);
+        let (mut prover, mut verifier) = setup();
+        let table_id = commit(&mut prover, &table).id();
+        let sub_id = commit(&mut prover, &sub).id();
+        prover.add_mv_sumcheck_claim(sub_id, sum(&sub)).unwrap();
+        let proof = prover.build_proof().unwrap();
 
-    verifier.set_proof_ref(&proof);
-    verifier.track_mv_com_by_id(table_id).unwrap();
-    verifier.track_mv_com_by_id(sub_id).unwrap();
-    verifier.add_mv_sumcheck_claim(sub_id, sum(&sub));
-    verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
-    assert_verifier_error(verifier.verify().unwrap_err());
-    assert_verifier_error(verifier.verify().unwrap_err());
+        verifier.set_proof_ref(&proof);
+        verifier.track_mv_com_by_id(table_id).unwrap();
+        verifier.track_mv_com_by_id(sub_id).unwrap();
+        verifier.add_mv_sumcheck_claim(sub_id, sum(&sub));
+        verifier.add_mv_lookup_claim(table_id, sub_id).unwrap();
+        assert_verifier_error(verifier.verify().unwrap_err());
+        assert_verifier_error(verifier.verify().unwrap_err());
+    });
 }
