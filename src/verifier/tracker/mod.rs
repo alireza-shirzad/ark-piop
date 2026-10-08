@@ -85,7 +85,10 @@ pub struct VerifierTracker<B: SnarkBackend> {
     pub(super) vk: ProcessedSNARKVk<B>,
     pub(super) state: VerifierState<B>,
     pub(super) proof: Option<ProcessedProof<B>>,
-    pub config: SharedArgConfig,
+    /// As it was when the tracker was made, which is when its lookup
+    /// protocol went into the transcript: read through
+    /// [`crate::tracker_core::TrackerCore::config`], never changed.
+    pub(super) config: SharedArgConfig,
     pub(super) self_rc: Option<Weak<RefCell<VerifierTracker<B>>>>,
 }
 
