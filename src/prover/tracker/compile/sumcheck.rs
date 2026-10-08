@@ -216,7 +216,7 @@ where
                 }
                 let max_len = max_len.min(target_len).max(1);
                 let mut acc = vec![B::F::zero(); max_len];
-                for ((coeff, _), fv_list) in vpoly.iter().zip(term_factors.into_iter()) {
+                for ((coeff, _), fv_list) in vpoly.iter().zip(term_factors) {
                     let mut term = vec![*coeff; max_len];
                     for fv in fv_list {
                         let fv_len = fv.len();

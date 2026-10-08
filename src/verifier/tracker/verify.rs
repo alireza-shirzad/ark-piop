@@ -835,8 +835,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
         }
         // Invoke the batch verify function
-        let pcs_res: bool;
-        if mat_coms.len() == 1 {
+        let pcs_res: bool = if mat_coms.len() == 1 {
             let opening_proof = match self.proof_or_err()?.mv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
                 _ => {
@@ -847,13 +846,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     ));
                 }
             };
-            pcs_res = <B::MvPCS as PCS<B::F>>::verify(
+            <B::MvPCS as PCS<B::F>>::verify(
                 &self.vk.mv_pcs_param,
                 &mat_coms[0],
                 &points[0],
                 &evals[0],
                 opening_proof,
-            )?;
+            )?
         } else if mat_coms.len() > 1 {
             // Use direct field access so the borrow of self.proof doesn't
             // conflict with the later &mut borrow of self.state.transcript.
@@ -874,17 +873,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 }
             };
 
-            pcs_res = <B::MvPCS as PCS<B::F>>::batch_verify(
+            <B::MvPCS as PCS<B::F>>::batch_verify(
                 &self.vk.mv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
                 &evals,
                 opening_proof,
                 &mut self.state.transcript,
-            )?;
+            )?
         } else {
-            pcs_res = true;
-        }
+            true
+        };
 
         Ok(pcs_res)
     }
@@ -933,8 +932,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
         }
         // Invoke the batch verify function
-        let pcs_res: bool;
-        if mat_coms.len() == 1 {
+        let pcs_res: bool = if mat_coms.len() == 1 {
             let opening_proof = match self.proof_or_err()?.uv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
                 _ => {
@@ -945,13 +943,13 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     ));
                 }
             };
-            pcs_res = <B::UvPCS as PCS<B::F>>::verify(
+            <B::UvPCS as PCS<B::F>>::verify(
                 &self.vk.uv_pcs_param,
                 &mat_coms[0],
                 &points[0],
                 &evals[0],
                 opening_proof,
-            )?;
+            )?
         } else if mat_coms.len() > 1 {
             // Use direct field access so the borrow of self.proof doesn't
             // conflict with the later &mut borrow of self.state.transcript.
@@ -972,17 +970,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 }
             };
 
-            pcs_res = <B::UvPCS as PCS<B::F>>::batch_verify(
+            <B::UvPCS as PCS<B::F>>::batch_verify(
                 &self.vk.uv_pcs_param,
                 &mat_coms,
                 points.as_slice(),
                 &evals,
                 opening_proof,
                 &mut self.state.transcript,
-            )?;
+            )?
         } else {
-            pcs_res = true;
-        }
+            true
+        };
 
         Ok(pcs_res)
     }

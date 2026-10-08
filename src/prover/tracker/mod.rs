@@ -297,7 +297,7 @@ where
                 (*id, bytes, nv, kind)
             })
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let total_bytes: u64 = entries.iter().map(|(_, sz, _, _)| *sz).sum();
         let top_polys: Vec<_> = entries
             .iter()
