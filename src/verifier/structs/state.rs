@@ -47,6 +47,9 @@ where
     /// How many of the proof's LogUp-GKR subproofs have been verified. They
     /// carry no labels: the n-th run of the protocol reads the n-th one.
     pub logup_gkr_subproofs_consumed: usize,
+    /// How many of the proof's LogUp term sums have been read. They carry
+    /// no labels either: the n-th term of the protocol reads the n-th one.
+    pub logup_sums_consumed: usize,
     /// Keyed sums claimed for later: reduced with the lookup claims, after
     /// them and in this order.
     pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,

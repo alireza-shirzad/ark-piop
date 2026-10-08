@@ -1043,6 +1043,17 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 )),
             ));
         }
+        // The same goes for a sum nobody read: no term claimed it, so no
+        // sumcheck is about it.
+        let read = self.state.logup_sums_consumed;
+        let sent = proof.lookup_messages.sums().len();
+        if read != sent {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "proof carries {sent} LogUp sums, {read} were read"
+                )),
+            ));
+        }
         // Verify the sumcheck proofs
         self.verify_sc_proofs()?;
         // Verify the multivariate pcs proofs

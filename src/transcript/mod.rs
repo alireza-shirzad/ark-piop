@@ -50,7 +50,6 @@ impl<F: PrimeField> Tr<F> {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(crate) fn append_field_element(
         &mut self,
         label: &'static [u8],

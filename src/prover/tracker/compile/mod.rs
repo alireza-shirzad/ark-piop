@@ -116,7 +116,9 @@ where
             miscellaneous_field_vectors: take(&mut self.state.miscellaneous_field_vectors),
             logup_gkr_subproofs: take(&mut self.state.logup_gkr_subproofs),
             lookup_messages: match self.config.lookup_protocol {
-                LookupProtocol::LogUp => LookupMessages::LogUp { sums: Vec::new() },
+                LookupProtocol::LogUp => LookupMessages::LogUp {
+                    sums: take(&mut self.state.logup_sums),
+                },
                 LookupProtocol::LogUpGkr => LookupMessages::LogUpGkr,
             },
         })

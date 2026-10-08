@@ -39,6 +39,10 @@ pub trait TrackerCore {
         n: usize,
     ) -> SnarkResult<Vec<Self::F>>;
 
+    /// Append a field element the prover sends to the transcript, where
+    /// both sides have it.
+    fn append_field_element(&mut self, label: &'static [u8], element: &Self::F) -> SnarkResult<()>;
+
     // ── Virtual polynomial operations ───────────────────────────────
 
     /// Create an empty virtual polynomial (identity for addition).

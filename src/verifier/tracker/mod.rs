@@ -132,8 +132,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     // Set the proof for the tracker from a borrowed proof
     pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(proof));
-        // The count belongs to the proof it was advanced on.
+        // The counts belong to the proof they were advanced on.
         self.state.logup_gkr_subproofs_consumed = 0;
+        self.state.logup_sums_consumed = 0;
     }
 
     /// Verify the next LogUp-GKR subproof of the proof against `shape`, on
@@ -158,6 +159,26 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let claims = verify_batch(shape, subproof, &mut self.state.transcript)?;
         self.state.logup_gkr_subproofs_consumed = next + 1;
         Ok(claims)
+    }
+
+    /// The proof's next term sum of LogUp. Sums are read in order, so both
+    /// sides must reach their terms in the same sequence. Binding the sum
+    /// to the transcript is left to the caller, in the code it shares with
+    /// the prover.
+    pub(crate) fn next_logup_sum(&mut self) -> SnarkResult<B::F> {
+        let next = self.state.logup_sums_consumed;
+        let sum = *self
+            .proof_or_err()?
+            .lookup_messages
+            .sums()
+            .get(next)
+            .ok_or_else(|| {
+                SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
+                    "proof has no LogUp sum at index {next}"
+                )))
+            })?;
+        self.state.logup_sums_consumed = next + 1;
+        Ok(sum)
     }
 
     /// Refuses a proof made with another lookup protocol than the one this

@@ -562,6 +562,14 @@ where
         Ok(claims)
     }
 
+    /// Stash a term sum of LogUp for `compile_proof`. The sums are
+    /// positional like the GKR subproofs: the verifier reads them in the
+    /// order they are sent here. Binding a sum to the transcript is left to
+    /// the caller, in the code it shares with the verifier.
+    pub(crate) fn send_logup_sum(&mut self, sum: B::F) {
+        self.state.logup_sums.push(sum);
+    }
+
     /// [`Self::prove_logup_gkr`] with the batch prover swapped for `prove`,
     /// for tests that put a prover of their own on the transcript.
     #[cfg(test)]

@@ -39,6 +39,13 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .map_err(crate::errors::SnarkError::from)
     }
 
+    fn append_field_element(&mut self, label: &'static [u8], element: &Self::F) -> SnarkResult<()> {
+        self.state
+            .transcript
+            .append_field_element(label, element)
+            .map_err(crate::errors::SnarkError::from)
+    }
+
     // ── Virtual polynomial operations ───────────────────────────────
 
     fn track_empty_virtual_poly(&mut self) -> TrackerID {

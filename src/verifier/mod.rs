@@ -333,8 +333,8 @@ where
     /// [`ArgProver::add_mv_keyed_sum_claim`](crate::prover::ArgProver::add_mv_keyed_sum_claim).
     ///
     /// The claim is only recorded here. [`Self::verify`] checks it in the
-    /// LogUp-GKR batch of the lookup claims, after them and in the order of
-    /// these calls, which has to be the prover's.
+    /// batch of the lookup claims, after them and in the order of these
+    /// calls, which has to be the prover's.
     ///
     /// All columns and multiplicities must already be tracked by this
     /// verifier: the claim keeps their ids, not the handles, and tracks

@@ -2,16 +2,20 @@
 //! multiplicity polynomials) are equal — a generalization of
 //! [Logup](https://eprint.iacr.org/2022/1530.pdf), used heavily by other PIOPs.
 //!
-//! The sums of fractions are proved with LogUp-GKR, which needs no helper
-//! commitment. A column and its multiplicity need not have the same size:
-//! their term runs over the larger hypercube, the smaller one repeating.
+//! The sums of fractions are proved by the lookup protocol the two sides
+//! are configured for ([`LookupProtocol`](crate::types::LookupProtocol)):
+//! LogUp-GKR, which needs no helper commitment, or LogUp with a committed
+//! helper per column. Under either, a column and its multiplicity need not
+//! have the same size: their term runs over the larger hypercube, the
+//! smaller one repeating.
 //!
-//! Proving the PIOP reduces its relation on the spot, in a GKR batch of its
+//! Proving the PIOP reduces its relation on the spot, in a batch of its
 //! own. [`ArgProver::add_mv_keyed_sum_claim`] and its verifier counterpart
 //! take the same inputs and leave the relation to the one batch the proof
 //! reduces its lookup claims in.
 
 mod honest_prover;
+mod logup;
 pub(crate) mod reduction;
 #[cfg(test)]
 mod tests;

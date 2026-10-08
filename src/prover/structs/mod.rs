@@ -74,6 +74,9 @@ where
     /// LogUp-GKR proofs in the order they were produced, which is the order
     /// the verifier consumes them in; moved into the proof at compile time.
     pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    /// Term sums of LogUp in the order they were sent, which is the order
+    /// the verifier reads them in; moved into the proof at compile time.
+    pub logup_sums: Vec<B::F>,
     /// Keyed sums claimed for later: reduced with the lookup claims, after
     /// them and in this order.
     pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,

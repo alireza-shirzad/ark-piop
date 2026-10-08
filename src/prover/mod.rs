@@ -443,11 +443,11 @@ where
     /// relation.
     ///
     /// The claim is only recorded here. [`Self::build_proof`] discharges it
-    /// in the LogUp-GKR batch of the lookup claims, after them and in the
-    /// order of these calls. Its columns share the instances of that batch
-    /// with the other columns of their size, where proving the PIOP on the
-    /// spot spends a batch per relation. The verifier has to make the same
-    /// calls in the same order.
+    /// in the batch of the lookup claims, after them and in the order of
+    /// these calls. Under LogUp-GKR its columns share the instances of that
+    /// batch with the other columns of their size, where proving the PIOP
+    /// on the spot spends a batch per relation. The verifier has to make
+    /// the same calls in the same order.
     ///
     /// All columns and multiplicities must already be tracked by this
     /// prover: the claim keeps their ids, not the handles, and tracks nothing
@@ -554,7 +554,8 @@ where
         }
 
         // Every column is read once: the same evaluations give the
-        // multiplicities here and the GKR input layers in the reduction.
+        // multiplicities here and, in the reduction, the GKR input layers
+        // or the LogUp helpers.
         let mut evals = ColumnEvals::new();
         {
             let mut tracker = self.tracker_rc.borrow_mut();
@@ -587,7 +588,7 @@ where
             .collect::<SnarkResult<Vec<_>>>()?;
 
         // All multiplicities go into the transcript before the reduction
-        // draws the first gamma: it draws one per relation, all together.
+        // draws the first gamma; it draws one per relation.
         let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
         for ((super_id, sub_ids), (m_mle, m_commitment, m_evals)) in
             by_super.into_iter().zip(multiplicities)

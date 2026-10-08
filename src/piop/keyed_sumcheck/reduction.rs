@@ -1,4 +1,7 @@
-//! Reduction of keyed-sum relations to sumcheck claims through LogUp-GKR.
+//! Reduction of keyed-sum relations to sumcheck claims through LogUp-GKR,
+//! and the two entry points of a reduction under either lookup protocol:
+//! [`prove_keyed_sums`] and [`verify_keyed_sums`] hand a batch to this
+//! module or to [`super::logup`], as the tracker is configured.
 //!
 //! A relation `(fxs, mfxs, gxs, mgxs)` asserts
 //! `sum_i sum_x mf_i(x)/(f_i(x) - gamma) == sum_j sum_x mg_j(x)/(g_j(x) - gamma)`
@@ -32,6 +35,8 @@
 //! must be computable by the verifier.
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use super::logup;
 
 use ark_ff::{Field, Zero};
 use ark_std::{cfg_into_iter, cfg_iter};
@@ -215,7 +220,7 @@ fn tracked_nv<T: TrackerCore>(tracker: &T, id: TrackerID) -> Result<usize, Strin
     }
 }
 
-fn resolve<T: TrackerCore>(
+pub(super) fn resolve<T: TrackerCore>(
     tracker: &T,
     term: &KeyedTerm<T::F>,
 ) -> Result<(Either<TrackerID, T::F>, usize), String> {
@@ -702,7 +707,7 @@ impl<F: Field> ProvingParty<F> {
     }
 }
 
-fn invalid_parameters(reason: String) -> SnarkError {
+pub(super) fn invalid_parameters(reason: String) -> SnarkError {
     SnarkError::from(PolyIOPErrors::InvalidParameters(reason))
 }
 
@@ -722,14 +727,12 @@ impl<B: SnarkBackend> Party<ProverTracker<B>> for ProvingParty<B::F> {
     }
 }
 
+pub(super) fn check_failed(reason: String) -> SnarkError {
+    SnarkError::VerifierError(VerifierError::VerifierCheckFailed(reason))
+}
+
 /// The verifier's side of a reduction: it checks the proof's next subproof.
 pub(super) struct VerifyingParty;
-
-impl VerifyingParty {
-    fn check_failed(reason: String) -> SnarkError {
-        SnarkError::VerifierError(VerifierError::VerifierCheckFailed(reason))
-    }
-}
 
 impl<B: SnarkBackend> Party<VerifierTracker<B>> for VerifyingParty {
     fn run(
@@ -743,7 +746,7 @@ impl<B: SnarkBackend> Party<VerifierTracker<B>> for VerifyingParty {
     }
 
     fn reject(&self, reason: String) -> SnarkError {
-        Self::check_failed(reason)
+        check_failed(reason)
     }
 }
 
@@ -762,7 +765,7 @@ pub(crate) fn prove_keyed_sums<B: SnarkBackend>(
             reduce_keyed_sums(&mut *tracker, &mut ProvingParty { evals }, relations)?;
         }
         LookupProtocol::LogUp => {
-            return Err(invalid_parameters("LogUp is not available".to_string()));
+            logup::reduce_keyed_sums(&mut *tracker, &mut logup::ProvingParty { evals }, relations)?;
         }
     }
     Ok(())
@@ -782,15 +785,13 @@ pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
             .check_lookup_protocol()
             .and_then(|()| match tracker.config().lookup_protocol {
                 LookupProtocol::LogUpGkr => {
-                    reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations).and_then(
-                        |reduction| {
-                            check_batch_sums(&reduction).map_err(VerifyingParty::check_failed)
-                        },
-                    )
+                    reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations)
+                        .and_then(|reduction| check_batch_sums(&reduction).map_err(check_failed))
                 }
-                LookupProtocol::LogUp => Err(VerifyingParty::check_failed(
-                    "LogUp is not available".to_string(),
-                )),
+                LookupProtocol::LogUp => {
+                    logup::reduce_keyed_sums(&mut *tracker, &mut logup::VerifyingParty, relations)
+                        .and_then(|sums| logup::check_relation_sums(&sums).map_err(check_failed))
+                }
             });
     if checked.is_err() {
         // The roots and the constants are compared here and nowhere else.

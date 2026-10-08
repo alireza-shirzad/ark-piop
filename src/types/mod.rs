@@ -121,6 +121,14 @@ impl<F: PrimeField> LookupMessages<F> {
             LookupMessages::LogUpGkr => LookupProtocol::LogUpGkr,
         }
     }
+
+    /// The term sums of LogUp; none under another protocol.
+    pub(crate) fn sums(&self) -> &[F] {
+        match self {
+            LookupMessages::LogUp { sums } => sums,
+            LookupMessages::LogUpGkr => &[],
+        }
+    }
 }
 
 impl<F: PrimeField> CanonicalSerialize for LookupMessages<F> {
