@@ -354,7 +354,20 @@ impl<F: Field> ProvingParty<F> {
         let mut helper: Vec<F> = Vec::new();
         for col in cols {
             let mut inverses = self.take(tracker, *col, nv)?;
-            cfg_iter_mut!(inverses).for_each(|value| *value -= gamma);
+            // A row equal to `gamma` has no inverse. The inversion would
+            // leave a zero there, and the prover a helper that fails its
+            // zerocheck in a proof that says nothing of it.
+            let at_gamma: usize = cfg_iter_mut!(inverses)
+                .map(|value| {
+                    *value -= gamma;
+                    usize::from(value.is_zero())
+                })
+                .sum();
+            if at_gamma != 0 {
+                return Err(invalid_parameters(format!(
+                    "gamma is the value of {at_gamma} rows of polynomial {col}"
+                )));
+            }
             batch_inversion(&mut inverses);
             if helper.is_empty() {
                 helper = inverses;

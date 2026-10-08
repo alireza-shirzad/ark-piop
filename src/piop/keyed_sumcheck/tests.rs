@@ -29,6 +29,7 @@ use crate::{
     pcs::PCS,
     piop::{
         PIOP,
+        errors::PolyIOPErrors,
         logup_gkr::{
             FractionInstance, GkrClaims, GkrShape, Numerator, proof_len,
             tests::{Deviation, Fault, naive_prove_batch},
@@ -3769,6 +3770,79 @@ fn logup_constant_helper_declared_of_another_size_than_its_column_is_refused() {
             helper_of_the_other_columns_size(&fv([7; 8]), cheated),
             Err(Rejected::Reduction(SnarkError::VerifierError(_)))
         ));
+    }
+}
+
+/// A column with a row equal to `gamma` has no helper: nothing is the
+/// inverse of zero. That happens to an honest prover once in a field's
+/// worth of proofs, and then it is told so, with nothing committed or
+/// sent, in place of a helper that fails its own check. For a column with
+/// a helper of its own, with weights and without, for either of two that
+/// share one, and for a column that is a product.
+#[test]
+fn logup_gamma_among_the_rows_of_a_column_is_a_prover_error() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let columns = [
+        fv(0..8),
+        fv(10..18),
+        fv((0..8).map(|i| i + 2)),
+        fv((0..8).map(|i| 3 * i + 1)),
+    ];
+    let session = Session::new(&columns, &[&[2, 3]], &[]);
+    let ids = &session.ids;
+    let product = session.prover.tracker().borrow().sumcheck_claims_snapshot()[0].0;
+    let single = |col: TrackerID, mult: Option<TrackerID>| logup::Term::Single {
+        col: (Either::Left(col), 3),
+        mult: mult.map(|mult| (Either::Left(mult), 3)),
+    };
+    let pair = logup::Term::Pair {
+        cols: [ids[0], ids[1]],
+        nv: 3,
+    };
+    // `(term, the column gamma is a row of, gamma)`.
+    let collisions = [
+        (single(ids[0], None), ids[0], columns[0][5]),
+        (single(ids[0], Some(ids[1])), ids[0], columns[0][0]),
+        (pair.clone(), ids[0], columns[0][2]),
+        (pair.clone(), ids[1], columns[1][7]),
+        (
+            single(product, None),
+            product,
+            columns[2][3] * columns[3][3],
+        ),
+    ];
+    let reduce = |term: &logup::Term<F>, gamma: F| {
+        let mut tracker = session.prover.tracker().borrow().clone();
+        let mut party = logup::ProvingParty {
+            evals: ColumnEvals::new(),
+        };
+        let before = TrackerCore::peek_next_id(&tracker);
+        let reduced = logup::reduce_term(&mut tracker, &mut party, term, gamma);
+        let untouched = TrackerCore::peek_next_id(&tracker) == before
+            && ArgProver::new_from_tracker(tracker)
+                .build_proof()
+                .unwrap()
+                .lookup_messages
+                .sums()
+                .is_empty();
+        (reduced, untouched)
+    };
+    for (term, column, gamma) in &collisions {
+        let (reduced, untouched) = reduce(term, *gamma);
+        match reduced {
+            Err(SnarkError::PolyIOPErrors(PolyIOPErrors::InvalidParameters(reason))) => {
+                assert!(
+                    reason.contains("gamma") && reason.ends_with(&format!("polynomial {column}")),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected the prover to be told of gamma, got {other:?}"),
+        }
+        assert!(untouched);
+        // Any other `gamma` gives the term a helper and a sum.
+        let (reduced, untouched) = reduce(term, *gamma + F::from(100u64));
+        reduced.unwrap();
+        assert!(!untouched);
     }
 }
 
