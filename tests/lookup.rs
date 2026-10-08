@@ -41,6 +41,7 @@ use ark_piop::{
         structs::oracle::{Oracle, TrackedOracle},
     },
 };
+use ark_poly::Polynomial;
 
 type B = DefaultSnarkBackend;
 type F = <B as SnarkBackend>::F;
@@ -1121,6 +1122,67 @@ fn lookup_constant_sub_wider_than_every_commitment() {
         assert_accepted(constant_sub_e2e(7, 32, false, false));
         assert_accepted(constant_sub_e2e(7, 64, true, false));
         assert_rejected(constant_sub_e2e(16, 32, false, false));
+    });
+}
+
+/// Two sub columns of one size whose tables are held at different sizes: a
+/// committed constant, which is one value, or a column whose rows repeat
+/// and are held once, beside a column held row by row. Neighbours of one
+/// size share a helper under LogUp, and it is that of both columns
+/// whichever comes first.
+#[test]
+fn lookup_neighbouring_subs_held_at_different_sizes() {
+    under_each_protocol(|_| {
+        let table = fv(0..16);
+        let dense = fv((0..8).map(|i| (i * 5 + 1) % 16));
+        let constant = fv([7; 8]);
+        for subs in [[&constant, &dense], [&dense, &constant]] {
+            let subs = subs.map(Vec::clone);
+            assert_accepted(lookup_e2e(&table, &subs));
+            let mut outside = subs.clone();
+            outside[0][7] = F::from(16u64);
+            assert_rejected(lookup_e2e(&table, &outside));
+            let mut outside = subs;
+            outside[1][7] = F::from(16u64);
+            assert_rejected(lookup_e2e(&table, &outside));
+        }
+
+        // Four rows that stand for eight, known to both sides.
+        let run = |repeating_first: bool, repeated: &[F]| {
+            let repeating = || MLE::from_evaluations_vec(3, repeated.to_vec());
+            prove_and_verify(
+                |prover| {
+                    let table = commit(prover, &table)?;
+                    let dense = commit(prover, &dense)?;
+                    let repeating = prover.track_mat_mv_poly(repeating());
+                    assert_eq!(repeating.log_size(), dense.log_size());
+                    let subs = if repeating_first {
+                        [repeating.id(), dense.id()]
+                    } else {
+                        [dense.id(), repeating.id()]
+                    };
+                    for sub in subs {
+                        prover.add_mv_lookup_claim(table.id(), sub)?;
+                    }
+                    Ok(([table.id(), dense.id()], subs))
+                },
+                |verifier, (ids, subs)| {
+                    let oracles = track_all(verifier, &ids)?;
+                    let repeating = repeating();
+                    verifier.track_base_oracle(Oracle::new_multivariate(3, move |x: Vec<F>| {
+                        Ok(repeating.evaluate(&x[..3].to_vec()))
+                    }));
+                    for sub in subs {
+                        verifier.add_mv_lookup_claim(oracles[0].id(), sub)?;
+                    }
+                    Ok(())
+                },
+            )
+        };
+        for repeating_first in [true, false] {
+            assert_accepted(run(repeating_first, &fv([3, 9, 3, 15])));
+            assert_rejected(run(repeating_first, &fv([3, 9, 3, 16])));
+        }
     });
 }
 

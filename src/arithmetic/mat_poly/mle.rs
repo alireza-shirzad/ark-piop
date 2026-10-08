@@ -106,11 +106,12 @@ pub enum MLEStorage<F: Field> {
     },
     /// Lazy inverse-shifted: `1/(source(x) - shift)` at every point, in O(1)
     /// storage: the helper `1/(p - γ)` of a LogUp argument once it has been
-    /// committed. Nothing in this crate builds one since keyed sums moved to
-    /// LogUp-GKR. Sumcheck streams non-`Field` storage via
-    /// `storage().lift(i)`.
+    /// committed. Keyed sums under the LogUp lookup protocol register one in
+    /// place of every helper table they commit. Sumcheck streams
+    /// non-`Field` storage via `storage().lift(i)`.
     ///
-    /// Contract: `lift(i) = (source.lift(i) - shift).inverse().unwrap_or(0)`.
+    /// Contract: `lift(i) = (source.lift(i) - shift).inverse().unwrap_or(0)`,
+    /// with `inner_num_vars` that of `source`.
     /// Callers must ensure `source(x) - shift != 0` where they read — `shift`
     /// is a post-commit transcript challenge, so the zero fallback is only a
     /// safety net over a measure-zero exceptional set.
@@ -121,6 +122,10 @@ pub enum MLEStorage<F: Field> {
     },
     /// Lazy `1/(s1(x) - shift) + 1/(s2(x) - shift)`; same rationale as
     /// [`Self::LazyInverseShifted`], for a helper shared by two columns.
+    ///
+    /// The sources may hold tables of different sizes. `inner_num_vars` is
+    /// the larger of theirs, the period of the sum: a smaller one would
+    /// have every reader repeat the larger source too early.
     LazyInverseShiftedSum {
         s1: Arc<MLE<F>>,
         s2: Arc<MLE<F>>,
@@ -1332,10 +1337,11 @@ impl<F: Field> MLE<F> {
     }
 
     /// Lazy `1/(s1 - shift) + 1/(s2 - shift)`, a helper shared by two
-    /// columns. Both sources must share `num_vars()` (debug-asserted). See
+    /// columns. Both sources must share `num_vars()` (debug-asserted); their
+    /// inner tables need not be of one size. See
     /// [`Self::from_lazy_inverse_shifted`].
     pub fn from_lazy_inverse_shifted_sum(s1: Arc<MLE<F>>, s2: Arc<MLE<F>>, shift: F) -> Self {
-        let inner_num_vars = s1.inner_num_vars();
+        let inner_num_vars = s1.inner_num_vars().max(s2.inner_num_vars());
         let outer_num_vars = s1.num_vars();
         debug_assert_eq!(
             outer_num_vars,
@@ -3440,5 +3446,87 @@ mod tests {
             u8_bytes * 5 < f_bytes,
             "SparseU8 should be ≥5× smaller than Sparse(F): u8={u8_bytes}, f={f_bytes}"
         );
+    }
+
+    // ── Lazy inverse-shifted helpers ───────────────────────────────────
+
+    /// The values a lazy helper has to stand for: `sum_s 1/(s - shift)`
+    /// over the outer hypercube of its sources.
+    fn dense_helper(sources: &[&MLE<Fr>], shift: Fr) -> Vec<Fr> {
+        let rows = 1usize << sources[0].num_vars();
+        let columns: Vec<Vec<Fr>> = sources.iter().map(|source| source.evaluations()).collect();
+        (0..rows)
+            .map(|row| {
+                columns
+                    .iter()
+                    .map(|column| (column[row] - shift).inverse().unwrap())
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// Every way a lazy helper is read gives `expected`.
+    fn assert_reads_as(lazy: &MLE<Fr>, expected: &[Fr]) {
+        let nv = expected.len().trailing_zeros() as usize;
+        assert_eq!(lazy.num_vars(), nv);
+        assert_eq!(lazy.evaluations(), expected);
+        assert_eq!(lazy.iter().collect::<Vec<_>>(), expected);
+        assert_eq!(lazy.clone().into_evaluations(), expected);
+        let storage = lazy.storage();
+        let lifted: Vec<Fr> = (0..expected.len())
+            .map(|row| storage.lift(row % storage.inner_len()))
+            .collect();
+        assert_eq!(lifted, expected);
+        let field = lazy.to_field_owned();
+        assert_eq!(field.num_vars(), nv);
+        assert_eq!(field.evaluations(), expected);
+        let point: Vec<Fr> = (0..nv as u64).map(|i| fr(3 * i + 2)).collect();
+        let dense = MLE::from_evaluations_vec(nv, expected.to_vec());
+        assert_eq!(lazy.evaluate(&point), dense.evaluate(&point));
+    }
+
+    /// Sources of 8 rows each, held at 1, 2, 4 and 8 rows.
+    fn sources_of_eight_rows() -> Vec<MLE<Fr>> {
+        vec![
+            MLE::new(
+                DenseMultilinearExtension::from_evaluations_vec(0, vec![fr(7)]),
+                Some(3),
+            ),
+            MLE::from_u8s(vec![4, 9], 3),
+            MLE::from_evaluations_vec(3, vec![fr(3), fr(9), fr(3), fr(15)]),
+            MLE::from_evaluations_vec(3, (0..8).map(|i| fr(5 * i + 1)).collect()),
+        ]
+    }
+
+    #[test]
+    fn lazy_inverse_shifted_reads_as_the_helper_of_its_source() {
+        let shift = fr(1000);
+        for source in sources_of_eight_rows() {
+            let lazy = MLE::from_lazy_inverse_shifted(Arc::new(source.clone()), shift);
+            assert_reads_as(&lazy, &dense_helper(&[&source], shift));
+            assert_eq!(lazy.inner_num_vars(), source.inner_num_vars());
+        }
+    }
+
+    /// The table of a shared helper is as large as the larger of its
+    /// sources' tables, whichever of the two comes first.
+    #[test]
+    fn lazy_inverse_shifted_sum_reads_as_the_helper_of_both_sources_in_either_order() {
+        let shift = fr(1000);
+        let sources = sources_of_eight_rows();
+        for first in &sources {
+            for second in &sources {
+                let lazy = MLE::from_lazy_inverse_shifted_sum(
+                    Arc::new(first.clone()),
+                    Arc::new(second.clone()),
+                    shift,
+                );
+                assert_reads_as(&lazy, &dense_helper(&[first, second], shift));
+                assert_eq!(
+                    lazy.inner_num_vars(),
+                    first.inner_num_vars().max(second.inner_num_vars())
+                );
+            }
+        }
     }
 }
