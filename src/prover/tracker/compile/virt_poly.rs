@@ -503,6 +503,76 @@ mod tests {
         assert_eq!(folded.products.len(), 2);
     }
 
+    /// A term with a repeated factor is one term of the group it folds
+    /// into, however many of its factors could be the one pulled out.
+    #[test]
+    fn a_term_with_a_repeated_factor_folds_once() {
+        let mut tracker = make_tracker();
+        let a = small_column(&mut tracker, NV, 1, 1 << 16);
+        let c = small_column(&mut tracker, NV, 2, 1 << 16);
+        let eq = field_column(&mut tracker, NV);
+
+        // a·a·eq + c·a·eq = (a + c)·a·eq.
+        let square = tracker.mul_polys(a, a);
+        let square = tracker.mul_polys(square, eq);
+        let mixed = tracker.mul_polys(c, a);
+        let mixed = tracker.mul_polys(mixed, eq);
+        let claimed = tracker.add_polys(square, mixed);
+
+        let folded = assert_folding_is_invisible(&tracker, claimed, NV);
+        assert_eq!(folded.products.len(), 1);
+    }
+
+    /// A group that loses a term to a larger one still folds the terms it
+    /// has left.
+    #[test]
+    fn a_group_that_lost_a_term_folds_the_rest() {
+        let mut tracker = make_tracker();
+        let [a, b, c, x] = [1, 2, 3, 4].map(|seed| small_column(&mut tracker, NV, seed, 1 << 16));
+        let ys = [5, 6, 7, 8].map(|seed| small_column(&mut tracker, NV, seed, 1 << 16));
+
+        // a·x·y_j for every j, then b·x·y_0 + c·x·y_0: the term `a·x·y_0`
+        // shares `a·x` with three terms and `x·y_0` with two.
+        let mut terms: Vec<(TrackerID, TrackerID)> = ys.iter().map(|y| (a, *y)).collect();
+        terms.extend([(b, ys[0]), (c, ys[0])]);
+        let mut claimed = None;
+        for (first, last) in terms {
+            let term = tracker.mul_polys(first, x);
+            let term = tracker.mul_polys(term, last);
+            claimed = Some(match claimed {
+                Some(sum) => tracker.add_polys(sum, term),
+                None => term,
+            });
+        }
+
+        let folded = assert_folding_is_invisible(&tracker, claimed.unwrap(), NV);
+        // (y_0 + y_1 + y_2 + y_3)·a·x and (b + c)·x·y_0.
+        assert_eq!(folded.products.len(), 2);
+    }
+
+    /// Two groups that pull out the same columns under different
+    /// coefficients are two combinations, not one used twice.
+    #[test]
+    fn groups_of_the_same_columns_keep_their_own_coefficients() {
+        let mut tracker = make_tracker();
+        let [a, b, x, y] = [1, 2, 3, 4].map(|seed| small_column(&mut tracker, NV, seed, 1 << 16));
+
+        // (2a + 3b)·x + (5a + 7b)·y.
+        let mut claimed = None;
+        for (coeff, column, context) in [(2u64, a, x), (3, b, x), (5, a, y), (7, b, y)] {
+            let term = tracker.mul_polys(column, context);
+            let term = tracker.mul_scalar(term, F::from(coeff));
+            claimed = Some(match claimed {
+                Some(sum) => tracker.add_polys(sum, term),
+                None => term,
+            });
+        }
+
+        let folded = assert_folding_is_invisible(&tracker, claimed.unwrap(), NV);
+        assert_eq!(folded.products.len(), 2);
+        assert_eq!(folded.flattened_ml_extensions.len(), 4);
+    }
+
     /// A lazily inverted factor is never read out into a combination.
     #[test]
     fn a_lazy_factor_is_not_folded() {

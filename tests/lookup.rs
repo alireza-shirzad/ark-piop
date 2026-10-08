@@ -1695,6 +1695,17 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
     assert_accepted(verify_proof_with_lookups(&mut verifier, &ids));
 }
 
+/// The version tag is the one of the flat LogUp-GKR messages, and a proof
+/// tagged with the version before it is not decoded.
+#[test]
+fn snark_proof_tagged_with_the_previous_encoding_version_is_refused() {
+    let (proof, _, _) = proof_with_lookups();
+    let mut bytes = proof.to_bytes().unwrap();
+    assert_eq!(bytes[0], 4);
+    bytes[0] = 3;
+    assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
+}
+
 /// Every byte of a serialized proof belongs to exactly one top-level part of
 /// the size breakdown; the one byte left over is the version tag.
 #[test]

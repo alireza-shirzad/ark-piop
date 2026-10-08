@@ -1462,6 +1462,30 @@ fn zero_denominator_root_is_rejected() {
     }
 }
 
+/// A root with a zero denominator is refused like a wrong length: before
+/// the transcript has absorbed anything, whether the root was sent or
+/// worked out from a first layer.
+#[test]
+fn zero_denominator_root_is_refused_with_the_transcript_untouched() {
+    for (batch, instance) in [
+        (vec![(2, true)], 0),
+        (vec![(1, false)], 0),
+        (vec![(0, false)], 0),
+        (vec![(3, true), (2, false), (0, false)], 1),
+    ] {
+        let mut instances = random_batch(&batch, 76);
+        let shape = shape_of(&instances);
+        instances[instance].den[0] = Fr::zero();
+        let (proof, claims) = prove_batch(instances, &mut transcript()).unwrap();
+        assert!(claims.roots[instance][1].is_zero());
+
+        let mut tr = Tr::default();
+        assert!(is_check_failure(&verify_batch(&shape, &proof, &mut tr)));
+        // A transcript nothing was absorbed into refuses to give challenges.
+        assert!(tr.get_and_append_challenge(b"probe").is_err(), "{batch:?}");
+    }
+}
+
 // ─── Malformed proofs ────────────────────────────────────────────────────
 
 #[test]

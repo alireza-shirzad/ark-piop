@@ -1438,6 +1438,52 @@ fn gkr_single_instance_over_budget() {
     }
 }
 
+/// An instance above the budget closes no run opened after it either: two
+/// instances that fit together only past it share a run.
+#[test]
+fn gkr_runs_opened_after_an_over_budget_instance_still_take_instances() {
+    let table = fv(0..8);
+    let subs = [
+        in_table(5, 8, 1),
+        in_table(6, 8, 2),
+        in_table(4, 8, 3),
+        in_table(3, 8, 4),
+    ];
+    let counted: Vec<(&[F], Option<&[F]>)> = subs.iter().map(|sub| (&sub[..], None)).collect();
+    let mut columns = vec![table.clone(), tally(&table, &counted)];
+    columns.extend_from_slice(&subs);
+    let relations = [((2..6).map(|sub| (sub, None)).collect(), vec![(0, Some(1))])];
+    let mut session = Session::with_budgets((100, 100), &columns, &relations);
+    assert_eq!(weighted_sizes(&session.plan()), [96, 192, 48, 24, 32]);
+    let shape = session.shape();
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    // The 2^6 column is alone above the budget. The 2^4 column fits beside
+    // nothing before it, and the 2^3 column fits beside it and nowhere else.
+    assert_runs(&proof, &shape, &[vec![0], vec![1], vec![2, 3], vec![4]]);
+    session.verify(&proof).unwrap();
+}
+
+/// With room in several runs, an instance joins the earliest of them.
+#[test]
+fn gkr_instance_joins_the_first_of_the_runs_with_room() {
+    let table = fv(0..8);
+    let subs = [in_table(4, 8, 1), in_table(5, 8, 2), in_table(3, 8, 3)];
+    let counted: Vec<(&[F], Option<&[F]>)> = subs.iter().map(|sub| (&sub[..], None)).collect();
+    let mut columns = vec![table.clone(), tally(&table, &counted)];
+    columns.extend_from_slice(&subs);
+    let relations = [((2..5).map(|sub| (sub, None)).collect(), vec![(0, Some(1))])];
+    let mut session = Session::with_budgets((130, 130), &columns, &relations);
+    assert_eq!(weighted_sizes(&session.plan()), [48, 96, 24, 32]);
+    let shape = session.shape();
+    session.prove_with(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    // The 2^3 column has room beside either of the columns before it, and
+    // so has the table after it.
+    assert_runs(&proof, &shape, &[vec![0, 2, 3], vec![1]]);
+    session.verify(&proof).unwrap();
+}
+
 /// The split into runs is part of the statement the verifier checks: a
 /// proof split by another budget than the verifier's is rejected at the
 /// first run that differs, whichever side has the finer split. Budgets that
@@ -1935,6 +1981,52 @@ fn constant_operands_are_checked_against_the_gkr_claims() {
             other => panic!("expected the constant to be compared, got {other:?}"),
         }
     }
+}
+
+/// An entry with a constant operand stands alone and is still an entry of
+/// its relation: what is taken off the constant is that relation's `gamma`,
+/// not the first one's.
+#[test]
+fn constant_entry_has_the_gamma_of_its_relation() {
+    let table = fv(0..16);
+    let keys = in_table(3, 16, 1);
+    let weights = fv(1..9);
+    let counts = tally(&table, &[(&fv([7; 8]), Some(&weights)), (&keys, None)]);
+    let columns = [table, counts, keys, weights, fv(0..8), fv((0..8).rev())];
+    // A permutation, then a lookup of a constant column and a committed
+    // one.
+    let session = |constant: u64| {
+        let mut session = Session::new(&columns, &[], &[(vec![(4, None)], vec![(5, None)])]);
+        session.relations.push(KeyedSumRelation {
+            fxs: vec![
+                KeyedTerm::Constant {
+                    value: F::from(constant),
+                    nv: 3,
+                },
+                KeyedTerm::Poly(session.ids[2]),
+            ],
+            mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), None],
+            gxs: vec![KeyedTerm::Poly(session.ids[0])],
+            mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+        });
+        session
+    };
+    let honest = session(7);
+    let plan = honest.plan();
+    assert_eq!(
+        layout(&plan),
+        [
+            (Side::F, 3, 1, true, false, false),
+            (Side::G, 3, 0, true, false, false),
+            (Side::F, 3, 0, false, true, false),
+            (Side::G, 4, 0, false, false, false),
+        ]
+    );
+    assert_eq!(plan[0].relations, [0, 1]);
+    assert_eq!(plan[2].relations, [1]);
+    honest.prove_and_verify().unwrap();
+
+    assert_rejected_in_the_reduction(session(16).prove_and_verify());
 }
 
 /// A product of a one-row polynomial and an `n`-variable one has `n`
@@ -3039,6 +3131,42 @@ fn relation_without_entries_draws_no_gamma() {
     assert_eq!(next_challenge(&padded), next_challenge(&plain));
     let proof = padded.prover.build_proof().unwrap();
     padded.verify(&proof).unwrap();
+}
+
+/// A relation with entries on one side only says that side sums to zero as
+/// a rational function, and has a `gamma` like any other: columns whose
+/// fractions cancel at one point, zero included, do not satisfy it. Weights
+/// that cancel key by key do.
+#[test]
+fn relation_with_one_side_has_a_gamma_of_its_own() {
+    let minus = |v: u64| -F::from(v);
+    // 1/(1 - X) + 1/(-1 - X) is zero at X = 0 and nowhere else.
+    let columns = [vec![F::one(), minus(1)]];
+    for sides in [(vec![(0, None)], vec![]), (vec![], vec![(0, None)])] {
+        let session = Session::new(&columns, &[], &[sides]);
+        assert_rejected_in_the_reduction(session.prove_and_verify());
+    }
+
+    // The same beside a relation that holds.
+    let columns = [vec![F::one(), minus(1)], fv(0..8), fv((0..8).rev())];
+    let relations = [
+        (vec![(1, None)], vec![(2, None)]),
+        (vec![(0, None)], vec![]),
+    ];
+    let session = Session::new(&columns, &[], &relations);
+    assert_rejected_in_the_reduction(session.prove_and_verify());
+
+    // Weights that cancel on every key: the one side is zero whatever
+    // `gamma` is.
+    let columns = [
+        fv([5, 5, 7, 7]),
+        vec![F::one(), minus(1), F::from(2u64), minus(2)],
+    ];
+    for sides in [(vec![(0, Some(1))], vec![]), (vec![], vec![(0, Some(1))])] {
+        Session::new(&columns, &[], &[sides])
+            .prove_and_verify()
+            .unwrap();
+    }
 }
 
 /// A stack counts towards the run budget with all its entries: four
