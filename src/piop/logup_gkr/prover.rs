@@ -205,17 +205,17 @@ pub(super) fn weighted_sums<F: PrimeField, const T: usize>(
     terms: impl Fn(usize) -> [F; T],
 ) -> [F; T] {
     let mut acc = [F::zero(); T];
-    let pairs = weights.chunks_exact(2);
-    if let [w] = pairs.remainder() {
+    let (pairs, rest) = weights.as_chunks::<2>();
+    if let [w] = rest {
         let last = terms(weights.len() - 1);
         for (sum, term) in acc.iter_mut().zip(last) {
             *sum += *w * term;
         }
     }
-    for (i, w) in pairs.enumerate() {
+    for (i, w) in pairs.iter().enumerate() {
         let (even, odd) = (terms(2 * i), terms(2 * i + 1));
         for ((sum, even), odd) in acc.iter_mut().zip(even).zip(odd) {
-            *sum += F::sum_of_products(&[w[0], w[1]], &[even, odd]);
+            *sum += F::sum_of_products(w, &[even, odd]);
         }
     }
     acc
@@ -234,12 +234,13 @@ struct FoldJob<'a, F> {
 impl<F: PrimeField> FoldJob<'_, F> {
     fn run(self, r: F) {
         if self.stride == 1 {
-            for (d, src) in self.dst.iter_mut().zip(self.src.chunks_exact(2)) {
+            for (d, src) in self.dst.iter_mut().zip(self.src.as_chunks::<2>().0) {
                 *d = src[0] + src[1];
             }
             return;
         }
-        for (dst, src) in self.dst.chunks_exact_mut(2).zip(self.src.chunks_exact(4)) {
+        let (dst, src) = (self.dst.as_chunks_mut::<2>().0, self.src.as_chunks::<4>().0);
+        for (dst, src) in dst.iter_mut().zip(src) {
             dst[0] = src[0] + r * (src[2] - src[0]);
             dst[1] = src[1] + r * (src[3] - src[1]);
         }
