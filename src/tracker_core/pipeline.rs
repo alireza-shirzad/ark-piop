@@ -65,6 +65,14 @@ pub fn batch_s_check_claims<T: TrackerCore>(
         .map(|c| (c.id(), c.claim()))
         .collect();
 
+    // A sum may be the prover's own word, read by the verifier from the
+    // proof. The weights are drawn after every sum is in the transcript: a
+    // prover that knew them first could pick false sums whose weighted
+    // errors cancel.
+    for claim in &claims {
+        tracker.append_field_element(b"sumcheck claim", &claim.claim())?;
+    }
+
     for claim in claims {
         let ch = tracker.get_and_append_challenge(b"sumcheck challenge")?;
         let cp = tracker.mul_scalar(claim.id(), ch);
