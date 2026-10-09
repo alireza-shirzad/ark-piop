@@ -1,24 +1,19 @@
+mod batch;
 pub(crate) mod small_scalar_msm;
 pub(crate) mod srs;
 pub mod structs;
 use crate::arithmetic::mat_poly::mle::MLEStorage;
-use crate::arithmetic::mat_poly::utils::build_eq_x_r;
-use crate::arithmetic::mat_poly::utils::eq_eval;
-use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
-use crate::arithmetic::virt_poly::hp_interface::VPAuxInfo;
 use crate::errors::SnarkError;
 use crate::errors::SnarkResult;
 use crate::pcs::errors::PCSError;
 use crate::pcs::pst13::PCSError::EvaluationPointSizeMismatch;
 use crate::pcs::pst13::PCSError::TooLargePolynomial;
-use crate::pcs::pst13::PCSError::{ProverError, VerifierError};
 use crate::pcs::pst13::SnarkError::PCSErrors;
 use crate::pcs::pst13::structs::PST13BatchProof;
 use crate::pcs::pst13::structs::PST13Commitment;
 use crate::pcs::pst13::structs::PST13Proof;
-use crate::piop::sum_check::SumCheck;
 use crate::{
-    arithmetic::mat_poly::{mle::MLE, utils::evaluate_opt},
+    arithmetic::mat_poly::mle::MLE,
     pcs::{PCS, StructuredReferenceString},
     transcript::Tr,
 };
@@ -26,14 +21,9 @@ use ark_ec::{
     AffineRepr, CurveGroup, ScalarMul, pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM,
 };
 use ark_ff::{One, Zero};
-use ark_poly::MultilinearExtension;
 use ark_poly::Polynomial;
-use ark_std::log2;
 use ark_std::rand::Rng;
 use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
-use std::collections::BTreeMap;
-use std::iter;
-use std::ops::Deref;
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 
 /// Shared commit path for all `Sparse*` storage variants: rewrites `MSM(bases, values)` as
@@ -288,21 +278,18 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ) -> SnarkResult<(Self::Proof, E::ScalarField)> {
         let prover_param = prover_param.borrow();
 
-        if polynomial.num_vars() > prover_param.num_vars {
-            return Err(PCSErrors(TooLargePolynomial(
-                polynomial.num_vars(),
-                prover_param.num_vars,
-            )));
+        // The polynomial as it was committed: over its own hypercube. The
+        // variables it is padded to are ones it repeats along, so of a
+        // longer point it reads the first coordinates only.
+        let nv = polynomial.storage().inner_num_vars();
+        if nv > prover_param.num_vars {
+            return Err(PCSErrors(TooLargePolynomial(nv, prover_param.num_vars)));
         }
-
-        if polynomial.num_vars() != point.len() {
-            return Err(PCSErrors(EvaluationPointSizeMismatch(
-                point.len(),
-                polynomial.num_vars(),
-            )));
+        if point.len() < nv {
+            return Err(PCSErrors(EvaluationPointSizeMismatch(point.len(), nv)));
         }
+        let point = &point[..nv];
 
-        let nv = polynomial.num_vars();
         let open_span = tracing::span!(
             tracing::Level::DEBUG,
             "pst13.open",
@@ -312,7 +299,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         let _open_enter = open_span.enter();
         // The first `ignored` SRS vectors are unused for opening.
         let ignored = prover_param.num_vars - nv + 1;
-        let mut f = polynomial.to_evaluations();
+        let mut f = polynomial.storage().to_evaluations_vec();
 
         let mut proofs = Vec::new();
 
@@ -356,7 +343,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             let _msm_enter = msm_span.enter();
             proofs.push(E::G1::msm_unchecked(&gi.evals, &q).into_affine());
         }
-        let eval = evaluate_opt(polynomial, point);
+        // Every variable is bound: what is left is the evaluation.
+        let eval = f[0];
         Ok((PST13Proof { proofs }, eval))
     }
 
@@ -371,6 +359,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
     ) -> SnarkResult<PST13BatchProof<E, Self>> {
         #[cfg(feature = "honest-prover")]
         {
+            use ark_poly::MultilinearExtension;
             // Check the claimed evaluations are actually correct.
             for (i, ((poly, point), eval)) in polynomials
                 .iter()
@@ -378,134 +367,21 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 .zip(evals.iter())
                 .enumerate()
             {
-                let computed_eval = evaluate_opt(poly, point);
+                // A polynomial reads as many coordinates as it has variables.
+                let read = &point[..poly.storage().inner_num_vars().min(point.len())];
+                let computed_eval = poly.fix_variables(read).evaluations()[0];
                 if computed_eval != *eval {
                     return Err(SnarkError::PCSErrors(PCSError::HonestProver(i)));
                 }
             }
         }
-        let prover_param = prover_param.borrow();
-        let num_var = polynomials[0].num_vars();
-        let k = polynomials.len();
-        let ell = log2(k) as usize;
-
-        // challenge point t
-        let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
-
-        // eq(t, i) for i in [0..k]
-        let eq_t_i_list = build_eq_x_r(t.as_ref())?.into_evaluations();
-        // Merge polynomials sharing an opening point to cheapen the sumcheck.
-        let point_indices = points
-            .iter()
-            .fold(BTreeMap::<_, _>::new(), |mut indices, point| {
-                let idx = indices.len();
-                indices.entry(point).or_insert(idx);
-                indices
-            });
-        let deduped_points =
-            BTreeMap::from_iter(point_indices.iter().map(|(point, idx)| (*idx, *point)))
-                .into_values()
-                .collect::<Vec<_>>();
-        let merged_tilde_gs = {
-            let span = tracing::span!(
-                tracing::Level::DEBUG,
-                "pst13.multi_open.merge_polys",
-                num_polys = polynomials.len(),
-                num_unique_points = point_indices.len(),
-                nv = num_var,
-            );
-            let _enter = span.enter();
-            polynomials
-                .iter()
-                .zip(points.iter())
-                .zip(eq_t_i_list.iter())
-                .fold(
-                    iter::repeat_with(MLE::zero)
-                        .map(Arc::new)
-                        .take(point_indices.len())
-                        .collect::<Vec<_>>(),
-                    |mut merged_tilde_gs, ((poly, point), coeff)| {
-                        *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
-                            (*coeff, poly.deref());
-                        merged_tilde_gs
-                    },
-                )
-        };
-
-        let tilde_eqs: Vec<_> = {
-            let span = tracing::span!(
-                tracing::Level::DEBUG,
-                "pst13.multi_open.build_tilde_eqs",
-                num_unique_points = deduped_points.len(),
-                nv = num_var,
-            );
-            let _enter = span.enter();
-            deduped_points
-                .iter()
-                .map(|point| {
-                    let eq_b_zi = build_eq_x_r(point).unwrap().into_evaluations();
-                    Arc::new(MLE::from_evaluations_vec(num_var, eq_b_zi))
-                })
-                .collect()
-        };
-
-        let mut sum_check_vp = HPVirtualPolynomial::new(num_var);
-        for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs) {
-            sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
-        }
-
-        let proof = {
-            let span = tracing::span!(
-                tracing::Level::DEBUG,
-                "pst13.multi_open.sumcheck",
-                nv = num_var,
-            );
-            let _enter = span.enter();
-            match SumCheck::<E::ScalarField>::prove(&sum_check_vp, transcript) {
-                Ok(p) => p,
-                Err(_e) => {
-                    // cannot wrap IOPError with PCSError due to cyclic dependency
-                    return Err(PCSErrors(ProverError(
-                        "Sumcheck in batch proving Failed".to_string(),
-                    )));
-                }
-            }
-        };
-
-        // a2 := sumcheck's point
-        let a2 = &proof.point[..num_var];
-
-        // g'(X) = Σ_i eq(a2, point_i) * tilde_g_i(X), a2 being the sumcheck point.
-        let mut g_prime = Arc::new(MLE::zero());
-        {
-            let span = tracing::span!(
-                tracing::Level::DEBUG,
-                "pst13.multi_open.build_g_prime",
-                num_unique_points = deduped_points.len(),
-                nv = num_var,
-            );
-            let _enter = span.enter();
-            for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-                let eq_i_a2 = eq_eval(a2, point)?;
-                *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
-            }
-        }
-
-        let (g_prime_proof, _g_prime_eval) = {
-            let span = tracing::span!(
-                tracing::Level::DEBUG,
-                "pst13.multi_open.final_open",
-                nv = num_var,
-            );
-            let _enter = span.enter();
-            Self::open(prover_param, &g_prime, a2.to_vec().as_ref(), None)?
-        };
-
-        Ok(PST13BatchProof {
-            sum_check_proof: proof,
-            f_i_eval_at_point_i: evals.to_vec(),
-            g_prime_proof,
-        })
+        batch::open_batch(
+            prover_param.borrow(),
+            polynomials,
+            points,
+            evals,
+            transcript,
+        )
     }
 
     /// Verifies that `value` is the evaluation at `point` of the polynomial committed
@@ -517,13 +393,25 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         value: &E::ScalarField,
         proof: &Self::Proof,
     ) -> SnarkResult<bool> {
-        let num_var = point.len();
+        // A commitment is to a polynomial of its own number of variables,
+        // which reads the first coordinates of a longer point.
+        let num_var = commitment.nv as usize;
+        if point.len() < num_var {
+            return Err(PCSErrors(EvaluationPointSizeMismatch(point.len(), num_var)));
+        }
+        let point = &point[..num_var];
 
         if num_var > verifier_param.num_vars {
             return Err(PCSErrors(TooLargePolynomial(
                 num_var,
                 verifier_param.num_vars,
             )));
+        }
+
+        // One quotient per variable. With fewer the pairing below would be
+        // taken over the ones that are there.
+        if proof.proofs.len() != num_var {
+            return Ok(false);
         }
 
         let h_mul: Vec<E::G2Affine> = verifier_param.h.into_group().batch_mul(point);
@@ -562,71 +450,18 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         verifier_param: &Self::VerifierParam,
         comitments: &[Self::Commitment],
         points: &[<Self::Poly as Polynomial<E::ScalarField>>::Point],
-        _evals: &[E::ScalarField],
+        evals: &[E::ScalarField],
         batch_proof: &Self::BatchProof,
         transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<bool> {
-        let k = comitments.len();
-        let ell = log2(k) as usize;
-        let num_var = batch_proof.sum_check_proof.point.len();
-        // challenge point t
-        let t = transcript.get_and_append_challenge_vectors("t".as_ref(), ell)?;
-
-        // sum check point (a2)
-        let a2 = &batch_proof.sum_check_proof.point[..num_var];
-
-        // build g' commitment
-        let eq_t_list = build_eq_x_r(t.as_ref())?.into_evaluations();
-
-        let mut scalars = vec![];
-        let mut bases = vec![];
-
-        for (i, point) in points.iter().enumerate() {
-            let eq_i_a2 = eq_eval(a2, point)?;
-            scalars.push(eq_i_a2 * eq_t_list[i]);
-            bases.push(comitments[i].com);
-        }
-        let g_prime_commit = E::G1::msm_unchecked(&bases, &scalars);
-
-        // ensure \sum_i eq(t, <i>) * f_i_evals matches the sum via SumCheck
-        let mut sum = E::ScalarField::zero();
-        for (i, &e) in eq_t_list.iter().enumerate().take(k) {
-            sum += e * batch_proof.f_i_eval_at_point_i[i];
-        }
-        let aux_info = VPAuxInfo {
-            max_degree: 2,
-            num_variables: num_var,
-            phantom: PhantomData,
-        };
-        let subclaim = match SumCheck::<E::ScalarField>::verify(
-            sum,
-            &batch_proof.sum_check_proof,
-            &aux_info,
-            transcript,
-        ) {
-            Ok(p) => p,
-            Err(_e) => {
-                // cannot wrap IOPError with PCSError due to cyclic dependency
-                return Err(PCSErrors(VerifierError(
-                    "Sumcheck in batch verifying Failed".to_string(),
-                )));
-            }
-        };
-        let tilde_g_eval = subclaim.expected_evaluation;
-
-        // verify commitment
-        let res = Self::verify(
+        batch::verify_batch(
             verifier_param,
-            &PST13Commitment {
-                com: g_prime_commit.into_affine(),
-                nv: num_var as u8,
-            },
-            a2.to_vec().as_ref(),
-            &tilde_g_eval,
-            &batch_proof.g_prime_proof,
-        )?;
-
-        Ok(res)
+            comitments,
+            points,
+            evals,
+            batch_proof,
+            transcript,
+        )
     }
 }
 
@@ -636,6 +471,7 @@ mod tests {
 
     use super::*;
     use ark_ec::pairing::Pairing;
+    use ark_poly::MultilinearExtension;
     use ark_std::{UniformRand, rand::Rng, test_rng, vec::Vec};
 
     type E = ark_bn254::Bn254;
@@ -675,6 +511,57 @@ mod tests {
         let poly2 = Arc::new(MLE::rand(1, &mut rng));
         test_single_helper(&params, &poly2, &mut rng)?;
 
+        Ok(())
+    }
+
+    /// A polynomial padded to more variables than it was committed with,
+    /// and a point longer than it: both read the first coordinates only,
+    /// and the opening is the one of the committed polynomial.
+    #[test]
+    fn opening_reads_as_many_coordinates_as_the_commitment_has_variables() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 8)?;
+        let (ck, vk) = PST13::trim(&params, None, Some(8))?;
+        let inner = MLE::rand(3, &mut rng);
+        let padded = Arc::new(MLE::new(inner.mat_mle().into_owned(), Some(6)));
+        let inner = Arc::new(inner);
+        let point: Vec<Fr> = (0..6).map(|_| Fr::rand(&mut rng)).collect();
+
+        let com = PST13::commit(&ck, &padded)?;
+        assert_eq!(com.nv, 3);
+        let (proof, value) = PST13::open(&ck, &padded, &point, None)?;
+        assert_eq!(
+            (proof.clone(), value),
+            PST13::open(&ck, &inner, &point[..3].to_vec(), None)?
+        );
+        assert_eq!(value, inner.evaluate(&point[..3].to_vec()));
+        assert_eq!(proof.proofs.len(), 3);
+        assert!(PST13::verify(&vk, &com, &point, &value, &proof)?);
+        assert!(PST13::verify(
+            &vk,
+            &com,
+            &point[..3].to_vec(),
+            &value,
+            &proof
+        )?);
+
+        // Another coordinate the polynomial reads, another value, a point
+        // too short, and a proof with a quotient missing.
+        let mut moved = point.clone();
+        moved[2] += Fr::from(1u64);
+        assert!(!PST13::verify(&vk, &com, &moved, &value, &proof)?);
+        assert!(!PST13::verify(
+            &vk,
+            &com,
+            &point,
+            &(value + Fr::from(1u64)),
+            &proof
+        )?);
+        assert!(PST13::verify(&vk, &com, &point[..2].to_vec(), &value, &proof).is_err());
+        assert!(PST13::open(&ck, &padded, &point[..2].to_vec(), None).is_err());
+        let mut short = proof.clone();
+        short.proofs.pop();
+        assert!(!PST13::verify(&vk, &com, &point, &value, &short)?);
         Ok(())
     }
 

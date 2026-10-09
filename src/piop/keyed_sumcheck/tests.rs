@@ -4143,18 +4143,21 @@ fn all_routes_proof(mut prover: ArgProver<B>) -> SNARKProof<B> {
     prover.build_proof().unwrap()
 }
 
-/// Making the lookup protocol a choice left LogUp-GKR what it was. Two
-/// things changed in its proofs, and nothing else: they end in the
-/// protocol's tag, and their transcript opens with the protocol, which
-/// moves every challenge.
+/// The bytes of a LogUp-GKR proof, pinned so that a change to them is a
+/// decision. The protocol being a choice shows in two places and nowhere
+/// else: proofs end in the protocol's tag, and their transcript opens with
+/// the protocol, which moves every challenge.
 ///
-/// A prover whose transcript opens as it used to therefore gives, between
-/// the version byte and the tag, the proof the commit before the choice
-/// (b1dc5e2) gives for [`all_routes_proof`]: 21214 bytes with this hash.
+/// A prover whose transcript does not open that way therefore gives,
+/// between the version byte and the tag, the proof of [`all_routes_proof`]
+/// as it would be without the choice: 20694 bytes with this hash. Up to
+/// proof encoding 5 those were the 21214 bytes of the commit before the
+/// choice (b1dc5e2); encoding 6 changed the batch opening, which no longer
+/// repeats the evaluations it opens.
 #[test]
-fn logup_gkr_proof_is_the_one_from_before_the_protocol_was_a_choice() {
-    const BEFORE: &str = "a3414e6d67dc1dcdb9347ff09343c04899957c4ac7a7912e829a135ec9fe7d2f";
-    const BEFORE_LEN: usize = 21214;
+fn logup_gkr_proof_bytes_are_pinned() {
+    const PINNED: &str = "1ac47f89e9d823aa057325c5c85302aa9f42f75c771b1ad1c5445a4d2eea9809";
+    const PINNED_LEN: usize = 20694;
 
     let config = SharedArgConfig {
         lookup_protocol: LookupProtocol::LogUpGkr,
@@ -4167,10 +4170,10 @@ fn logup_gkr_proof_is_the_one_from_before_the_protocol_was_a_choice() {
         .unwrap();
     let (version, rest) = bytes.split_first().unwrap();
     let (tag, before) = rest.split_last().unwrap();
-    assert_eq!(*version, 5);
+    assert_eq!(*version, 6);
     assert_eq!(*tag, LookupProtocol::LogUpGkr.tag());
-    assert_eq!(before.len() + 1, BEFORE_LEN);
-    assert_eq!(blake3::hash(before).to_hex().as_str(), BEFORE);
+    assert_eq!(before.len() + 1, PINNED_LEN);
+    assert_eq!(blake3::hash(before).to_hex().as_str(), PINNED);
 
     // The binding is the whole difference to a proof that verifies: one of
     // the same length that is not the same.

@@ -1918,15 +1918,16 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
     });
 }
 
-/// The version tag is the one of proofs that name their lookup protocol,
-/// and a proof tagged with the version before it is not decoded.
+/// The version tag is the one of proofs whose batch opening is over
+/// polynomials of mixed sizes, and a proof tagged with the version before
+/// it is not decoded.
 #[test]
 fn snark_proof_tagged_with_the_previous_encoding_version_is_refused() {
     under_each_protocol(|_| {
         let (proof, _, _) = proof_with_lookups();
         let mut bytes = proof.to_bytes().unwrap();
-        assert_eq!(bytes[0], 5);
-        bytes[0] = 4;
+        assert_eq!(bytes[0], 6);
+        bytes[0] = 5;
         assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
     });
 }

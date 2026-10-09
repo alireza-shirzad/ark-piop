@@ -1,6 +1,6 @@
-use ark_ff::{Field, PrimeField};
+use ark_ff::PrimeField;
 use ark_poly::{
-    DenseMVPolynomial, DenseMultilinearExtension, MultilinearExtension,
+    DenseMVPolynomial, DenseMultilinearExtension,
     multivariate::{SparsePolynomial, SparseTerm, Term},
 };
 use ark_std::cfg_iter_mut;
@@ -13,11 +13,6 @@ use crate::{arithmetic::errors::ArithErrors, errors::SnarkResult};
 
 use super::mle::MLE;
 
-pub(crate) fn evaluate_opt<F: PrimeField>(poly: &MLE<F>, point: &[F]) -> F {
-    assert_eq!(poly.num_vars(), point.len());
-    fix_variables(poly, point).evaluations()[0]
-}
-
 pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
     // Bind Cow returns to locals so potentially-owned storage outlives the
     // zipped iteration (compressed backings materialize once here).
@@ -28,11 +23,6 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
         .zip(&poly_field.evaluations)
         .filter_map(|(e, p)| (!p.is_zero()).then(|| if p.is_one() { *e } else { *e * p }))
         .sum::<F>()
-}
-
-//TODO: why keep this when MLE already has a fix_variables method?
-pub(crate) fn fix_variables<F: Field>(poly: &MLE<F>, partial_point: &[F]) -> MLE<F> {
-    poly.fix_variables(partial_point)
 }
 
 /// Evaluate eq polynomial.
