@@ -168,19 +168,22 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         _batch_proof: &Self::BatchProof,
         _transcript: &mut Tr<E::ScalarField>,
     ) -> SnarkResult<bool> {
-        let mut aggr_res = true;
-        _comitments
+        // One proof per claim: a shorter list would leave claims unchecked.
+        let claims = _comitments.len();
+        if _points.len() != claims || _evals.len() != claims || _batch_proof.0.len() != claims {
+            return Ok(false);
+        }
+        for (((commitment, point), proof), value) in _comitments
             .iter()
-            .zip(_points.iter())
-            .zip(_batch_proof.0.iter())
-            .zip(_evals.iter())
-            .for_each(|(((commitment, point), proof), value)| {
-                let res = Self::verify(_verifier_param, commitment, point, value, proof).unwrap();
-                if !res {
-                    aggr_res = false;
-                }
-            });
-        Ok(aggr_res)
+            .zip(_points)
+            .zip(&_batch_proof.0)
+            .zip(_evals)
+        {
+            if !Self::verify(_verifier_param, commitment, point, value, proof)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Verifies that `value` is the evaluation at `point` of the committed polynomial.
@@ -226,6 +229,50 @@ mod tests {
     use ark_bn254::Bn254;
     use ark_std::UniformRand;
     use ark_std::test_rng;
+    /// A batch is one proof per claim, each checked: a list that is short
+    /// of a proof, or holds a wrong one, is not a proof of the batch.
+    #[test]
+    fn batch_verify_checks_every_claim() -> SnarkResult<()> {
+        type E = Bn254;
+        let rng = &mut test_rng();
+        let degree = 12;
+        let pp = KZG10::<E>::gen_srs_for_testing(rng, degree)?;
+        let (ck, vk) = pp.trim(degree)?;
+        let mut transcript = Tr::new(b"kzg batch test");
+        let polys: Vec<_> = (0..3)
+            .map(|_| Arc::new(<LDE<_> as DenseUVPolynomial<_>>::rand(degree, rng)))
+            .collect();
+        let comms: Vec<_> = polys
+            .iter()
+            .map(|p| KZG10::<E>::commit(&ck, p))
+            .collect::<SnarkResult<_>>()?;
+        let points: Vec<_> = (0..3)
+            .map(|_| <E as Pairing>::ScalarField::rand(rng))
+            .collect();
+        let evals: Vec<_> = polys
+            .iter()
+            .zip(&points)
+            .map(|(p, x)| p.evaluate(x))
+            .collect();
+        let proof = KZG10::<E>::multi_open(&ck, &polys, &points, &evals, &mut transcript)?;
+        let mut verify = |evals: &[_], proof: &KZG10BatchProof<E>| {
+            KZG10::<E>::batch_verify(&vk, &comms, &points, evals, proof, &mut transcript)
+        };
+        assert!(verify(&evals, &proof)?);
+
+        let mut short = proof.clone();
+        short.0.pop();
+        assert!(!verify(&evals, &short)?);
+        let mut swapped = proof.clone();
+        swapped.0.swap(0, 2);
+        assert!(!verify(&evals, &swapped)?);
+        let mut wrong = evals.clone();
+        wrong[2] += <E as Pairing>::ScalarField::from(1u64);
+        assert!(!verify(&wrong, &proof)?);
+        assert!(!verify(&evals[..2], &proof)?);
+        Ok(())
+    }
+
     fn end_to_end_test_template<E>() -> SnarkResult<()>
     where
         E: Pairing,
