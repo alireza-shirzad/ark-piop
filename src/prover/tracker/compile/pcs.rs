@@ -48,12 +48,8 @@ where
         let mut point_map: BTreeMap<PointID, Vec<B::F>> = BTreeMap::new();
         let mut point_to_id: BTreeMap<Vec<B::F>, PointID> = BTreeMap::new();
         let mut next_point_id = 0usize;
-        let mut mat_polys = Vec::new();
-        let mut points = Vec::new();
-        let mut evals = Vec::new();
-        // Track which (CommitmentID, PointID) pairs we've already added to the
-        // opening lists, so each unique polynomial is opened at each point only once.
-        let mut opened: BTreeSet<(CommitmentID, PointID)> = BTreeSet::new();
+        // A polynomial behind each commitment that is opened.
+        let mut opened_polys: BTreeMap<CommitmentID, Arc<MLE<B::F>>> = BTreeMap::new();
 
         // Group claims by point
         let mut deduped_claims: BTreeMap<Vec<B::F>, Vec<_>> = BTreeMap::new();
@@ -112,14 +108,23 @@ where
 
                 // Always populate the CommitmentID-keyed query map.
                 query_map.entry(comm_id).or_default().insert(point_id, eval);
+                opened_polys
+                    .entry(comm_id)
+                    .or_insert_with(|| self.mat_mv_poly(mat_id).unwrap().clone());
+            }
+        }
 
-                // Only add to the opening lists if this (CommitmentID, PointID)
-                // hasn't been opened yet.
-                if opened.insert((comm_id, point_id)) {
-                    mat_polys.push(self.mat_mv_poly(mat_id).unwrap().clone());
-                    points.push(point.clone());
-                    evals.push(eval);
-                }
+        // The openings, once per (CommitmentID, PointID) and in the order of
+        // the query map: the verifier has nothing but that map to line its
+        // commitments up with the batch.
+        let mut mat_polys = Vec::new();
+        let mut points = Vec::new();
+        let mut evals = Vec::new();
+        for (comm_id, queries_by_point) in &query_map {
+            for (point_id, eval) in queries_by_point {
+                mat_polys.push(opened_polys[comm_id].clone());
+                points.push(point_map[point_id].clone());
+                evals.push(*eval);
             }
         }
 
@@ -208,9 +213,6 @@ where
         let mut point_map: BTreeMap<PointID, B::F> = BTreeMap::new();
         let mut point_to_id: BTreeMap<B::F, PointID> = BTreeMap::new();
         let mut next_point_id = 0usize;
-        let mut mat_polys = Vec::new();
-        let mut points = Vec::new();
-        let mut evals = Vec::new();
         for claim in &self.state.uv_pcs_substate.eval_claims {
             let eval_id = claim.id();
             let eval_point = claim.point();
@@ -227,36 +229,8 @@ where
                     .entry(mat_id)
                     .or_default()
                     .insert(point_id, eval);
-                mat_polys.push(self.mat_uv_poly(mat_id).unwrap().clone());
-                points.push(*eval_point);
-                evals.push(eval);
             }
         }
-
-        let opening_proof: PCSOpeningProof<B::F, B::UvPCS>;
-        if mat_polys.len() == 1 {
-            let single_proof = B::UvPCS::open(
-                self.pk.uv_pcs_param.as_ref(),
-                &mat_polys[0],
-                &points[0],
-                None,
-            )?;
-            opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
-            assert!(single_proof.1 == evals[0]);
-        } else if mat_polys.len() > 1 {
-            let batch_proof = B::UvPCS::multi_open(
-                self.pk.uv_pcs_param.as_ref(),
-                &mat_polys,
-                &points,
-                &evals,
-                &mut self.state.transcript,
-            )?;
-            opening_proof = PCSOpeningProof::BatchProof(batch_proof);
-        } else {
-            opening_proof = PCSOpeningProof::Empty;
-        }
-
-        // Perform the batch-opening
 
         // Deduplicate UV commitments (same logic as MV).
         let mut unique_comitments: BTreeMap<CommitmentID, _> = BTreeMap::new();
@@ -290,13 +264,53 @@ where
 
         // Convert TrackerID-keyed query_map to CommitmentID-keyed.
         let mut query_map: BTreeMap<CommitmentID, BTreeMap<PointID, B::F>> = BTreeMap::new();
+        let mut opened_polys: BTreeMap<CommitmentID, _> = BTreeMap::new();
         for (tracker_id, evals_by_point) in tracker_query_map {
             if let Some(comm_id) = comitment_map.get(&tracker_id) {
                 query_map
                     .entry(*comm_id)
                     .or_default()
                     .extend(evals_by_point);
+                opened_polys
+                    .entry(*comm_id)
+                    .or_insert_with(|| self.mat_uv_poly(tracker_id).unwrap().clone());
             }
+        }
+
+        // The openings, once per (CommitmentID, PointID) and in the order of
+        // the query map, which is the order the verifier checks them in.
+        let mut mat_polys = Vec::new();
+        let mut points = Vec::new();
+        let mut evals = Vec::new();
+        for (comm_id, queries_by_point) in &query_map {
+            for (point_id, eval) in queries_by_point {
+                mat_polys.push(opened_polys[comm_id].clone());
+                points.push(point_map[point_id]);
+                evals.push(*eval);
+            }
+        }
+
+        let opening_proof: PCSOpeningProof<B::F, B::UvPCS>;
+        if mat_polys.len() == 1 {
+            let single_proof = B::UvPCS::open(
+                self.pk.uv_pcs_param.as_ref(),
+                &mat_polys[0],
+                &points[0],
+                None,
+            )?;
+            opening_proof = PCSOpeningProof::SingleProof(single_proof.0);
+            assert!(single_proof.1 == evals[0]);
+        } else if mat_polys.len() > 1 {
+            let batch_proof = B::UvPCS::multi_open(
+                self.pk.uv_pcs_param.as_ref(),
+                &mat_polys,
+                &points,
+                &evals,
+                &mut self.state.transcript,
+            )?;
+            opening_proof = PCSOpeningProof::BatchProof(batch_proof);
+        } else {
+            opening_proof = PCSOpeningProof::Empty;
         }
 
         Ok(PCSSubproof {

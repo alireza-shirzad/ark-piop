@@ -8,6 +8,38 @@ fn two_to_the<F: PrimeField>(exponent: usize) -> F {
     F::from(2u64).pow([exponent as u64])
 }
 
+/// The commitment behind each `CommitmentID` of a proof's commitment map.
+///
+/// The map is the prover's: it says which tracked commitments share an id,
+/// and with it their evaluations. Two commitments under one id would have
+/// the evaluations of one opened against the other, so an id has to stand
+/// for one commitment.
+fn commitments_by_id<C: Clone + PartialEq>(
+    commitment_map: &BTreeMap<TrackerID, CommitmentID>,
+    tracked: &BTreeMap<TrackerID, C>,
+) -> SnarkResult<BTreeMap<CommitmentID, C>> {
+    let mut by_id: BTreeMap<CommitmentID, C> = BTreeMap::new();
+    for (tracker_id, comm_id) in commitment_map {
+        let Some(comm) = tracked.get(tracker_id) else {
+            continue;
+        };
+        match by_id.get(comm_id) {
+            None => {
+                by_id.insert(*comm_id, comm.clone());
+            }
+            Some(known) if known == comm => {}
+            Some(_) => {
+                return Err(SnarkError::VerifierError(
+                    VerifierError::VerifierCheckFailed(format!(
+                        "the proof's commitment map gives {comm_id:?} to two different commitments"
+                    )),
+                ));
+            }
+        }
+    }
+    Ok(by_id)
+}
+
 impl<B: SnarkBackend> VerifierTracker<B> {
     /// Batch all zerocheck claims into one via random linear combination.
     /// Delegates to the generic pipeline.
@@ -127,6 +159,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
+        // The most factors a term of the aggregated polynomial has. The zero
+        // polynomial is proved as one factor.
+        let own_degree = self
+            .state
+            .virtual_polys
+            .get(&sumcheck_aggr_claim.id())
+            .and_then(|terms| terms.iter().map(|(_, factors)| factors.len()).max())
+            .unwrap_or(0)
+            .max(1);
 
         // Direct field access so the borrow of self.proof doesn't conflict
         // with the &mut borrow of self.state.transcript.
@@ -154,6 +195,20 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                      the bucket has {target_nv}",
                     sc_proof.proofs.len(),
                     sc_aux_info.num_variables
+                )),
+            ));
+        }
+        // The degree is the proof's to state and the verifier's to bound: a
+        // term of the polynomial this sumcheck is about has no more factors
+        // than `own_degree`, and a round polynomial of a higher degree is
+        // not one of it. Unbounded, the degree is also what each round of
+        // the check costs.
+        if sc_aux_info.max_degree > own_degree {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "sumcheck of bucket {bucket_index} declares degree {}, its polynomial has \
+                     degree {own_degree} at most",
+                    sc_aux_info.max_degree
                 )),
             ));
         }
@@ -785,8 +840,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
+    /// Checks every evaluation the proof gives for a multivariate commitment
+    /// against that commitment. The evaluations are the ones the oracles
+    /// answered the sumcheck checks with, so nothing else ties those checks
+    /// to what was committed.
     #[instrument(level = "debug", skip_all)]
-    fn verify_mv_pcs_proof(&mut self) -> SnarkResult<bool> {
+    fn verify_mv_pcs_proof(&mut self) -> SnarkResult<()> {
         // Fetch the deduped evaluation claims (CommitmentID-keyed).
         // Build a CommitmentID → Commitment lookup from both proof-owned and
         // external commitments via the comitment_map.
@@ -796,18 +855,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
         // Build CommitmentID → Commitment by finding any TrackerID for each
         // CommitmentID and looking up its materialized commitment.
-        let comm_id_to_comm: BTreeMap<CommitmentID, _> = proof
-            .mv_pcs_subproof
-            .comitment_map
-            .iter()
-            .filter_map(|(tracker_id, comm_id)| {
-                self.state
-                    .mv_pcs_substate
-                    .materialized_comms
-                    .get(tracker_id)
-                    .map(|comm| (*comm_id, comm.clone()))
-            })
-            .collect();
+        let comm_id_to_comm = commitments_by_id(
+            &proof.mv_pcs_subproof.comitment_map,
+            &self.state.mv_pcs_substate.materialized_comms,
+        )?;
 
         // Assemble (commitment, point, eval) triples, returning a verifier
         // error rather than panicking if the proof's query_map references a
@@ -882,30 +933,38 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &mut self.state.transcript,
             )?
         } else {
-            true
+            // Nothing to open, so nothing may claim to open it.
+            matches!(
+                self.proof_or_err()?.mv_pcs_subproof.opening_proof,
+                PCSOpeningProof::Empty
+            )
         };
 
-        Ok(pcs_res)
+        if !pcs_res {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(
+                    "the multivariate opening proof does not hold for the claimed evaluations"
+                        .to_string(),
+                ),
+            ));
+        }
+        Ok(())
     }
 
+    /// Checks every evaluation the proof gives for a univariate commitment
+    /// against that commitment. The evaluations are the ones the oracles
+    /// answered the sumcheck checks with, so nothing else ties those checks
+    /// to what was committed.
     #[instrument(level = "debug", skip_all)]
-    fn verify_uv_pcs_proof(&mut self) -> SnarkResult<bool> {
+    fn verify_uv_pcs_proof(&mut self) -> SnarkResult<()> {
         let proof = self.proof_or_err()?;
         let eval_claims = &proof.uv_pcs_subproof.deduped_query_map;
         let point_map = &proof.uv_pcs_subproof.point_map;
 
-        let comm_id_to_comm: BTreeMap<CommitmentID, _> = proof
-            .uv_pcs_subproof
-            .comitment_map
-            .iter()
-            .filter_map(|(tracker_id, comm_id)| {
-                self.state
-                    .uv_pcs_substate
-                    .materialized_comms
-                    .get(tracker_id)
-                    .map(|comm| (*comm_id, comm.clone()))
-            })
-            .collect();
+        let comm_id_to_comm = commitments_by_id(
+            &proof.uv_pcs_subproof.comitment_map,
+            &self.state.uv_pcs_substate.materialized_comms,
+        )?;
 
         // Assemble (commitment, point, eval) triples, rejecting malformed proofs
         // with a verifier error rather than panicking.
@@ -979,10 +1038,22 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 &mut self.state.transcript,
             )?
         } else {
-            true
+            // Nothing to open, so nothing may claim to open it.
+            matches!(
+                self.proof_or_err()?.uv_pcs_subproof.opening_proof,
+                PCSOpeningProof::Empty
+            )
         };
 
-        Ok(pcs_res)
+        if !pcs_res {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(
+                    "the univariate opening proof does not hold for the claimed evaluations"
+                        .to_string(),
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Widest materialized commitment — the run's common frame for
@@ -1054,11 +1125,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
         // Verify the sumcheck proofs
         self.verify_sc_proofs()?;
-        // Verify the multivariate pcs proofs
-        // assert!(self.verify_mv_pcs_proof(max_nv)?);
+        // The sumchecks were checked against evaluations the proof claims
+        // for the commitments. The openings are what makes them true.
         self.verify_mv_pcs_proof()?;
-        // Verify the multivariate pcs proofs
-        // assert!(self.verify_uv_pcs_proof()?);
         self.verify_uv_pcs_proof()?;
         Ok(())
     }

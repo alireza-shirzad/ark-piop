@@ -48,10 +48,8 @@ where
     E: Pairing,
     MvPCS: PCS<E::ScalarField>,
 {
-    /// A sum check proof proving tilde g's sum
+    /// The sumcheck that reduces the claims to one on `g'`
     pub(crate) sum_check_proof: SumcheckProof<E::ScalarField>,
-    /// f_i(point_i)
-    pub f_i_eval_at_point_i: Vec<E::ScalarField>,
     /// proof for g'(a_2)
     pub(crate) g_prime_proof: MvPCS::Proof,
 }
@@ -64,7 +62,6 @@ where
     fn default() -> Self {
         Self {
             sum_check_proof: SumcheckProof::default(),
-            f_i_eval_at_point_i: vec![],
             g_prime_proof: MvPCS::Proof::default(),
         }
     }

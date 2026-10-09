@@ -26,7 +26,11 @@ use crate::{
 ///
 /// v5: `SNARKProof.lookup_messages` names the lookup protocol the proof was
 /// made with and carries the term sums of LogUp.
-pub const PROOF_ENCODING_VERSION: u8 = 5;
+///
+/// v6: the multivariate batch opening is over polynomials of mixed sizes,
+/// binds its claims to the transcript before it draws its challenge, and no
+/// longer repeats the claimed evaluations, which the query map holds.
+pub const PROOF_ENCODING_VERSION: u8 = 6;
 use crate::{
     pcs::PCS,
     piop::logup_gkr::LogupGkrProof,
