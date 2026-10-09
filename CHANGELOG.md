@@ -52,6 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   different commitments, which let the evaluations of a commitment the
   verifier holds be opened against one of the proof's.
 - The univariate batch check verifies one proof per claim.
+- A bucket sumcheck that declares a higher degree than the verifier's own
+  polynomial has is rejected; the degree was the proof's to choose.
 - A lookup whose constant column is wider than every commitment, and one
   whose column and multiplicities differ in size, are now proved.
 - Verification fails after a lookup reduction that failed or never ran.

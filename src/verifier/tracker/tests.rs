@@ -517,6 +517,60 @@ fn malformed_bucket_sumcheck_is_an_error_not_a_panic() {
     assert_check_failed(verify(bare));
 }
 
+/// A bucket's sumcheck may not declare a higher degree than the verifier's
+/// own polynomial has: the round polynomials would not be that
+/// polynomial's, and the degree is what a round costs to check. The
+/// product case has a degree above one to stay under, too.
+#[test]
+fn bucket_sumcheck_of_a_higher_degree_than_its_polynomial_is_rejected() {
+    for kind in [Narrow::Committed, Narrow::Product] {
+        let case = RawClaimCase::new(2, 8, kind);
+        let verify = |proof| case.verify(proof, case.narrow_sum);
+        verify(with_buckets(&case.proof, |_| {})).unwrap();
+        let declared: Vec<usize> = case
+            .proof
+            .sc_subproof
+            .as_ref()
+            .unwrap()
+            .buckets()
+            .iter()
+            .map(|bucket| bucket.sc_aux_info().max_degree)
+            .collect();
+
+        for bucket in 0..declared.len() {
+            for raised in [declared[bucket] + 1, 64, 1 << 20, usize::MAX] {
+                // The messages are padded to the declared degree where that
+                // can be done, so that the shape is right and only the
+                // degree is not.
+                let proof = with_buckets(&case.proof, |buckets| {
+                    buckets[bucket].1.max_degree = raised;
+                    if raised <= 64 {
+                        for msg in &mut buckets[bucket].0.proofs {
+                            msg.evaluations.resize(raised + 1, F::zero());
+                        }
+                    }
+                });
+                match verify(proof) {
+                    Err(SnarkError::VerifierError(VerifierError::VerifierCheckFailed(reason)))
+                        if reason.contains("declares degree") => {}
+                    other => panic!("degree {raised} in bucket {bucket}: got {other:?}"),
+                }
+            }
+            // A lower degree than the polynomial's is no proof of it, but
+            // that is for the sumcheck to find.
+            if declared[bucket] > 1 {
+                let proof = with_buckets(&case.proof, |buckets| {
+                    buckets[bucket].1.max_degree -= 1;
+                    for msg in &mut buckets[bucket].0.proofs {
+                        msg.evaluations.pop();
+                    }
+                });
+                assert!(verify(proof).is_err());
+            }
+        }
+    }
+}
+
 /// A claim on a polynomial whose every term has a zero coefficient: its
 /// terms are dropped on the way to the sumcheck, which must still run over
 /// the bucket's hypercube. `(zero claim nv, nv of an ordinary claim next

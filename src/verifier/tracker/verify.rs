@@ -159,6 +159,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         assert_eq!(self.state.mv_pcs_substate.sum_check_claims.len(), 1);
 
         let sumcheck_aggr_claim = self.state.mv_pcs_substate.sum_check_claims.last().unwrap();
+        // The most factors a term of the aggregated polynomial has. The zero
+        // polynomial is proved as one factor.
+        let own_degree = self
+            .state
+            .virtual_polys
+            .get(&sumcheck_aggr_claim.id())
+            .and_then(|terms| terms.iter().map(|(_, factors)| factors.len()).max())
+            .unwrap_or(0)
+            .max(1);
 
         // Direct field access so the borrow of self.proof doesn't conflict
         // with the &mut borrow of self.state.transcript.
@@ -186,6 +195,20 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                      the bucket has {target_nv}",
                     sc_proof.proofs.len(),
                     sc_aux_info.num_variables
+                )),
+            ));
+        }
+        // The degree is the proof's to state and the verifier's to bound: a
+        // term of the polynomial this sumcheck is about has no more factors
+        // than `own_degree`, and a round polynomial of a higher degree is
+        // not one of it. Unbounded, the degree is also what each round of
+        // the check costs.
+        if sc_aux_info.max_degree > own_degree {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(format!(
+                    "sumcheck of bucket {bucket_index} declares degree {}, its polynomial has \
+                     degree {own_degree} at most",
+                    sc_aux_info.max_degree
                 )),
             ));
         }
