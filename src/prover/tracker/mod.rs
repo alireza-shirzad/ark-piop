@@ -293,7 +293,7 @@ where
                 (*id, bytes, nv, kind)
             })
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
         let total_bytes: u64 = entries.iter().map(|(_, sz, _, _)| *sz).sum();
         let top_polys: Vec<_> = entries
             .iter()
@@ -594,6 +594,88 @@ mod tests {
         let eval_b = tracker.evaluate_mv(id_b, &pt).unwrap();
         let eval_prod = tracker.evaluate_mv(id_prod, &pt).unwrap();
         assert_eq!(eval_prod, eval_a * eval_b);
+    }
+
+    /// A factor with fewer variables than the product repeats along the
+    /// others, whatever its storage and wherever it sits in the product.
+    #[test]
+    fn mul_polys_repeats_a_narrower_factor() {
+        let wide: Vec<F> = (0..8).map(|i| F::from(i as u64 + 2)).collect();
+        for narrow in [vec![F::from(7)], vec![F::from(3), F::from(5)]] {
+            let mut tracker = make_tracker();
+            let id_wide = tracker.track_mat_mv_poly(MLE::from_evaluations_vec(3, wide.clone()));
+            let narrow_nv = narrow.len().trailing_zeros() as usize;
+            let id_narrow =
+                tracker.track_mat_mv_poly(MLE::from_evaluations_vec(narrow_nv, narrow.clone()));
+            let expected: Vec<F> = (0..8).map(|i| wide[i] * narrow[i % narrow.len()]).collect();
+            for (lhs, rhs) in [(id_narrow, id_wide), (id_wide, id_narrow)] {
+                let id_prod = tracker.mul_polys(lhs, rhs);
+                assert_eq!(tracker.evaluations(id_prod), expected);
+            }
+        }
+    }
+
+    /// A virtual polynomial is read from its factors' own storage. Whatever
+    /// the storage, the rows are those of the factors expanded to field
+    /// elements and combined term by term.
+    #[test]
+    fn evaluations_of_a_virtual_poly_are_those_of_its_expanded_terms() {
+        const NV: usize = 6;
+        let mut tracker = make_tracker();
+        let mut column = |nv: usize, value: &dyn Fn(u64) -> F| {
+            let evals = (0..1u64 << nv).map(value).collect();
+            tracker.track_mat_mv_poly(MLE::from_evaluations_vec(nv, evals))
+        };
+        let activator = column(NV, &|row| F::from(row % 3 != 0));
+        let other = column(NV, &|row| F::from(row % 4 < 2));
+        let limb = column(NV, &|row| F::from((row * 977) % 60_000));
+        let byte = column(NV, &|row| F::from((row * 31) % 251));
+        let wide = column(NV, &|row| -F::from(row * row + 1));
+        let narrow = column(NV - 2, &|row| F::from(row + 300));
+        let constant = tracker.track_mat_arc_mv_poly(Arc::new(
+            MLE::from_evaluations_vec(NV, vec![F::from(9); 1 << NV])
+                .compressed()
+                .detect_redundancy(),
+        ));
+        let tags: Vec<&str> = [activator, limb, byte, wide, narrow, constant]
+            .iter()
+            .map(|id| tracker.mat_mv_poly(*id).unwrap().storage().kind_tag())
+            .collect();
+        assert_eq!(tags, ["bit", "u32", "u8", "field", "u32", "const"]);
+
+        // limb·activator − 3·byte·other·activator + wide·narrow
+        //     + 5·constant·limb + 7
+        let gated = tracker.mul_polys(limb, activator);
+        let twice_gated = tracker.mul_polys(byte, other);
+        let twice_gated = tracker.mul_polys(twice_gated, activator);
+        let twice_gated = tracker.mul_scalar(twice_gated, -F::from(3));
+        let mixed = tracker.mul_polys(wide, narrow);
+        let scaled = tracker.mul_polys(constant, limb);
+        let scaled = tracker.mul_scalar(scaled, F::from(5));
+        let mut poly = tracker.add_polys(gated, twice_gated);
+        poly = tracker.add_polys(poly, mixed);
+        poly = tracker.add_polys(poly, scaled);
+        poly = tracker.add_scalar(poly, F::from(7));
+
+        let mut expected = vec![F::zero(); 1 << NV];
+        for (coeff, product) in tracker.virt_poly(poly).unwrap() {
+            let factors: Vec<Vec<F>> = product
+                .iter()
+                .map(|factor| tracker.mat_mv_poly(*factor).unwrap().evaluations())
+                .collect();
+            for (row, eval) in expected.iter_mut().enumerate() {
+                *eval += factors
+                    .iter()
+                    .fold(*coeff, |term, factor| term * factor[row % factor.len()]);
+            }
+        }
+        assert_eq!(tracker.evaluations(poly), expected);
+        // A narrow polynomial alone has its own rows only.
+        let narrow_scaled = tracker.mul_scalar(narrow, F::from(2));
+        let doubled: Vec<F> = (0..1u64 << (NV - 2))
+            .map(|row| F::from(2 * (row + 300)))
+            .collect();
+        assert_eq!(tracker.evaluations(narrow_scaled), doubled);
     }
 
     // ── Scalar operations ──────────────────────────────────────────

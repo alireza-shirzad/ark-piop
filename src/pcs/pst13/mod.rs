@@ -450,7 +450,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         };
 
         let mut sum_check_vp = HPVirtualPolynomial::new(num_var);
-        for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
+        for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs) {
             sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
         }
 
