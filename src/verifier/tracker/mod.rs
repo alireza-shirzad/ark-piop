@@ -140,6 +140,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         // The counts belong to the proof they were advanced on.
         self.state.logup_gkr_subproofs_consumed = 0;
         self.state.logup_sums_consumed = 0;
+        self.state.claimed_sums_read.clear();
     }
 
     /// Verify the next LogUp-GKR subproof of the proof against `shape`, on

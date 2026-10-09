@@ -147,20 +147,31 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(equalized)
     }
 
-    //TODO: This function is only used in the multiplicity-check and should be removed in the future. it should not be a part of this library, but should be optionally implemented by the used
-    pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
-        let proof = self.proof_or_err()?;
-        let subproof = proof.sc_subproof.as_ref().ok_or_else(|| {
-            SnarkError::VerifierError(VerifierError::VerifierCheckFailed(
-                "proof has no sumcheck subproof".to_string(),
-            ))
-        })?;
-        subproof.sumcheck_claims().get(&id).cloned().ok_or_else(|| {
+    /// The sum the proof claims for `id`, as its claim map holds it: lifted
+    /// to the widest commitment of the proof, `2^(widest - nv)` times the
+    /// sum over the polynomial's own hypercube.
+    ///
+    /// The value is the prover's word and nothing more until a sumcheck
+    /// claim is added for it: [`Self::add_mv_sumcheck_claim`] with this sum
+    /// is checked in the map's frame, and its sum is bound to the
+    /// transcript before the claim is batched.
+    //TODO: only used by the multiplicity-check; should be supplied by the
+    // user rather than living in this library.
+    pub fn prover_claimed_sum(&mut self, id: TrackerID) -> SnarkResult<B::F> {
+        let sum = self.proof_claimed_sum(id).ok_or_else(|| {
             SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
                 "sumcheck subproof has no claim for tracker id {}",
                 id
             )))
-        })
+        })?;
+        self.state.claimed_sums_read.insert(id);
+        Ok(sum)
+    }
+
+    /// The entry of the proof's claim map for `id`, if the proof has one.
+    pub(super) fn proof_claimed_sum(&self, id: TrackerID) -> Option<B::F> {
+        let subproof = self.proof.as_ref()?.sc_subproof.as_ref()?;
+        subproof.sumcheck_claims().get(&id).copied()
     }
 
     pub fn mv_commitment(&self, id: TrackerID) -> Option<<B::MvPCS as PCS<B::F>>::Commitment> {

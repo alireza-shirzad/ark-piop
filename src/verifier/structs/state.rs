@@ -50,6 +50,11 @@ where
     /// How many of the proof's LogUp term sums have been read. They carry
     /// no labels either: the n-th term of the protocol reads the n-th one.
     pub logup_sums_consumed: usize,
+    /// The polynomials whose sum the verifier has read from the proof's
+    /// claim map. Only a claim on one of them, with the sum that was read,
+    /// is in the map's frame; what the map holds for any other polynomial
+    /// is nothing the verifier asked for.
+    pub(crate) claimed_sums_read: BTreeSet<TrackerID>,
     /// Keyed sums claimed for later: reduced with the lookup claims, after
     /// them and in this order.
     pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,

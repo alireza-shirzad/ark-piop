@@ -293,32 +293,24 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         global_max_nv: usize,
     ) -> SnarkResult<()> {
         let poly_log_sizes: IndexMap<TrackerID, usize> = self.state.poly_log_sizes.clone();
-        let proof_claims = self
-            .proof
-            .as_ref()
-            .and_then(|proof| proof.sc_subproof.as_ref())
-            .map(|subproof| subproof.sumcheck_claims().clone());
 
-        // Proof-map values arrive pre-scaled to `raw * 2^(global_max -
-        // poly_nv)`, but this bucket's sumcheck runs at `target_nv` and
-        // needs `raw * 2^(target_nv - poly_nv)`; divide by
-        // `2^(global_max - target_nv)` (a no-op for single-bucket plans).
-        //
         // `global_max_nv` is threaded in frozen from BEFORE the bucket loop,
         // mirroring the prover. Re-reading it live here once grew it across
         // buckets (chunk commits), underscaled the claims, and failed every
         // multi-bucket plan's round-0 `p(0)+p(1) != asserted_sum` check.
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
-            // The proof map is not bound by the transcript. A raw claim
-            // carries a sum the verifier derived, and letting an entry that
-            // happens to equal it choose the scaling would let the prover
-            // rescale the statement by a power of two; test the flag first.
-            if !claim.is_raw()
-                && let Some(proof_claims) = proof_claims.as_ref()
-                && let Some(proof_claim) = proof_claims.get(&claim.id())
-                && claim.claim() == *proof_claim
-            {
+            // A sum read from the proof's map is `raw * 2^(global_max -
+            // poly_nv)`; this bucket's sumcheck runs at `target_nv` and
+            // needs `raw * 2^(target_nv - poly_nv)`, so it is divided by
+            // `2^(global_max - target_nv)` (a no-op for single-bucket plans).
+            //
+            // Which frame a sum is in was settled when its claim was added,
+            // by whether the verifier had read it from the map. The map is
+            // not consulted here: a sum of the verifier's own that the map
+            // happens to hold as well must not be taken for the map's, or
+            // the prover could rescale the statement by a power of two.
+            if claim.is_from_proof() {
                 if global_max_nv > target_nv {
                     let factor = two_to_the::<B::F>(global_max_nv - target_nv);
                     claim.set_claim(claim.claim() / factor);
@@ -326,9 +318,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 continue;
             }
 
-            // Raw claim, or a gadget-added claim not present in the proof map
-            // (post-bucket additions from the second batching round). Mirror
-            // the prover's `equalize_mat_poly_nv_to(target_nv)` scaling.
+            // A sum over the polynomial's own hypercube: the verifier's own,
+            // or a gadget-added claim (post-bucket additions from the second
+            // batching round). Mirror the prover's
+            // `equalize_mat_poly_nv_to(target_nv)` scaling.
             let nv = poly_log_sizes
                 .get(&claim.id())
                 .copied()

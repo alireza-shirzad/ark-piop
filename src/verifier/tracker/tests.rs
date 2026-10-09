@@ -980,3 +980,44 @@ fn verifier_held_commitment_is_not_opened_as_one_of_the_proofs() {
     assert_ne!(sum(&other), sum(&true_table));
     assert_check_failed(forged.verify(commitment));
 }
+
+/// An ordinary claim's sum is over the polynomial's own hypercube. The
+/// proof's claim map holds every sum lifted to the widest commitment, and
+/// a verifier that scaled a claim by whether its sum is the map's entry
+/// took an honest proof of the true sum for one of the lifted sum as well.
+#[test]
+fn ordinary_claim_is_not_proved_for_the_sum_lifted_to_the_widest_commitment() {
+    for (narrow_nv, wide_nv) in [(3, 5), (2, 8), (4, 4)] {
+        let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+        let (narrow_table, wide_table) = (column(narrow_nv, 3), column(wide_nv, 5));
+        let mut commit = |table: &[F]| {
+            prover
+                .track_and_commit_mat_mv_poly(&mle(table))
+                .unwrap()
+                .id()
+        };
+        let (narrow, wide) = (commit(&narrow_table), commit(&wide_table));
+        let (narrow_sum, wide_sum) = (sum(&narrow_table), sum(&wide_table));
+        prover.add_mv_sumcheck_claim(narrow, narrow_sum).unwrap();
+        prover.add_mv_sumcheck_claim(wide, wide_sum).unwrap();
+        let proof = prover.build_proof().unwrap();
+
+        let verify = |claimed: F| {
+            let mut verifier = verifier.fork();
+            verifier.set_proof_ref(&proof);
+            verifier.track_mv_com_by_id(narrow).unwrap();
+            verifier.track_mv_com_by_id(wide).unwrap();
+            verifier.add_mv_sumcheck_claim(narrow, claimed);
+            verifier.add_mv_sumcheck_claim(wide, wide_sum);
+            verifier.verify()
+        };
+        verify(narrow_sum).unwrap();
+
+        let lifted = narrow_sum * F::from(2u64).pow([(wide_nv - narrow_nv) as u64]);
+        let map = proof.sc_subproof.as_ref().unwrap().sumcheck_claims();
+        assert_eq!(map[&narrow], lifted);
+        if wide_nv > narrow_nv {
+            assert!(verify(lifted).is_err(), "sizes ({narrow_nv}, {wide_nv})");
+        }
+    }
+}

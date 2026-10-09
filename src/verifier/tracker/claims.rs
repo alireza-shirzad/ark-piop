@@ -35,11 +35,25 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             })
     }
 
+    /// Adds a claim that `poly_id` sums to `claimed_sum`.
+    ///
+    /// The sum is over the polynomial's own hypercube, unless it is the one
+    /// the verifier read for this polynomial with
+    /// [`Self::prover_claimed_sum`]: that one is in the frame of the proof's
+    /// claim map. Which of the two it is depends on what the verifier did,
+    /// never on what the map holds for a polynomial it was not read for.
+    ///
+    /// A polynomial whose sum was read from the proof should not also be
+    /// claimed with a sum of the verifier's own: one that equals the map's
+    /// entry cannot be told from the one that was read.
     pub fn add_mv_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
-        self.state
-            .mv_pcs_substate
-            .sum_check_claims
-            .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
+        let read_from_proof = self.state.claimed_sums_read.contains(&poly_id)
+            && self.proof_claimed_sum(poly_id) == Some(claimed_sum);
+        let claim = match read_from_proof {
+            true => TrackerSumcheckClaim::new_from_proof(poly_id, claimed_sum),
+            false => TrackerSumcheckClaim::new(poly_id, claimed_sum),
+        };
+        self.state.mv_pcs_substate.sum_check_claims.push(claim);
     }
 
     /// Adds a sumcheck claim whose sum the verifier derived itself, over the
