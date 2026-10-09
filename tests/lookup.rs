@@ -2239,6 +2239,73 @@ fn deferred_false_keyed_sum_is_rejected() {
     });
 }
 
+/// A keyed sum claimed without the check `honest-prover` makes of it: the
+/// prover goes on to build its proof whether the relation holds or not,
+/// under either feature set, and it is the verifier that turns a false one
+/// down. The checked claim of the same relation is refused by an honest
+/// prover.
+#[test]
+fn unchecked_false_keyed_sum_is_proved_and_rejected_by_the_verifier() {
+    under_each_protocol(|_| {
+        let f = fv(0..32);
+        let g = fv((0..32).map(|i| (i * 5 + 3) % 32));
+        let mut not_a_permutation = g.clone();
+        not_a_permutation[9] = F::from(99u64);
+        let keys = fv((0..8).map(|i| i + 100));
+        let weights = fv((0..8).map(|i| i + 1));
+        let mut wrong_weights = weights.clone();
+        wrong_weights[3] += F::one();
+
+        let run = |fs: &[KeyedCol], gs: &[KeyedCol], checked: bool| {
+            prove_and_verify(
+                |prover| {
+                    let (fxs, mfxs) = commit_keyed_side(prover, fs)?;
+                    let (gxs, mgxs) = commit_keyed_side(prover, gs)?;
+                    let ids = (keyed_side_ids(&fxs, &mfxs), keyed_side_ids(&gxs, &mgxs));
+                    let input = KeyedSumcheckProverInput {
+                        fxs,
+                        gxs,
+                        mfxs,
+                        mgxs,
+                    };
+                    match checked {
+                        true => prover.add_mv_keyed_sum_claim(input)?,
+                        false => prover.add_mv_keyed_sum_claim_unchecked(input)?,
+                    }
+                    Ok(ids)
+                },
+                |verifier, (f_ids, g_ids)| {
+                    let (fxs, mfxs) = track_keyed_side(verifier, &f_ids)?;
+                    let (gxs, mgxs) = track_keyed_side(verifier, &g_ids)?;
+                    verifier.add_mv_keyed_sum_claim(KeyedSumcheckVerifierInput {
+                        fxs,
+                        gxs,
+                        mfxs,
+                        mgxs,
+                    })
+                },
+            )
+        };
+
+        let permutation = [(f, None)];
+        let weighted = [(keys.clone(), Some(weights))];
+        assert_accepted(run(&permutation, &[(g, None)], false));
+        assert_accepted(run(&weighted, &weighted, false));
+        for (fs, false_gs) in [
+            (&permutation, [(not_a_permutation, None)]),
+            (&weighted, [(keys, Some(wrong_weights))]),
+        ] {
+            assert_rejected_by_verifier(run(fs, &false_gs, false));
+            assert_rejected(run(fs, &false_gs, true));
+        }
+        // An unchecked claim is still one of a shape the verifier takes.
+        assert!(matches!(
+            run(&permutation, &[], false),
+            Err(SnarkError::ProverError(_))
+        ));
+    });
+}
+
 /// Two keyed sums claimed for later, each false, whose four sides balance
 /// when added up. Each relation has to balance on its own.
 #[test]

@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `ArgVerifier::new_from_vk_with_config`.
 - `add_mv_keyed_sum_claim` on the prover and the verifier, to have a keyed
   sum proved with the proof's lookups.
+- `ArgProver::add_mv_keyed_sum_claim_unchecked`, the same claim without the
+  check `honest-prover` makes of it.
 - `SharedArgConfig::logup_gkr_run_budget` bounds the prover memory of one
   GKR run.
 - `examples/bench_lookup.rs`, a lookup benchmark harness.
