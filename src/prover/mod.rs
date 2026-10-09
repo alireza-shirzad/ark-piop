@@ -462,11 +462,29 @@ where
         &mut self,
         input: KeyedSumcheckProverInput<B>,
     ) -> SnarkResult<()> {
+        #[cfg(feature = "honest-prover")]
+        {
+            input
+                .check_shape()
+                .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
+            crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(&input)?;
+        }
+        self.add_mv_keyed_sum_claim_unchecked(input)
+    }
+
+    /// [`Self::add_mv_keyed_sum_claim`] without the check that
+    /// `honest-prover` makes of the relation. For a caller that has made
+    /// that check itself, as a PIOP does in `prove` and not in
+    /// `prove_inner`, or that means to hand the verifier a claim that does
+    /// not hold. The shape is checked all the same.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim_unchecked(
+        &mut self,
+        input: KeyedSumcheckProverInput<B>,
+    ) -> SnarkResult<()> {
         input
             .check_shape()
             .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
-        #[cfg(feature = "honest-prover")]
-        crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(&input)?;
         self.tracker_rc
             .borrow_mut()
             .add_mv_keyed_sum_claim(input.relation());
