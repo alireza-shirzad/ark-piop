@@ -6,6 +6,8 @@
 pub mod errors;
 pub mod structs;
 pub mod tracker;
+#[cfg(test)]
+use crate::piop::logup_gkr::{FractionInstance, GkrClaims};
 use crate::{
     SnarkBackend,
     arithmetic::{
@@ -14,10 +16,19 @@ use crate::{
     },
     errors::SnarkResult,
     pcs::PCS,
-    piop::{PIOP, lookup_check},
-    prover::structs::polynomial::TrackedPoly,
+    piop::{
+        keyed_sumcheck::{
+            KeyedSumcheckProverInput,
+            reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
+        },
+        lookup_check,
+    },
+    prover::{
+        errors::{HonestProverError::WrongInputShape, ProverError},
+        structs::polynomial::TrackedPoly,
+    },
     setup::structs::SNARKPk,
-    types::{CommitmentBinding, TrackerID},
+    types::{CommitmentBinding, SharedArgConfig, TrackerID},
 };
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
@@ -56,10 +67,29 @@ impl<B> ArgProver<B>
 where
     B: SnarkBackend,
 {
-    #[instrument(level = "debug", skip_all)]
-    /// Create a prover from the proving key
+    /// Create a prover from the proving key, under the default
+    /// configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_pk_with_config`] returns that as an error.
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
-        let mut prover = Self::new_from_tracker(ProverTracker::new_from_pk(pk.clone()));
+        Self::new_from_pk_with_config(pk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Create a prover from the proving key under `config`. The verifier
+    /// has to be given the same one:
+    /// [`ArgVerifier::new_from_vk_with_config`](crate::verifier::ArgVerifier::new_from_vk_with_config).
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds; see
+    /// [`LookupProtocol::from_env`](crate::types::LookupProtocol::from_env).
+    #[instrument(level = "debug", skip_all)]
+    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        let tracker = ProverTracker::new_from_pk_with_config(pk.clone(), config)?;
+        let mut prover = Self::new_from_tracker(tracker);
         let indexed_polys: BTreeMap<String, TrackedPoly<B>> = pk
             .indexed_tracked_polys
             .iter()
@@ -73,7 +103,7 @@ where
             .borrow_mut()
             .set_indexed_tracked_polys(indexed_polys);
 
-        prover
+        Ok(prover)
     }
     /// Create a prover from the tracker
     #[instrument(level = "debug", skip_all)]
@@ -360,6 +390,20 @@ where
             .add_mv_sumcheck_claim(poly_id, claimed_sum)
     }
 
+    /// Add a multivariate sumcheck claim whose sum the verifier derives
+    /// itself; see [`ProverTracker::add_mv_sumcheck_claim_raw`].
+    #[cfg(test)]
+    #[instrument(level = "debug", skip(self))]
+    pub(crate) fn add_mv_sumcheck_claim_raw(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_sumcheck_claim_raw(poly_id, claimed_sum)
+    }
+
     /// Add a multivariate zerocheck claim to the proof
     #[instrument(level = "debug", skip(self), fields(virt_degree = tracing::field::Empty))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
@@ -394,6 +438,55 @@ where
         tracker.add_mv_lookup_claim(super_id, sub_id)
     }
 
+    /// Claim the keyed sum `input` states;
+    /// [`KeyedSumcheck`](crate::piop::keyed_sumcheck::KeyedSumcheck) has the
+    /// relation.
+    ///
+    /// The claim is only recorded here. [`Self::build_proof`] discharges it
+    /// in the batch of the lookup claims, after them and in the order of
+    /// these calls. Under LogUp-GKR its columns share the instances of that
+    /// batch with the other columns of their size, where proving the PIOP
+    /// on the spot spends a batch per relation. The verifier has to make
+    /// the same calls in the same order.
+    ///
+    /// All columns and multiplicities must already be tracked by this
+    /// prover: the claim keeps their ids, not the handles, and tracks nothing
+    /// itself. A commitment among them that this proof does not emit has to
+    /// be bound to the statement by the caller.
+    ///
+    /// A side without columns or without a multiplicity slot per column is
+    /// refused, and under `honest-prover` so is a relation that does not
+    /// hold.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim(
+        &mut self,
+        input: KeyedSumcheckProverInput<B>,
+    ) -> SnarkResult<()> {
+        input
+            .check_shape()
+            .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
+        #[cfg(feature = "honest-prover")]
+        crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(&input)?;
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_keyed_sum_claim(input.relation());
+        Ok(())
+    }
+
+    /// Run one LogUp-GKR batch; see [`ProverTracker::prove_logup_gkr`].
+    ///
+    /// The tracker stays mutably borrowed for the whole batch, which is why
+    /// the instances come in by value: reading a `TrackedPoly`'s evaluations
+    /// or id borrows the tracker too, so it has to happen before this call.
+    #[cfg(test)]
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) fn prove_logup_gkr(
+        &mut self,
+        instances: Vec<FractionInstance<B::F>>,
+    ) -> SnarkResult<GkrClaims<B::F>> {
+        self.tracker_rc.borrow_mut().prove_logup_gkr(instances)
+    }
+
     /// Get the next TrackerID to be used
     #[instrument(level = "debug", skip_all)]
     pub fn next_tracker_id(&mut self) -> TrackerID {
@@ -405,13 +498,24 @@ where
         self.tracker_rc.borrow_mut().peek_next_id()
     }
 
-    #[instrument(level = "debug", skip_all)]
-    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
-        let lookup_claims = {
+    /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
+    /// one batch. Runs before the subproofs are compiled, outside every
+    /// timed subproof span, so it gets a `bench_stats` span of its own for
+    /// subscribers to time, named by
+    /// [`LOOKUP_REDUCTION_SPAN`](tracker::LOOKUP_REDUCTION_SPAN). The span
+    /// covers the whole function: it opens even with nothing to reduce.
+    #[instrument(
+        target = "bench_stats",
+        level = "info",
+        name = "reduce_lookup_claims",
+        skip_all
+    )]
+    pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let (lookup_claims, keyed_sum_claims) = {
             let mut tracker = self.tracker_rc.borrow_mut();
             let claims = tracker.take_lookup_claims();
             tracker.state.bench_lookup_claims_pre_reduction = claims.len();
-            claims
+            (claims, tracker.take_keyed_sum_claims())
         };
         let lookup_claims_count = lookup_claims.len();
 
@@ -437,7 +541,7 @@ where
             "lookup_claims_pre_reduction"
         );
 
-        if by_super.is_empty() {
+        if by_super.is_empty() && keyed_sum_claims.is_empty() {
             return Ok(());
         }
         info!("reducing {} lookup claims", by_super.len());
@@ -449,71 +553,67 @@ where
             );
         }
 
-        let mut hinted_inputs = Vec::with_capacity(by_super.len());
-        let mut multiplicity_jobs = Vec::with_capacity(by_super.len());
-
-        for (super_id, sub_ids) in by_super {
-            let super_nv = self.tracker_rc.borrow().poly_nv(super_id);
-            let super_col =
-                TrackedPoly::new(Either::Left(super_id), super_nv, self.tracker_rc.clone());
-
-            let included_cols = sub_ids
-                .into_iter()
-                .map(|sub_id| {
-                    let nv = self.tracker_rc.borrow().poly_nv(sub_id);
-                    TrackedPoly::new(Either::Left(sub_id), nv, self.tracker_rc.clone())
-                })
-                .collect::<Vec<_>>();
-
-            let super_col_evals = super_col.evaluations();
-            let included_col_evals = included_cols
+        // Every column is read once: the same evaluations give the
+        // multiplicities here and, in the reduction, the GKR input layers
+        // or the LogUp helpers.
+        let mut evals = ColumnEvals::new();
+        {
+            let mut tracker = self.tracker_rc.borrow_mut();
+            for id in by_super
                 .iter()
-                .map(TrackedPoly::evaluations)
-                .collect::<Vec<_>>();
-
-            hinted_inputs.push((included_cols, super_col));
-            multiplicity_jobs.push((super_nv, included_col_evals, super_col_evals));
+                .flat_map(|(sup, subs)| subs.iter().chain([sup]))
+            {
+                if !evals.contains_key(id) {
+                    evals.insert(*id, tracker.evaluations(*id));
+                }
+            }
         }
 
         let mv_pcs_prover_param = self.mv_pcs_prover_param();
-        let super_col_m_polys_and_commitments = cfg_into_iter!(multiplicity_jobs)
-            .map(|(super_col_nv, included_col_evals, super_col_evals)| {
-                let super_col_m_mle =
-                    Arc::new(lookup_check::calc_inclusion_multiplicity_from_evals::<B>(
-                        &included_col_evals,
-                        &super_col_evals,
-                        super_col_nv,
-                    ));
-                let super_col_m_commitment =
-                    B::MvPCS::commit(mv_pcs_prover_param.as_ref(), &super_col_m_mle)?;
-                Ok::<(Arc<MLE<B::F>>, <B::MvPCS as PCS<B::F>>::Commitment), _>((
-                    super_col_m_mle,
-                    super_col_m_commitment,
-                ))
+        let groups: Vec<(&TrackerID, &Vec<TrackerID>)> = by_super.iter().collect();
+        let multiplicities = cfg_into_iter!(groups)
+            .map(|(super_id, sub_ids)| {
+                let included: Vec<&[B::F]> = sub_ids.iter().map(|id| &evals[id][..]).collect();
+                let super_evals = &evals[super_id];
+                let m_evals = lookup_check::inclusion_multiplicities(&included, super_evals);
+                let m_mle = Arc::new(MLE::from_evaluations_vec(
+                    super_evals.len().trailing_zeros() as usize,
+                    m_evals.clone(),
+                ));
+                let m_commitment = B::MvPCS::commit(mv_pcs_prover_param.as_ref(), &m_mle)?;
+                Ok((m_mle, m_commitment, m_evals))
             })
             .collect::<Vec<_>>()
             .into_iter()
             .collect::<SnarkResult<Vec<_>>>()?;
 
-        for ((included_cols, super_col), (super_col_m_mle, super_col_m_commitment)) in hinted_inputs
-            .into_iter()
-            .zip(super_col_m_polys_and_commitments)
+        // All multiplicities go into the transcript before the reduction
+        // draws the first gamma; it draws one per relation.
+        let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
+        for ((super_id, sub_ids), (m_mle, m_commitment, m_evals)) in
+            by_super.into_iter().zip(multiplicities)
         {
-            let super_col_multiplicity = self.track_mat_mv_poly_with_commitment(
-                super_col_m_mle.as_ref(),
-                super_col_m_commitment,
-                CommitmentBinding::ProofEmitted,
-            )?;
-
-            let lookup_prover_input = lookup_check::HintedLookupCheckProverInput {
-                included_cols,
-                super_col,
-                super_col_multiplicity,
-            };
-            lookup_check::HintedLookupCheckPIOP::prove(self, lookup_prover_input)?;
+            let multiplicity = self
+                .tracker_rc
+                .borrow_mut()
+                .track_mat_mv_p_with_commitment(
+                    &m_mle,
+                    m_commitment,
+                    CommitmentBinding::ProofEmitted,
+                    false,
+                )?;
+            evals.insert(multiplicity, m_evals);
+            relations.push(KeyedSumRelation {
+                mfxs: vec![None; sub_ids.len()],
+                fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
+                gxs: vec![KeyedTerm::Poly(super_id)],
+                mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+            });
         }
 
-        Ok(())
+        relations.extend(keyed_sum_claims);
+
+        prove_keyed_sums(self, &relations, evals)
     }
 
     pub fn get_or_build_contig_one_poly(

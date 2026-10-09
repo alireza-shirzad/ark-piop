@@ -39,6 +39,13 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .map_err(crate::errors::SnarkError::from)
     }
 
+    fn append_field_element(&mut self, label: &'static [u8], element: &Self::F) -> SnarkResult<()> {
+        self.state
+            .transcript
+            .append_field_element(label, element)
+            .map_err(crate::errors::SnarkError::from)
+    }
+
     // ── Virtual polynomial operations ───────────────────────────────
 
     fn track_empty_virtual_poly(&mut self) -> TrackerID {
@@ -93,6 +100,10 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
         self.state.mv_pcs_substate.zero_check_claims.push(claim);
     }
 
+    fn add_zerocheck_claim(&mut self, id: TrackerID) -> SnarkResult<()> {
+        self.add_mv_zerocheck_claim(id)
+    }
+
     fn zerocheck_claims_len(&self) -> usize {
         self.state.mv_pcs_substate.zero_check_claims.len()
     }
@@ -125,6 +136,10 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .mv_pcs_substate
             .sum_check_claims
             .push(TrackerSumcheckClaim::new(id, claimed_sum));
+    }
+
+    fn push_raw_sumcheck_claim(&mut self, id: TrackerID, claimed_sum: Self::F) -> SnarkResult<()> {
+        self.add_mv_sumcheck_claim_raw(id, claimed_sum)
     }
 
     fn sumcheck_claims_len(&self) -> usize {

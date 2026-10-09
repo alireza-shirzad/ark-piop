@@ -8,6 +8,7 @@ use crate::{
     SnarkBackend,
     arithmetic::virt_poly::VirtualPoly,
     pcs::PCS,
+    piop::{keyed_sumcheck::reduction::KeyedSumRelation, logup_gkr::LogupGkrProof},
     prover::structs::polynomial::TrackedPoly,
     setup::structs::SNARKPk,
     transcript::Tr,
@@ -70,6 +71,15 @@ where
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
+    /// LogUp-GKR proofs in the order they were produced, which is the order
+    /// the verifier consumes them in; moved into the proof at compile time.
+    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    /// Term sums of LogUp in the order they were sent, which is the order
+    /// the verifier reads them in; moved into the proof at compile time.
+    pub logup_sums: Vec<B::F>,
+    /// Keyed sums claimed for later: reduced with the lookup claims, after
+    /// them and in this order.
+    pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,
     pub num_vars: BTreeMap<TrackerID, usize>,
     pub bench_lookup_claims_pre_reduction: usize,
     /// Bench stat from `reduce_lookup_claims`: subset count per superset

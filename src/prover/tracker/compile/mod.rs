@@ -17,6 +17,7 @@ mod sumcheck;
 mod virt_poly;
 
 use super::*;
+use crate::types::LookupMessages;
 
 /// Run one statement inside a `bench_stats` span named `$name`, so a
 /// subscriber can time it. Covers mid-function regions that a
@@ -51,6 +52,13 @@ pub const SNARK_PROVER_SPAN_TARGET: &str = "bench_stats";
 /// subscriber attributes region durations — and its own timestamps mark
 /// bucket boundaries on the dashboard's RSS curve.
 pub const SC_BUCKET_SPAN: &str = "sc_bucket";
+
+/// Span around the prover's reduction of its lookup and keyed-sum claims,
+/// which runs before the proof is compiled: the multiplicities, their
+/// commitments and the LogUp-GKR runs. It opens on every proof, also one
+/// with nothing to reduce. Not one of [`SNARK_PROVER_TIMED_SPANS`], whose
+/// three durations it is disjoint from.
+pub const LOOKUP_REDUCTION_SPAN: &str = "reduce_lookup_claims";
 
 /// Regions whose span duration *is* that stage's timing; the name doubles
 /// as the subscriber's record key. Named at the call site because two
@@ -106,6 +114,13 @@ where
             uv_pcs_subproof,
             miscellaneous_field_elements: take(&mut self.state.miscellaneous_field_elements),
             miscellaneous_field_vectors: take(&mut self.state.miscellaneous_field_vectors),
+            logup_gkr_subproofs: take(&mut self.state.logup_gkr_subproofs),
+            lookup_messages: match self.config.lookup_protocol {
+                LookupProtocol::LogUp => LookupMessages::LogUp {
+                    sums: take(&mut self.state.logup_sums),
+                },
+                LookupProtocol::LogUpGkr => LookupMessages::LogUpGkr,
+            },
         })
     }
 }
@@ -211,6 +226,25 @@ mod tests {
                  only enables `{SNARK_PROVER_SPAN_TARGET}=info`"
             );
         }
+    }
+
+    /// The lookup reduction is timed by a span of its own, not by one of
+    /// the subproof or region spans. It has to open on a compile with no
+    /// lookup claims too, or a subscriber could not tell "nothing to reduce"
+    /// from a span that was renamed away.
+    #[test]
+    fn lookup_reduction_span_opens_on_every_compile() {
+        let name = LOOKUP_REDUCTION_SPAN;
+        let capture = capture_empty_compile();
+        let seen = capture.spans.lock().unwrap();
+        let (_, target, level) = seen
+            .iter()
+            .find(|(span_name, _, _)| span_name == name)
+            .expect("the lookup reduction span never opened");
+        assert_eq!(target, SNARK_PROVER_SPAN_TARGET);
+        assert_eq!(*level, tracing::Level::INFO);
+        assert!(snark_prover_timing_key(name).is_none());
+        assert!(!is_sc_region_span(name));
     }
 
     /// The phase strings are a wire contract with the dashboard, and an

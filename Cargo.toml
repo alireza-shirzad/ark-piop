@@ -60,6 +60,10 @@ required-features = ["test-utils"]
 name = "calibrate_msm"
 required-features = ["test-utils"]
 
+[[example]]
+name = "bench_lookup"
+required-features = ["test-utils"]
+
 [patch.crates-io]
 ark-std = { git = "https://github.com/arkworks-rs/std" }
 ark-ff = { git = "https://github.com/arkworks-rs/algebra" }
@@ -72,6 +76,11 @@ ark-bls12-381 = { git = "https://github.com/arkworks-rs/algebra" }
 [[test]]
 name = "pipeline"
 path = "tests/pipeline.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "lookup"
+path = "tests/lookup.rs"
 required-features = ["test-utils"]
 
 [features]

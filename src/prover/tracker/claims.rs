@@ -1,7 +1,7 @@
 //! Claim registration — adding sumcheck, zerocheck, nozerocheck, lookup, and eval claims.
 
 use super::*;
-use crate::piop::errors::PolyIOPErrors;
+use crate::piop::{errors::PolyIOPErrors, keyed_sumcheck::reduction::KeyedSumRelation};
 
 impl<B> ProverTracker<B>
 where
@@ -27,22 +27,73 @@ where
         claimed_sum: B::F,
     ) -> SnarkResult<()> {
         #[cfg(feature = "honest-prover")]
-        {
-            let evals = self.evaluations(poly_id);
-            let real_sum = cfg_iter!(evals).sum::<B::F>();
-            if real_sum != claimed_sum {
-                tracing::error!(
-                    "honest prover sumcheck mismatch: real_sum={:?} claimed_sum={:?}",
-                    real_sum,
-                    claimed_sum
-                );
-                return Err(ProverError(HonestProverError(FalseClaim)));
-            }
-        }
+        self.honest_sumcheck_claim_check(poly_id, claimed_sum)?;
         self.state
             .mv_pcs_substate
             .sum_check_claims
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
+        Ok(())
+    }
+
+    /// Adds a sumcheck claim whose sum the verifier derives from the protocol
+    /// instead of reading it from the proof. `claimed_sum` is over the
+    /// polynomial's own hypercube; the claim gets no entry in the proof's
+    /// claim map, and the verifier must add it with its own raw entry point.
+    pub(crate) fn add_mv_sumcheck_claim_raw(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        #[cfg(feature = "honest-prover")]
+        self.honest_sumcheck_claim_check(poly_id, claimed_sum)?;
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .push(TrackerSumcheckClaim::new_raw(poly_id, claimed_sum));
+        Ok(())
+    }
+
+    /// The pending sumcheck claims as `(id, claimed sum, raw)`, in order.
+    #[cfg(test)]
+    pub(crate) fn sumcheck_claims_snapshot(&self) -> Vec<(TrackerID, B::F, bool)> {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| (claim.id(), claim.claim(), claim.is_raw()))
+            .collect()
+    }
+
+    /// Rewrites the sum of the pending claim on `poly_id`, for tests whose
+    /// prover claims one sum to the verifier and proves another.
+    #[cfg(test)]
+    pub(crate) fn set_sumcheck_claim(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        let claim = self
+            .state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter_mut()
+            .find(|claim| claim.id() == poly_id)
+            .expect("no pending sumcheck claim on this polynomial");
+        claim.set_claim(claimed_sum);
+    }
+
+    #[cfg(feature = "honest-prover")]
+    fn honest_sumcheck_claim_check(
+        &mut self,
+        poly_id: TrackerID,
+        claimed_sum: B::F,
+    ) -> SnarkResult<()> {
+        let evals = self.evaluations(poly_id);
+        let real_sum = cfg_iter!(evals).sum::<B::F>();
+        if real_sum != claimed_sum {
+            tracing::error!(
+                "honest prover sumcheck mismatch: real_sum={:?} claimed_sum={:?}",
+                real_sum,
+                claimed_sum
+            );
+            return Err(ProverError(HonestProverError(FalseClaim)));
+        }
         Ok(())
     }
 
@@ -140,6 +191,16 @@ where
         take(&mut self.state.mv_pcs_substate.lookup_claims)
     }
 
+    /// Queue a keyed sum for the reduction that runs before the proof is
+    /// compiled. The caller has checked its shape.
+    pub(crate) fn add_mv_keyed_sum_claim(&mut self, relation: KeyedSumRelation<B::F>) {
+        self.state.keyed_sum_claims.push(relation);
+    }
+
+    pub(crate) fn take_keyed_sum_claims(&mut self) -> Vec<KeyedSumRelation<B::F>> {
+        take(&mut self.state.keyed_sum_claims)
+    }
+
     /// Adds an evaluation claim to the list of the zerocheck claims of the
     /// prover a zerocheck claim is of the form (poly_id) which means that
     /// the prover claims that the polynomial with poly_id evaluates to zero
@@ -230,7 +291,14 @@ where
         // The [0…0, 1…1, 0…0] window stores as a 2-3 run RLE (O(1) memory)
         // instead of a full 2^nv Field Vec (512 MiB at nv 24).
         let mle = MLE::from_window_activator(s, n, nv);
-        let poly_id = self.track_mat_mv_poly(mle);
+        // An empty or full window is a constant, which the verifier tracks
+        // as a constant oracle. The sumcheck buckets are planned from the
+        // degrees of the claims, so it has to have degree 0 here as well.
+        let poly_id = if n == 0 || n == total {
+            self.track_derived_mv_constant(mle)
+        } else {
+            self.track_mat_mv_poly(mle)
+        };
 
         let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {
             poly.tracker()

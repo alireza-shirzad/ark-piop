@@ -8,6 +8,9 @@ use crate::{
 };
 use derivative::Derivative;
 use std::marker::PhantomData;
+pub(crate) use utils::inclusion_multiplicities;
+#[cfg(test)]
+pub(crate) use utils::multiplicities_by_sorting;
 pub use utils::{calc_inclusion_multiplicity, calc_inclusion_multiplicity_from_evals};
 
 use super::keyed_sumcheck::{KeyedSumcheck, KeyedSumcheckProverInput, KeyedSumcheckVerifierInput};

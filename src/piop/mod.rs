@@ -9,6 +9,7 @@ use tracing::{Level, span};
 use crate::{SnarkBackend, errors::SnarkResult, prover::ArgProver, verifier::ArgVerifier};
 pub mod errors;
 pub mod keyed_sumcheck;
+pub mod logup_gkr;
 pub mod lookup_check;
 pub mod structs;
 pub mod sum_check;

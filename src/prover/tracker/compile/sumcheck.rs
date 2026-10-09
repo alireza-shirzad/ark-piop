@@ -48,7 +48,10 @@ where
 
     #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip(self))]
-    fn perform_single_sumcheck(&mut self) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
+    fn perform_single_sumcheck(
+        &mut self,
+        target_nv: usize,
+    ) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
         assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
 
         // Get the sumcheck claim polynomial id
@@ -60,7 +63,7 @@ where
             .unwrap()
             .id();
         // Generate a sumcheck proof
-        let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id);
+        let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id, target_nv);
         debug!(
             "The final virtual polynomial for sumcheck has {} terms, {} degree, and {} number of variables",
             sc_avp.products.len(),
@@ -447,7 +450,7 @@ where
         let _reduce_guard = reduce_span.enter();
 
         let sum_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        for claim in sum_claims.into_iter() {
+        for mut claim in sum_claims.into_iter() {
             claims_reduced += 1;
             let new_id = reduce_poly(
                 self,
@@ -464,10 +467,8 @@ where
                 &mut expanded_oversized_terms,
                 target_nv,
             )?;
-            self.state
-                .mv_pcs_substate
-                .sum_check_claims
-                .push(TrackerSumcheckClaim::new(new_id, claim.claim()));
+            claim.set_id(new_id);
+            self.state.mv_pcs_substate.sum_check_claims.push(claim);
             if let Some(vpoly) = self.virt_poly(new_id) {
                 total_terms += vpoly.len();
             }
@@ -711,7 +712,7 @@ where
         for (id, claim) in additional_sumcheck_claims {
             individual_sumcheck_claims.entry(id).or_insert(claim);
         }
-        let (sc_proof, sc_aux_info) = region!("sumcheck", self.perform_single_sumcheck()?);
+        let (sc_proof, sc_aux_info) = region!("sumcheck", self.perform_single_sumcheck(target_nv)?);
 
         // `perform_single_sumcheck` reads but doesn't consume the aggregated
         // claim; clear it so the next bucket starts clean.

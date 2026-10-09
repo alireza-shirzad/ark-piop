@@ -1,6 +1,7 @@
 //! Claim registration and indexed oracles for the verifier.
 
 use super::*;
+use crate::piop::keyed_sumcheck::reduction::KeyedSumRelation;
 
 impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
@@ -39,6 +40,29 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .mv_pcs_substate
             .sum_check_claims
             .push(TrackerSumcheckClaim::new(poly_id, claimed_sum));
+    }
+
+    /// Adds a sumcheck claim whose sum the verifier derived itself, over the
+    /// polynomial's own hypercube. The proof's claim map is not bound by the
+    /// transcript, so such a claim must never be compared against it: the
+    /// sum is lifted to the bucket by the verifier alone. The prover has to
+    /// add the same claim with its raw entry point.
+    pub(crate) fn add_mv_sumcheck_claim_raw(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .push(TrackerSumcheckClaim::new_raw(poly_id, claimed_sum));
+    }
+
+    /// The pending sumcheck claims as `(id, claimed sum, raw)`, in order.
+    #[cfg(test)]
+    pub(crate) fn sumcheck_claims_snapshot(&self) -> Vec<(TrackerID, B::F, bool)> {
+        self.state
+            .mv_pcs_substate
+            .sum_check_claims
+            .iter()
+            .map(|claim| (claim.id(), claim.claim(), claim.is_raw()))
+            .collect()
     }
 
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
@@ -80,6 +104,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     pub(crate) fn take_lookup_claims(&mut self) -> Vec<TrackerLookupClaim> {
         take(&mut self.state.mv_pcs_substate.lookup_claims)
+    }
+
+    /// Queue a keyed sum for the reduction that runs before the proof is
+    /// verified. The caller has checked its shape.
+    pub(crate) fn add_mv_keyed_sum_claim(&mut self, relation: KeyedSumRelation<B::F>) {
+        self.state.keyed_sum_claims.push(relation);
+    }
+
+    pub(crate) fn take_keyed_sum_claims(&mut self) -> Vec<KeyedSumRelation<B::F>> {
+        take(&mut self.state.keyed_sum_claims)
     }
 
     #[instrument(level = "debug", skip(self))]

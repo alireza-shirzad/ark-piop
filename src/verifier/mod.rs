@@ -18,15 +18,21 @@ use crate::{
     arithmetic::mat_poly::mle::MLE,
     errors::SnarkResult,
     pcs::PolynomialCommitment,
-    piop::{PIOP, lookup_check},
+    piop::keyed_sumcheck::{
+        KeyedSumcheckVerifierInput,
+        reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
+    },
     prover::structs::proof::SNARKProof,
     setup::structs::SNARKVk,
-    types::{CommitmentBinding, TrackerID},
+    types::{CommitmentBinding, SharedArgConfig, TrackerID},
 };
 
 use crate::pcs::PCS;
+#[cfg(test)]
+use crate::piop::logup_gkr::{GkrClaims, GkrShape};
 use ark_ff::PrimeField;
 use derivative::Derivative;
+use errors::VerifierError;
 
 use tracker::VerifierTracker;
 
@@ -51,10 +57,30 @@ impl<B> ArgVerifier<B>
 where
     B: SnarkBackend,
 {
+    /// Create a verifier from the verifying key, under the default
+    /// configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_vk_with_config`] returns that as an error.
+    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
+        Self::new_from_vk_with_config(vk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    /// Create a verifier from the verifying key under `config`, which has
+    /// to be the one the prover was given:
+    /// [`ArgProver::new_from_pk_with_config`](crate::prover::ArgProver::new_from_pk_with_config).
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds; see
+    /// [`LookupProtocol::from_env`](crate::types::LookupProtocol::from_env).
     // TODO: See if you can shorten this function
     #[instrument(level = "debug", skip_all)]
-    pub fn new_from_vk(vk: SNARKVk<B>) -> Self {
-        let verifier = Self::new_from_tracker(VerifierTracker::new_from_vk(vk.clone()));
+    pub fn new_from_vk_with_config(vk: SNARKVk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        let tracker = VerifierTracker::new_from_vk_with_config(vk.clone(), config)?;
+        let verifier = Self::new_from_tracker(tracker);
         let range_tr_polys: BTreeMap<String, TrackedOracle<B>> = vk
             .indexed_coms
             .iter()
@@ -67,7 +93,7 @@ where
             .tracker_rc
             .borrow_mut()
             .set_indexed_tracked_polys(range_tr_polys);
-        verifier
+        Ok(verifier)
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -89,6 +115,12 @@ where
     pub fn fork(&self) -> Self {
         let tracker = self.tracker_rc.borrow().clone();
         Self::new_from_tracker(tracker)
+    }
+
+    /// Shared handle to the tracker, for protocol code that prover and
+    /// verifier run through [`crate::tracker_core::TrackerCore`].
+    pub(crate) fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
+        Rc::clone(&self.tracker_rc)
     }
 
     /// Get the range tracked oracle given the label
@@ -263,6 +295,17 @@ where
             .borrow_mut()
             .add_mv_sumcheck_claim(poly_id, claimed_sum);
     }
+
+    /// Add a sumcheck claim whose sum the verifier derived itself; see
+    /// [`VerifierTracker::add_mv_sumcheck_claim_raw`].
+    #[cfg(test)]
+    #[instrument(level = "debug", skip(self))]
+    pub(crate) fn add_mv_sumcheck_claim_raw(&mut self, poly_id: TrackerID, claimed_sum: B::F) {
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_sumcheck_claim_raw(poly_id, claimed_sum);
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) {
         self.tracker_rc.borrow_mut().add_mv_zerocheck_claim(poly_id);
@@ -284,6 +327,41 @@ where
         self.tracker_rc
             .borrow_mut()
             .add_mv_lookup_claim(super_id, sub_id)
+    }
+
+    /// Claim the keyed sum `input` states, mirroring
+    /// [`ArgProver::add_mv_keyed_sum_claim`](crate::prover::ArgProver::add_mv_keyed_sum_claim).
+    ///
+    /// The claim is only recorded here. [`Self::verify`] checks it in the
+    /// batch of the lookup claims, after them and in the order of these
+    /// calls, which has to be the prover's.
+    ///
+    /// All columns and multiplicities must already be tracked by this
+    /// verifier: the claim keeps their ids, not the handles, and tracks
+    /// nothing itself.
+    ///
+    /// A side without columns or without a multiplicity slot per column is
+    /// refused.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim(
+        &mut self,
+        input: KeyedSumcheckVerifierInput<B>,
+    ) -> SnarkResult<()> {
+        input
+            .check_shape()
+            .map_err(VerifierError::VerifierInputShapeError)?;
+        self.tracker_rc
+            .borrow_mut()
+            .add_mv_keyed_sum_claim(input.relation());
+        Ok(())
+    }
+
+    /// Verify the proof's next LogUp-GKR subproof; see
+    /// [`VerifierTracker::verify_logup_gkr`].
+    #[cfg(test)]
+    #[instrument(level = "debug", skip_all)]
+    pub(crate) fn verify_logup_gkr(&mut self, shape: &[GkrShape]) -> SnarkResult<GkrClaims<B::F>> {
+        self.tracker_rc.borrow_mut().verify_logup_gkr(shape)
     }
 
     #[instrument(level = "debug", skip(self))]
@@ -369,10 +447,28 @@ where
         }
     }
 
+    /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
+    /// one batch, as the prover did before it compiled the proof.
     #[instrument(level = "debug", skip_all)]
-    fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
-        let lookup_claims = self.tracker_rc.borrow_mut().take_lookup_claims();
-        if lookup_claims.is_empty() {
+    pub(crate) fn reduce_lookup_claims(&mut self) -> SnarkResult<()> {
+        let reduced = self.reduce_queued_claims();
+        if reduced.is_err() {
+            // The queues are empty from here on, wherever the reduction
+            // stopped: without a record, the claims would be gone.
+            self.tracker_rc.borrow_mut().reject();
+        }
+        reduced
+    }
+
+    fn reduce_queued_claims(&mut self) -> SnarkResult<()> {
+        let (lookup_claims, keyed_sum_claims) = {
+            let mut tracker = self.tracker_rc.borrow_mut();
+            (
+                tracker.take_lookup_claims(),
+                tracker.take_keyed_sum_claims(),
+            )
+        };
+        if lookup_claims.is_empty() && keyed_sum_claims.is_empty() {
             return Ok(());
         }
 
@@ -384,28 +480,39 @@ where
                 .push(claim.sub_poly());
         }
 
+        // Mirrors the prover: every multiplicity commitment is absorbed
+        // before the reduction draws the first of its gammas.
+        let mut relations = Vec::with_capacity(by_super.len() + keyed_sum_claims.len());
         for (super_id, sub_ids) in by_super {
-            let super_col = self.tracked_oracle_from_id(super_id)?;
-            let included_cols = sub_ids
-                .into_iter()
-                .map(|sub_id| self.tracked_oracle_from_id(sub_id))
-                .collect::<SnarkResult<Vec<_>>>()?;
-
-            let super_col_multiplicity = self.track_next_mv_com()?;
-
-            let lookup_verifier_input = lookup_check::HintedLookupCheckVerifierInput {
-                included_tracked_col_oracles: included_cols,
-                super_tracked_col_oracle: super_col,
-                super_col_multiplicity,
-            };
-            lookup_check::HintedLookupCheckPIOP::verify(self, lookup_verifier_input)?;
+            self.tracked_oracle_from_id(super_id)?;
+            for sub_id in &sub_ids {
+                self.tracked_oracle_from_id(*sub_id)?;
+            }
+            let multiplicity = self.track_next_mv_com()?.id();
+            relations.push(KeyedSumRelation {
+                mfxs: vec![None; sub_ids.len()],
+                fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
+                gxs: vec![KeyedTerm::Poly(super_id)],
+                mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+            });
         }
 
-        Ok(())
+        relations.extend(keyed_sum_claims);
+
+        verify_keyed_sums(self, &relations)
     }
 
+    /// Verify the proof against every claim made on this verifier.
+    ///
+    /// The claims are used up by this, so a verifier verifies once; use
+    /// [`Self::fork`] to keep one to verify again. Once a lookup or keyed
+    /// sum has been found false, every later call fails too.
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&self) -> SnarkResult<()> {
+        // Before anything is read off the proof: under another protocol
+        // than the proof's, the reduction would fail on whatever it misses
+        // first.
+        self.tracker_rc.borrow().check_lookup_protocol()?;
         let mut verifier = self.clone();
         verifier.reduce_lookup_claims()?;
         self.tracker_rc.borrow_mut().verify()

@@ -39,6 +39,10 @@ pub trait TrackerCore {
         n: usize,
     ) -> SnarkResult<Vec<Self::F>>;
 
+    /// Append a field element the prover sends to the transcript, where
+    /// both sides have it.
+    fn append_field_element(&mut self, label: &'static [u8], element: &Self::F) -> SnarkResult<()>;
+
     // ── Virtual polynomial operations ───────────────────────────────
 
     /// Create an empty virtual polynomial (identity for addition).
@@ -83,6 +87,10 @@ pub trait TrackerCore {
     /// Append a single zerocheck claim.
     fn push_zerocheck_claim(&mut self, claim: TrackerZerocheckClaim);
 
+    /// Append a zerocheck claim on `id` that a protocol makes on both
+    /// sides. Fallible because an honest prover checks the claim.
+    fn add_zerocheck_claim(&mut self, id: TrackerID) -> SnarkResult<()>;
+
     /// Number of pending zerocheck claims.
     fn zerocheck_claims_len(&self) -> usize;
 
@@ -116,6 +124,13 @@ pub trait TrackerCore {
 
     /// Append a sumcheck claim with the given polynomial ID and claimed sum.
     fn push_sumcheck_claim(&mut self, id: TrackerID, claimed_sum: Self::F);
+
+    /// Append a sumcheck claim whose sum, over the polynomial's own
+    /// hypercube, the protocol fixes on both sides. The verifier lifts it to
+    /// its bucket itself and the prover sends nothing for it, where an
+    /// ordinary claim is matched against the proof's claim map. Fallible
+    /// because an honest prover checks the sum.
+    fn push_raw_sumcheck_claim(&mut self, id: TrackerID, claimed_sum: Self::F) -> SnarkResult<()>;
 
     /// Number of pending sumcheck claims.
     fn sumcheck_claims_len(&self) -> usize;

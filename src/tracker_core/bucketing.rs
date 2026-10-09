@@ -131,8 +131,14 @@ impl CostModel {
             .min(self.degree_limit.saturating_sub(1))
             .max(1);
         let sumcheck_weight = 2 * agg_degree * agg_degree;
+        // The verifier prices sizes a proof declared: a size no hypercube
+        // has must saturate, not wrap into a cheap one.
+        let points = u32::try_from(bucket.target_nv)
+            .ok()
+            .and_then(|nv| 1u128.checked_shl(nv))
+            .unwrap_or(u128::MAX);
         ((sumcheck_weight + bucket.batch_weight + self.per_bucket_overhead) as u128)
-            .saturating_mul(1u128 << bucket.target_nv)
+            .saturating_mul(points)
     }
 }
 
@@ -181,8 +187,9 @@ fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<BucketP
         "nv_stats must be sorted strictly ascending by nv"
     );
 
-    let mut best_cost = u128::MAX;
-    let mut best_plan: Vec<BucketPlan> = Vec::new();
+    // The first plan priced is kept until a cheaper one turns up, so that
+    // claims whose every plan saturates the cost still get a plan.
+    let mut best: Option<(u128, Vec<BucketPlan>)> = None;
 
     let n_cuts = k - 1;
     for mask in 0u32..(1u32 << n_cuts) {
@@ -203,11 +210,11 @@ fn pick_bucket_plan(nv_stats: &[NvClaimStats], model: &CostModel) -> Vec<BucketP
         if plan.len() > 1 && plan[0].target_nv == 0 {
             continue;
         }
-        if cost < best_cost {
-            best_cost = cost;
-            best_plan = plan;
+        if best.as_ref().is_none_or(|(best_cost, _)| cost < *best_cost) {
+            best = Some((cost, plan));
         }
     }
+    let best_plan = best.map_or_else(Vec::new, |(_, plan)| plan);
 
     debug!(
         plan = ?best_plan.iter().map(|b| (b.target_nv, b.included_nvs.clone())).collect::<Vec<_>>(),
@@ -324,6 +331,69 @@ mod tests {
             nv,
             batch_weight,
             max_degree,
+        }
+    }
+
+    /// The verifier reads a claim's raw flag after bucketing, so the claims
+    /// have to come out of the partition exactly as they went in.
+    #[test]
+    fn bucketing_moves_claims_with_their_raw_flag() {
+        type B = crate::DefaultSnarkBackend;
+        type F = <B as SnarkBackend>::F;
+        let id = crate::types::TrackerID::from_usize;
+        let low = vec![
+            TrackerSumcheckClaim::new(id(0), F::from(1u64)),
+            TrackerSumcheckClaim::new_raw(id(1), F::from(2u64)),
+        ];
+        let high = vec![
+            TrackerSumcheckClaim::new_raw(id(2), F::from(3u64)),
+            TrackerSumcheckClaim::new(id(3), F::from(4u64)),
+        ];
+
+        // Far apart, the two nvs get a bucket each; adjacent, they share one.
+        for (low_nv, high_nv, buckets) in [(2, 8, 2), (5, 6, 1)] {
+            let by_nv = BTreeMap::from([(low_nv, low.clone()), (high_nv, high.clone())]);
+            let plan = optimize_sumcheck_bucket_plans::<B>(
+                &[stats(low_nv, 4, 1), stats(high_nv, 4, 1)],
+                by_nv,
+                &model(),
+            );
+            assert_eq!(plan.len(), buckets);
+            let claims: Vec<_> = plan
+                .into_iter()
+                .flat_map(|bucket| bucket.sum_check_claims)
+                .collect();
+            assert_eq!(claims, [low.clone(), high.clone()].concat());
+            assert_eq!(
+                claims.iter().map(|c| c.is_raw()).collect::<Vec<_>>(),
+                [false, true, true, false]
+            );
+        }
+    }
+
+    /// The verifier plans from sizes a proof declares. However absurd they
+    /// are, the cost of a bucket saturates instead of wrapping into that of
+    /// a small one, and every claim still lands in a bucket.
+    #[test]
+    fn sizes_beyond_the_cost_range_saturate_and_still_get_a_plan() {
+        let bucket = |target_nv| BucketPlan {
+            target_nv,
+            included_nvs: vec![target_nv],
+            batch_weight: 4,
+            max_degree: 1,
+        };
+        assert_eq!(model().cost_of(&bucket(100)), 18 << 100);
+        for target_nv in [125, 128, 128 + 16, usize::MAX] {
+            assert_eq!(model().cost_of(&bucket(target_nv)), u128::MAX);
+        }
+
+        for wide in [100, 127, 128, 128 + 16, usize::MAX] {
+            let plan = pick_bucket_plan(&[stats(6, 4, 1), stats(wide, 4, 1)], &model());
+            let planned: Vec<usize> = plan
+                .iter()
+                .flat_map(|bucket| bucket.included_nvs.clone())
+                .collect();
+            assert_eq!(planned, [6, wide]);
         }
     }
 

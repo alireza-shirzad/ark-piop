@@ -10,8 +10,8 @@ mod tracking;
 // Re-exported for out-of-tree `bench_stats` subscribers, which need the
 // span-name → record-key table to turn the subproof spans into timings.
 pub use compile::{
-    SC_BUCKET_SPAN, SC_REGION_SPANS, SNARK_PROVER_SPAN_TARGET, SNARK_PROVER_TIMED_SPANS,
-    is_sc_region_span, snark_prover_timing_key,
+    LOOKUP_REDUCTION_SPAN, SC_BUCKET_SPAN, SC_REGION_SPANS, SNARK_PROVER_SPAN_TARGET,
+    SNARK_PROVER_TIMED_SPANS, is_sc_region_span, snark_prover_timing_key,
 };
 
 use super::structs::{
@@ -33,14 +33,18 @@ use crate::{
     },
     errors::{SnarkError, SnarkResult},
     pcs::PCS,
-    piop::{structs::SumcheckProof, sum_check::SumCheck},
+    piop::{
+        logup_gkr::{FractionInstance, GkrClaims, prove_batch},
+        structs::SumcheckProof,
+        sum_check::SumCheck,
+    },
     setup::{
         errors::SetupError::NoRangePoly,
         structs::{SNARKPk, SNARKVk},
     },
     types::{
-        CommitmentBinding, CommitmentID, ConstantID, PCSOpeningProof, PointID, SharedArgConfig,
-        SumcheckBucketProof, SumcheckSubproof, TrackerID,
+        CommitmentBinding, CommitmentID, ConstantID, LookupProtocol, PCSOpeningProof, PointID,
+        SharedArgConfig, SumcheckBucketProof, SumcheckSubproof, TrackerID,
         claim::{TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
@@ -437,19 +441,51 @@ where
         })
     }
 
+    /// A tracker under the default configuration.
+    ///
+    /// # Panics
+    ///
+    /// If the environment names a lookup protocol that does not exist;
+    /// [`Self::new_from_pk_with_config`] returns that as an error.
     pub fn new_from_pk(pk: SNARKPk<B>) -> Self {
         Self::new_from_pk_with_config(pk, SharedArgConfig::default())
+            .unwrap_or_else(|error| panic!("{error}"))
     }
 
-    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> Self {
-        let mut tracker = Self {
-            pk: ProcessedSNARKPk::new_from_pk(&pk),
+    /// A tracker under `config`, which the verifier has to share.
+    ///
+    /// Fails if the environment names a lookup protocol that does not
+    /// exist, whatever `config` holds: a default configuration made under
+    /// such a value does not show it.
+    pub fn new_from_pk_with_config(pk: SNARKPk<B>, config: SharedArgConfig) -> SnarkResult<Self> {
+        LookupProtocol::from_env()?;
+        let mut tracker = Self::with_fresh_state(&pk, config);
+        tracker
+            .config
+            .lookup_protocol
+            .bind(&mut tracker.state.transcript)?;
+        tracker.add_vk_to_transcript(pk.vk.clone());
+        Ok(tracker)
+    }
+
+    /// [`Self::new_from_pk_with_config`] without the lookup protocol in the
+    /// transcript, which is how a transcript started before proofs named
+    /// their protocol. No verifier accepts what this proves; it is for
+    /// comparing proofs with those of that time.
+    #[cfg(test)]
+    pub(crate) fn new_from_pk_unbound(pk: SNARKPk<B>, config: SharedArgConfig) -> Self {
+        let mut tracker = Self::with_fresh_state(&pk, config);
+        tracker.add_vk_to_transcript(pk.vk.clone());
+        tracker
+    }
+
+    fn with_fresh_state(pk: &SNARKPk<B>, config: SharedArgConfig) -> Self {
+        Self {
+            pk: ProcessedSNARKPk::new_from_pk(pk),
             state: ProverState::default(),
             config,
             self_rc: None,
-        };
-        tracker.add_vk_to_transcript(pk.vk.clone());
-        tracker
+        }
     }
 
     pub fn set_self_rc(&mut self, self_rc: Weak<RefCell<ProverTracker<B>>>) {
@@ -511,6 +547,41 @@ where
     // Peek at the next TrackerID without incrementing the counter
     pub(crate) fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
+    }
+
+    /// Run one LogUp-GKR batch on the tracker's transcript and stash its
+    /// proof for `compile_proof`. Subproofs are positional, so the verifier
+    /// must run its batches in the same sequence. The returned claims still
+    /// have to be discharged by the caller.
+    pub(crate) fn prove_logup_gkr(
+        &mut self,
+        instances: Vec<FractionInstance<B::F>>,
+    ) -> SnarkResult<GkrClaims<B::F>> {
+        let (proof, claims) = prove_batch(instances, &mut self.state.transcript)?;
+        self.state.logup_gkr_subproofs.push(proof);
+        Ok(claims)
+    }
+
+    /// Stash a term sum of LogUp for `compile_proof`. The sums are
+    /// positional like the GKR subproofs: the verifier reads them in the
+    /// order they are sent here. Binding a sum to the transcript is left to
+    /// the caller, in the code it shares with the verifier.
+    pub(crate) fn send_logup_sum(&mut self, sum: B::F) {
+        self.state.logup_sums.push(sum);
+    }
+
+    /// [`Self::prove_logup_gkr`] with the batch prover swapped for `prove`,
+    /// for tests that put a prover of their own on the transcript.
+    #[cfg(test)]
+    pub(crate) fn prove_logup_gkr_with(
+        &mut self,
+        prove: impl FnOnce(
+            &mut crate::transcript::Tr<B::F>,
+        ) -> (crate::piop::logup_gkr::LogupGkrProof<B::F>, GkrClaims<B::F>),
+    ) -> GkrClaims<B::F> {
+        let (proof, claims) = prove(&mut self.state.transcript);
+        self.state.logup_gkr_subproofs.push(proof);
+        claims
     }
 }
 

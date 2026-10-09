@@ -286,6 +286,19 @@ where
         }
     }
 
+    /// The size of the handle for `self op rhs`, given what the operation
+    /// came out as. A folded constant has no tracker entry: its rows are
+    /// the handle's, and are what a claim on it will be about. It therefore
+    /// takes the size the prover's handle takes, that of the operand with
+    /// rows when the other has none.
+    fn result_log_size(&self, rhs: &TrackedOracle<B>, result: &Either<TrackerID, B::F>) -> usize {
+        if result.is_right() && self.log_size == 0 {
+            rhs.log_size
+        } else {
+            self.log_size
+        }
+    }
+
     fn compute_add(&self, rhs: &TrackedOracle<B>) -> Either<TrackerID, B::F> {
         self.assert_same_tracker(rhs);
         match (&self.id_or_const, &rhs.id_or_const) {
@@ -385,7 +398,8 @@ impl<'b, B: SnarkBackend> Add<&'b TrackedOracle<B>> for &TrackedOracle<B> {
     #[inline]
     fn add(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
         let id_or_const = self.compute_add(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        let log_size = self.result_log_size(rhs, &id_or_const);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), log_size)
     }
 }
 
@@ -395,7 +409,8 @@ impl<'b, B: SnarkBackend> Sub<&'b TrackedOracle<B>> for &TrackedOracle<B> {
     #[inline]
     fn sub(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
         let id_or_const = self.compute_sub(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        let log_size = self.result_log_size(rhs, &id_or_const);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), log_size)
     }
 }
 
@@ -405,7 +420,8 @@ impl<'b, B: SnarkBackend> Mul<&'b TrackedOracle<B>> for &TrackedOracle<B> {
     #[inline]
     fn mul(self, rhs: &'b TrackedOracle<B>) -> Self::Output {
         let id_or_const = self.compute_mul(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        let log_size = self.result_log_size(rhs, &id_or_const);
+        TrackedOracle::new(id_or_const, self.tracker.clone(), log_size)
     }
 }
 
@@ -442,21 +458,27 @@ impl<B: SnarkBackend> Mul<B::F> for TrackedOracle<B> {
 impl<'a, B: SnarkBackend> AddAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
     #[inline]
     fn add_assign(&mut self, rhs: &'a TrackedOracle<B>) {
-        self.id_or_const = self.compute_add(rhs);
+        let id_or_const = self.compute_add(rhs);
+        self.log_size = self.result_log_size(rhs, &id_or_const);
+        self.id_or_const = id_or_const;
     }
 }
 
 impl<'a, B: SnarkBackend> SubAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
     #[inline]
     fn sub_assign(&mut self, rhs: &'a TrackedOracle<B>) {
-        self.id_or_const = self.compute_sub(rhs);
+        let id_or_const = self.compute_sub(rhs);
+        self.log_size = self.result_log_size(rhs, &id_or_const);
+        self.id_or_const = id_or_const;
     }
 }
 
 impl<'a, B: SnarkBackend> MulAssign<&'a TrackedOracle<B>> for TrackedOracle<B> {
     #[inline]
     fn mul_assign(&mut self, rhs: &'a TrackedOracle<B>) {
-        self.id_or_const = self.compute_mul(rhs);
+        let id_or_const = self.compute_mul(rhs);
+        self.log_size = self.result_log_size(rhs, &id_or_const);
+        self.id_or_const = id_or_const;
     }
 }
 

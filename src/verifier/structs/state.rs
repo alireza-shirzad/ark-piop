@@ -1,5 +1,6 @@
 use crate::{
     SnarkBackend,
+    piop::{keyed_sumcheck::reduction::KeyedSumRelation, logup_gkr::LogupGkrProof},
     prover::structs::proof::PCSSubproof,
     types::{PCSOpeningProof, claim::TrackerLookupClaim},
 };
@@ -18,7 +19,7 @@ use crate::{
     prover::structs::proof::SNARKProof,
     transcript::Tr,
     types::{
-        CommitmentID, PointID, PointMap, QueryMap, SumcheckSubproof, TrackerID,
+        CommitmentID, LookupMessages, PointID, PointMap, QueryMap, SumcheckSubproof, TrackerID,
         claim::{TrackerNoZerocheckClaim, TrackerSumcheckClaim, TrackerZerocheckClaim},
     },
 };
@@ -43,6 +44,19 @@ where
     pub indexed_tracked_polys: BTreeMap<String, TrackedOracle<B>>,
     pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: VerifierPCSubstate<B::F, B::UvPCS>,
+    /// How many of the proof's LogUp-GKR subproofs have been verified. They
+    /// carry no labels: the n-th run of the protocol reads the n-th one.
+    pub logup_gkr_subproofs_consumed: usize,
+    /// How many of the proof's LogUp term sums have been read. They carry
+    /// no labels either: the n-th term of the protocol reads the n-th one.
+    pub logup_sums_consumed: usize,
+    /// Keyed sums claimed for later: reduced with the lookup claims, after
+    /// them and in this order.
+    pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,
+    /// Set when a check made outside the sumcheck and evaluation claims has
+    /// failed. Such a check leaves no false claim behind, so without this
+    /// the claims that remain could still verify.
+    pub(crate) rejected: bool,
 }
 
 #[derive(Derivative)]
@@ -76,6 +90,8 @@ where
     pub uv_pcs_subproof: ProcessedPCSSubproof<B::F, B::UvPCS>,
     pub miscellaneous_field_elements: BTreeMap<String, B::F>,
     pub miscellaneous_field_vectors: BTreeMap<String, Vec<B::F>>,
+    pub logup_gkr_subproofs: Vec<LogupGkrProof<B::F>>,
+    pub lookup_messages: LookupMessages<B::F>,
 }
 
 impl<B> ProcessedProof<B>
@@ -93,6 +109,8 @@ where
             uv_pcs_subproof: ProcessedPCSSubproof::new_from_pcs_subproof(&proof.uv_pcs_subproof),
             miscellaneous_field_elements: proof.miscellaneous_field_elements.clone(),
             miscellaneous_field_vectors: proof.miscellaneous_field_vectors.clone(),
+            logup_gkr_subproofs: proof.logup_gkr_subproofs.clone(),
+            lookup_messages: proof.lookup_messages.clone(),
         }
     }
 }
