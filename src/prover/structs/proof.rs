@@ -30,7 +30,11 @@ use crate::{
 /// v6: the multivariate batch opening is over polynomials of mixed sizes,
 /// binds its claims to the transcript before it draws its challenge, and no
 /// longer repeats the claimed evaluations, which the query map holds.
-pub const PROOF_ENCODING_VERSION: u8 = 6;
+///
+/// v7: no change of layout. The sums of sumcheck claims are bound to the
+/// transcript before the claims are batched, so the challenges drawn from
+/// there on, and every byte of a proof that depends on them, are others.
+pub const PROOF_ENCODING_VERSION: u8 = 7;
 use crate::{
     pcs::PCS,
     piop::logup_gkr::LogupGkrProof,

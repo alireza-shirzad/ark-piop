@@ -29,6 +29,10 @@ pub struct TrackerSumcheckClaim<F: PrimeField> {
     /// by the protocol on both sides, so the verifier rescales it to the
     /// bucket itself and never consults the proof's claim map for it.
     raw: bool,
+    /// Verifier only: the sum is the one the verifier read from the proof's
+    /// claim map for this polynomial, which holds it lifted to the widest
+    /// commitment. Any other sum is over the polynomial's own hypercube.
+    from_proof: bool,
 }
 
 impl<F: PrimeField> TrackerSumcheckClaim<F> {
@@ -37,6 +41,7 @@ impl<F: PrimeField> TrackerSumcheckClaim<F> {
             id,
             claim,
             raw: false,
+            from_proof: false,
         }
     }
     pub(crate) fn new_raw(id: TrackerID, claim: F) -> Self {
@@ -44,7 +49,20 @@ impl<F: PrimeField> TrackerSumcheckClaim<F> {
             id,
             claim,
             raw: true,
+            from_proof: false,
         }
+    }
+    /// A claim whose sum the verifier read from the proof's claim map.
+    pub(crate) fn new_from_proof(id: TrackerID, claim: F) -> Self {
+        Self {
+            id,
+            claim,
+            raw: false,
+            from_proof: true,
+        }
+    }
+    pub(crate) fn is_from_proof(&self) -> bool {
+        self.from_proof
     }
     pub(crate) fn claim(&self) -> F {
         self.claim

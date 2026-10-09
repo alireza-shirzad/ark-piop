@@ -980,3 +980,115 @@ fn verifier_held_commitment_is_not_opened_as_one_of_the_proofs() {
     assert_ne!(sum(&other), sum(&true_table));
     assert_check_failed(forged.verify(commitment));
 }
+
+/// An ordinary claim's sum is over the polynomial's own hypercube. The
+/// proof's claim map holds every sum lifted to the widest commitment, and
+/// a verifier that scaled a claim by whether its sum is the map's entry
+/// took an honest proof of the true sum for one of the lifted sum as well.
+#[test]
+fn ordinary_claim_is_not_proved_for_the_sum_lifted_to_the_widest_commitment() {
+    for (narrow_nv, wide_nv) in [(3, 5), (2, 8), (4, 4)] {
+        let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+        let (narrow_table, wide_table) = (column(narrow_nv, 3), column(wide_nv, 5));
+        let mut commit = |table: &[F]| {
+            prover
+                .track_and_commit_mat_mv_poly(&mle(table))
+                .unwrap()
+                .id()
+        };
+        let (narrow, wide) = (commit(&narrow_table), commit(&wide_table));
+        let (narrow_sum, wide_sum) = (sum(&narrow_table), sum(&wide_table));
+        prover.add_mv_sumcheck_claim(narrow, narrow_sum).unwrap();
+        prover.add_mv_sumcheck_claim(wide, wide_sum).unwrap();
+        let proof = prover.build_proof().unwrap();
+
+        let verify = |claimed: F| {
+            let mut verifier = verifier.fork();
+            verifier.set_proof_ref(&proof);
+            verifier.track_mv_com_by_id(narrow).unwrap();
+            verifier.track_mv_com_by_id(wide).unwrap();
+            verifier.add_mv_sumcheck_claim(narrow, claimed);
+            verifier.add_mv_sumcheck_claim(wide, wide_sum);
+            verifier.verify()
+        };
+        verify(narrow_sum).unwrap();
+
+        let lifted = narrow_sum * F::from(2u64).pow([(wide_nv - narrow_nv) as u64]);
+        let map = proof.sc_subproof.as_ref().unwrap().sumcheck_claims();
+        assert_eq!(map[&narrow], lifted);
+        if wide_nv > narrow_nv {
+            assert!(verify(lifted).is_err(), "sizes ({narrow_nv}, {wide_nv})");
+        }
+    }
+}
+
+/// A sum the verifier reads from the proof is a message of the prover, and
+/// the weights its claim is batched under must come after it. A prover
+/// that can learn the weights first, here by batching unit sums on a copy
+/// of itself, picks one value for two different sums that the batched
+/// claim cannot tell from the true ones, and a check that the two sums are
+/// equal passes.
+#[test]
+fn sums_read_from_the_proof_are_bound_before_their_claims_are_batched() {
+    let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+    let tables = [column(4, 3), column(4, 7)];
+    let ids = tables.each_ref().map(|table| {
+        prover
+            .track_and_commit_mat_mv_poly(&mle(table))
+            .unwrap()
+            .id()
+    });
+    let sums = tables.each_ref().map(|table| sum(table));
+    assert_ne!(sums[0], sums[1]);
+
+    // The verifier's side of a statement "the two sums are equal": it
+    // reads both from the proof, claims them and compares.
+    let verify = |proof: &SNARKProof<B>| -> SnarkResult<[F; 2]> {
+        let mut verifier = verifier.fork();
+        verifier.set_proof_ref(proof);
+        let mut read = [F::zero(); 2];
+        for (id, sum) in ids.iter().zip(&mut read) {
+            verifier.track_mv_com_by_id(*id)?;
+            *sum = verifier.prover_claimed_sum(*id)?;
+            verifier.add_mv_sumcheck_claim(*id, *sum);
+        }
+        verifier.verify()?;
+        Ok(read)
+    };
+
+    // The weight of each claim, as far as a copy of the prover gives it
+    // away: the batched sum of a unit sum for one claim and zero for the
+    // other. No honest prover claims those.
+    let weights = (!cfg!(feature = "honest-prover")).then(|| {
+        [[1u64, 0], [0, 1]].map(|unit| {
+            let mut probe = prover.deep_copy();
+            for (id, sum) in ids.iter().zip(unit) {
+                probe.add_mv_sumcheck_claim(*id, F::from(sum)).unwrap();
+            }
+            let tracker = probe.tracker();
+            let mut tracker = tracker.borrow_mut();
+            crate::tracker_core::pipeline::batch_s_check_claims(&mut *tracker).unwrap();
+            tracker.sumcheck_claims_snapshot()[0].1
+        })
+    });
+
+    for (id, sum) in ids.iter().zip(sums) {
+        prover.add_mv_sumcheck_claim(*id, sum).unwrap();
+    }
+    let proof = prover.build_proof().unwrap();
+    assert_eq!(verify(&proof).unwrap(), sums);
+
+    let Some([w0, w1]) = weights else { return };
+    let shared = (w0 * sums[0] + w1 * sums[1]) / (w0 + w1);
+    let mut forged = proof.clone();
+    let subproof = forged.sc_subproof.as_ref().unwrap();
+    let mut claims = subproof.sumcheck_claims().clone();
+    for id in ids {
+        claims.insert(id, shared);
+    }
+    forged.sc_subproof = Some(SumcheckSubproof::new(subproof.buckets().to_vec(), claims));
+    match verify(&forged) {
+        Ok(read) => panic!("two different sums were accepted as {read:?}"),
+        Err(err) => assert_check_failed::<()>(Err(err)),
+    }
+}

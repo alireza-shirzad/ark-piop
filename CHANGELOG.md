@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Proof encoding version 6.** Earlier proofs do not decode, and proofs
+- **Proof encoding version 7.** Earlier proofs do not decode, and proofs
   differ from earlier ones under either protocol.
 - The multivariate batch opening is over polynomials of mixed sizes, binds
   its claims to the transcript before drawing its challenge, and no longer
@@ -54,6 +54,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - The univariate batch check verifies one proof per claim.
 - A bucket sumcheck that declares a higher degree than the verifier's own
   polynomial has is rejected; the degree was the proof's to choose.
+- **A sumcheck claim is checked for the sum it was added with.** The
+  verifier took a claim's sum for one of the proof's claim map, which holds
+  sums lifted to the widest commitment, whenever the two were equal. An
+  honest proof of a sum was thereby also accepted for that sum times a power
+  of two. A sum is now in the map's frame only if the verifier read it there
+  with `prover_claimed_sum`.
+- **Claimed sums are bound to the transcript before their claims are
+  batched.** The batching weights did not depend on the sums, so a prover
+  could choose sums it reports in the proof after seeing them, and have two
+  different sums accepted as equal.
 - A lookup whose constant column is wider than every commitment, and one
   whose column and multiplicities differ in size, are now proved.
 - Verification fails after a lookup reduction that failed or never ran.

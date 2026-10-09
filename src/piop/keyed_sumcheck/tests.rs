@@ -4152,11 +4152,12 @@ fn all_routes_proof(mut prover: ArgProver<B>) -> SNARKProof<B> {
 /// between the version byte and the tag, the proof of [`all_routes_proof`]
 /// as it would be without the choice: 20694 bytes with this hash. Up to
 /// proof encoding 5 those were the 21214 bytes of the commit before the
-/// choice (b1dc5e2); encoding 6 changed the batch opening, which no longer
-/// repeats the evaluations it opens.
+/// choice (b1dc5e2). Encoding 6 changed the batch opening, which no longer
+/// repeats the evaluations it opens, and encoding 7 the transcript, which
+/// holds the sums of sumcheck claims before they are batched.
 #[test]
 fn logup_gkr_proof_bytes_are_pinned() {
-    const PINNED: &str = "1ac47f89e9d823aa057325c5c85302aa9f42f75c771b1ad1c5445a4d2eea9809";
+    const PINNED: &str = "425b3c43791203faac33eadfab65849f6898a1436c216ad4881f23b68aa0d675";
     const PINNED_LEN: usize = 20694;
 
     let config = SharedArgConfig {
@@ -4170,7 +4171,7 @@ fn logup_gkr_proof_bytes_are_pinned() {
         .unwrap();
     let (version, rest) = bytes.split_first().unwrap();
     let (tag, before) = rest.split_last().unwrap();
-    assert_eq!(*version, 6);
+    assert_eq!(*version, 7);
     assert_eq!(*tag, LookupProtocol::LogUpGkr.tag());
     assert_eq!(before.len() + 1, PINNED_LEN);
     assert_eq!(blake3::hash(before).to_hex().as_str(), PINNED);

@@ -378,7 +378,7 @@ where
     // user rather than living in this library.
     #[instrument(level = "debug", skip(self))]
     pub fn prover_claimed_sum(&self, id: TrackerID) -> SnarkResult<B::F> {
-        self.tracker_rc.borrow().prover_claimed_sum(id)
+        self.tracker_rc.borrow_mut().prover_claimed_sum(id)
     }
 
     #[instrument(level = "debug", skip(self))]
