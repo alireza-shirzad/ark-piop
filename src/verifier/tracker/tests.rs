@@ -19,8 +19,8 @@ use crate::{
     prover::structs::proof::{PROOF_ENCODING_VERSION, SNARKProof},
     test_utils::prelude_with_vars,
     types::{
-        CommitmentBinding, SumcheckBucketProof, SumcheckSubproof, TrackerID, artifact::Artifact,
-        claim::TrackerSumcheckClaim,
+        CommitmentBinding, PCSOpeningProof, SumcheckBucketProof, SumcheckSubproof, TrackerID,
+        artifact::Artifact, claim::TrackerSumcheckClaim,
     },
     verifier::{ArgVerifier, errors::VerifierError, structs::oracle::Oracle},
 };
@@ -665,4 +665,264 @@ fn constant_of_an_absurd_declared_size_is_an_error_not_a_panic() {
             .insert(case.narrow, num_vars);
         assert_check_failed(case.verify(proof, case.narrow_sum));
     }
+}
+
+/// Columns of three sizes, two of them claimed only through their sum, so
+/// that what the proof says they evaluate to is checked by nothing but the
+/// openings: the sumcheck sees `a(r) + b(r)`.
+struct OpeningCase {
+    proof: SNARKProof<B>,
+    verifier: ArgVerifier<B>,
+    /// `a`, `b` of one size and the wider `c`.
+    columns: [TrackerID; 3],
+    pair_sum: F,
+    wide_sum: F,
+}
+
+impl OpeningCase {
+    fn new(pair_nv: usize, wide_nv: usize) -> Self {
+        let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+        let tables = [column(pair_nv, 3), column(pair_nv, 7), column(wide_nv, 5)];
+        let polys = tables
+            .each_ref()
+            .map(|table| prover.track_and_commit_mat_mv_poly(&mle(table)).unwrap());
+        let pair = &polys[0] + &polys[1];
+        let (pair_sum, wide_sum) = (sum(&tables[0]) + sum(&tables[1]), sum(&tables[2]));
+        prover.add_mv_sumcheck_claim(pair.id(), pair_sum).unwrap();
+        prover
+            .add_mv_sumcheck_claim(polys[2].id(), wide_sum)
+            .unwrap();
+        Self {
+            proof: prover.build_proof().unwrap(),
+            verifier,
+            columns: polys.map(|poly| poly.id()),
+            pair_sum,
+            wide_sum,
+        }
+    }
+
+    fn verify(&self, proof: &SNARKProof<B>) -> SnarkResult<()> {
+        let mut verifier = self.verifier.fork();
+        verifier.set_proof_ref(proof);
+        let [a, b, c] = self
+            .columns
+            .map(|id| verifier.track_mv_com_by_id(id).unwrap());
+        verifier.add_mv_sumcheck_claim((&a + &b).id(), self.pair_sum);
+        verifier.add_mv_sumcheck_claim(c.id(), self.wide_sum);
+        verifier.verify()
+    }
+
+    /// The proof with what it claims `a` and `b` evaluate to moved by
+    /// opposite amounts, wherever both are evaluated.
+    fn with_cancelling_evaluations(&self) -> SNARKProof<B> {
+        let mut proof = self.proof.clone();
+        let subproof = &mut proof.mv_pcs_subproof;
+        let [a, b] = [0, 1].map(|i| subproof.comitment_map[&self.columns[i]]);
+        assert_ne!(a, b);
+        let points: Vec<_> = subproof.query_map[&a].keys().copied().collect();
+        assert!(!points.is_empty());
+        for point in points {
+            *subproof
+                .query_map
+                .get_mut(&a)
+                .unwrap()
+                .get_mut(&point)
+                .unwrap() += F::one();
+            *subproof
+                .query_map
+                .get_mut(&b)
+                .unwrap()
+                .get_mut(&point)
+                .unwrap() -= F::one();
+        }
+        proof
+    }
+}
+
+/// The openings failed, not a check before them.
+fn assert_openings_rejected(res: SnarkResult<()>) {
+    match res {
+        Err(SnarkError::PCSErrors(_)) => {}
+        Err(SnarkError::VerifierError(VerifierError::VerifierCheckFailed(reason)))
+            if reason.contains("opening proof") => {}
+        other => panic!("expected the openings to be rejected, got {other:?}"),
+    }
+}
+
+#[test]
+fn commitments_of_mixed_sizes_are_opened_and_checked() {
+    for (pair_nv, wide_nv) in [(3, 5), (5, 3), (4, 4), (1, 6)] {
+        let case = OpeningCase::new(pair_nv, wide_nv);
+        assert!(matches!(
+            case.proof.mv_pcs_subproof.opening_proof,
+            PCSOpeningProof::BatchProof(_)
+        ));
+        case.verify(&case.proof).unwrap();
+    }
+}
+
+/// Evaluations that are false and still satisfy every sumcheck: the
+/// verifier has to take the openings' word for it, and they refuse.
+#[test]
+fn false_evaluations_that_cancel_in_the_sumcheck_are_rejected() {
+    for (pair_nv, wide_nv) in [(3, 5), (5, 3), (4, 4)] {
+        let case = OpeningCase::new(pair_nv, wide_nv);
+        assert_openings_rejected(case.verify(&case.with_cancelling_evaluations()));
+    }
+}
+
+#[test]
+fn tampered_batch_opening_is_rejected() {
+    let case = OpeningCase::new(3, 5);
+    let edit = |edit: &dyn Fn(&mut <<B as SnarkBackend>::MvPCS as PCS<F>>::BatchProof)| {
+        let mut proof = case.proof.clone();
+        match &mut proof.mv_pcs_subproof.opening_proof {
+            PCSOpeningProof::BatchProof(batch) => edit(batch),
+            other => panic!("expected a batch opening, got {other:?}"),
+        }
+        proof
+    };
+    let generator = <ark_bn254::G1Affine as ark_ec::AffineRepr>::generator();
+    let forged = [
+        edit(&|batch| batch.g_prime_proof.proofs[0] = generator),
+        edit(&|batch| {
+            batch.g_prime_proof.proofs.pop();
+        }),
+        edit(&|batch| {
+            let message = &mut batch.sum_check_proof.proofs[0].evaluations;
+            message[0] += F::one();
+            message[1] -= F::one();
+        }),
+        edit(&|batch| batch.sum_check_proof.point[0] += F::one()),
+    ];
+    for proof in &forged {
+        assert_openings_rejected(case.verify(proof));
+    }
+
+    // An opening proof of another kind than the claims call for.
+    let mut none = case.proof.clone();
+    none.mv_pcs_subproof.opening_proof = PCSOpeningProof::Empty;
+    assert_check_failed(case.verify(&none));
+}
+
+/// A proof with one commitment opens it alone, also when the claim on it
+/// is over more variables than it has.
+#[test]
+fn single_opening_is_checked() {
+    for (nv, tampered_fails) in [(4, true), (1, true)] {
+        let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+        let table = column(nv, 3);
+        let poly = prover.track_and_commit_mat_mv_poly(&mle(&table)).unwrap();
+        let squared: F = table.iter().map(|v| *v * v).sum();
+        let product = &poly * &poly;
+        prover.add_mv_sumcheck_claim(product.id(), squared).unwrap();
+        let proof = prover.build_proof().unwrap();
+        assert!(matches!(
+            proof.mv_pcs_subproof.opening_proof,
+            PCSOpeningProof::SingleProof(_)
+        ));
+
+        let verify = |proof: &SNARKProof<B>| {
+            let mut verifier = verifier.fork();
+            verifier.set_proof_ref(proof);
+            let oracle = verifier.track_mv_com_by_id(poly.id()).unwrap();
+            verifier.add_mv_sumcheck_claim((&oracle * &oracle).id(), squared);
+            verifier.verify()
+        };
+        verify(&proof).unwrap();
+
+        let mut tampered = proof.clone();
+        match &mut tampered.mv_pcs_subproof.opening_proof {
+            PCSOpeningProof::SingleProof(single) => {
+                single.proofs[0] = <ark_bn254::G1Affine as ark_ec::AffineRepr>::generator()
+            }
+            other => panic!("expected a single opening, got {other:?}"),
+        }
+        assert_eq!(verify(&tampered).is_err(), tampered_fails);
+        assert_openings_rejected(verify(&tampered));
+    }
+}
+
+/// A statement about a polynomial the verifier holds the commitment of,
+/// `table`, and a column the proof commits to.
+struct ExternalCase {
+    proof: SNARKProof<B>,
+    verifier: ArgVerifier<B>,
+    column: TrackerID,
+    sum: F,
+}
+
+impl ExternalCase {
+    /// The prover runs with `prover_table` as the table and commits to it
+    /// again as its column, which gives both one commitment id in the
+    /// proof. The sums it claims are that polynomial's.
+    fn new(prover_table: &[F]) -> (Self, <<B as SnarkBackend>::MvPCS as PCS<F>>::Commitment) {
+        let (mut prover, verifier) = prelude_with_vars::<B>(SRS_NV).unwrap();
+        let poly = mle(prover_table);
+        // A commitment made outside the proof, under the same keys.
+        let (pk, _) = crate::setup::KeyGenerator::<B>::new()
+            .with_num_mv_vars(SRS_NV)
+            .gen_keys()
+            .unwrap();
+        let commitment = <<B as SnarkBackend>::MvPCS as PCS<F>>::commit(
+            pk.mv_pcs_param.as_ref(),
+            &Arc::new(poly.clone()),
+        )
+        .unwrap();
+
+        let table = prover
+            .track_mat_mv_poly_with_commitment(
+                &poly,
+                commitment.clone(),
+                CommitmentBinding::External,
+            )
+            .unwrap();
+        let column = prover.track_and_commit_mat_mv_poly(&poly).unwrap();
+        let sum = sum(prover_table);
+        prover.add_mv_sumcheck_claim(table.id(), sum).unwrap();
+        prover.add_mv_sumcheck_claim(column.id(), sum).unwrap();
+        let proof = prover.build_proof().unwrap();
+        let ids = &proof.mv_pcs_subproof.comitment_map;
+        assert_eq!(ids[&table.id()], ids[&column.id()]);
+        (
+            Self {
+                proof,
+                verifier,
+                column: column.id(),
+                sum,
+            },
+            commitment,
+        )
+    }
+
+    /// Verifies against `table`, the commitment the verifier holds.
+    fn verify(&self, table: <<B as SnarkBackend>::MvPCS as PCS<F>>::Commitment) -> SnarkResult<()> {
+        let mut verifier = self.verifier.fork();
+        verifier.set_proof_ref(&self.proof);
+        let table = verifier
+            .track_mat_mv_com_with_binding(table, CommitmentBinding::External)
+            .unwrap();
+        let column = verifier.track_mv_com_by_id(self.column).unwrap();
+        verifier.add_mv_sumcheck_claim(table.id(), self.sum);
+        verifier.add_mv_sumcheck_claim(column.id(), self.sum);
+        verifier.verify()
+    }
+}
+
+/// The proof's commitment map says which commitments share their
+/// evaluations. A prover that proves a sum of its own polynomial and maps
+/// the verifier's table onto it would have the table's evaluations opened
+/// against its own commitment, were one id allowed to stand for both.
+#[test]
+fn verifier_held_commitment_is_not_opened_as_one_of_the_proofs() {
+    let (true_table, other) = (column(4, 3), column(4, 11));
+
+    // The column is the table: one id for both is what an honest proof has.
+    let (honest, commitment) = ExternalCase::new(&true_table);
+    honest.verify(commitment.clone()).unwrap();
+
+    // The proof is about `other`, the verifier's table is `true_table`.
+    let (forged, _) = ExternalCase::new(&other);
+    assert_ne!(sum(&other), sum(&true_table));
+    assert_check_failed(forged.verify(commitment));
 }

@@ -25,8 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Proof encoding version 5.** Earlier proofs do not decode, and proofs
+- **Proof encoding version 6.** Earlier proofs do not decode, and proofs
   differ from earlier ones under either protocol.
+- The multivariate batch opening is over polynomials of mixed sizes, binds
+  its claims to the transcript before drawing its challenge, and no longer
+  repeats the claimed evaluations in the proof.
+- `PST13::open` and `PST13::verify` read as many coordinates of a point as
+  the committed polynomial has variables.
+- The prover opens commitments in the order of the proof's query map.
 - `SNARKProof::from_bytes` rejects trailing bytes.
 - `SharedArgConfig` and `SNARKProof` have new fields; the `TrackerCore`
   trait has new required methods.
@@ -37,6 +43,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`verify()` rejects a proof whose polynomial openings do not hold.** The
+  results of both PCS verifications were discarded, the multivariate batch
+  check read the evaluations and the point from the proof instead of the
+  verifier's own, and it only held for commitments of one size, so a proof
+  with false evaluations was accepted.
+- A commitment id of the proof's commitment map can no longer stand for two
+  different commitments, which let the evaluations of a commitment the
+  verifier holds be opened against one of the proof's.
+- The univariate batch check verifies one proof per claim.
 - A lookup whose constant column is wider than every commitment, and one
   whose column and multiplicities differ in size, are now proved.
 - Verification fails after a lookup reduction that failed or never ran.
