@@ -1,7 +1,5 @@
-//! [`TrackerCore`] implementation for [`ProverTracker`].
-//!
-//! Each method delegates to the existing `ProverTracker` API. The prover-side
-//! seam methods (`track_eq_x_r`) materialize concrete MLE data.
+//! [`TrackerCore`] for [`ProverTracker`]. The seam method `track_eq_x_r`
+//! materializes the MLE.
 
 use std::mem::take;
 
@@ -21,10 +19,7 @@ use super::ProverTracker;
 impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
     type F = B::F;
 
-    // ── Transcript ──────────────────────────────────────────────────
-
     fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<Self::F> {
-        // Delegate to the existing method on ProverTracker.
         ProverTracker::get_and_append_challenge(self, label)
     }
 
@@ -45,8 +40,6 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .append_field_element(label, element)
             .map_err(crate::errors::SnarkError::from)
     }
-
-    // ── Virtual polynomial operations ───────────────────────────────
 
     fn track_empty_virtual_poly(&mut self) -> TrackerID {
         self.track_virt_poly(VirtualPoly::new())
@@ -84,13 +77,9 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
         self.virt_poly(id)
     }
 
-    // ── Materialization query ───────────────────────────────────────
-
     fn is_material(&self, id: TrackerID) -> bool {
         self.mat_mv_poly(id).is_some()
     }
-
-    // ── Zerocheck claims ────────────────────────────────────────────
 
     fn take_zerocheck_claims(&mut self) -> Vec<TrackerZerocheckClaim> {
         take(&mut self.state.mv_pcs_substate.zero_check_claims)
@@ -125,8 +114,6 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
             .id()
     }
 
-    // ── Sumcheck claims ─────────────────────────────────────────────
-
     fn take_sumcheck_claims(&mut self) -> Vec<TrackerSumcheckClaim<Self::F>> {
         take(&mut self.state.mv_pcs_substate.sum_check_claims)
     }
@@ -150,13 +137,9 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
         self.state.mv_pcs_substate.sum_check_claims.is_empty()
     }
 
-    // ── Nozerocheck claims ──────────────────────────────────────────
-
     fn take_nozerocheck_claims(&mut self) -> Vec<TrackerNoZerocheckClaim> {
         take(&mut self.state.mv_pcs_substate.no_zero_check_claims)
     }
-
-    // ── Configuration ───────────────────────────────────────────────
 
     fn config(&self) -> &SharedArgConfig {
         &self.config
@@ -165,8 +148,6 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
     fn peek_next_id(&self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }
-
-    // ── Seam: prover-specific ───────────────────────────────────────
 
     fn track_eq_x_r(&mut self, r: &[Self::F], _max_nv: usize) -> SnarkResult<TrackerID> {
         Ok(self.track_mat_arc_mv_poly(build_eq_x_r(r)?))

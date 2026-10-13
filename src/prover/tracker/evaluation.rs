@@ -1,4 +1,4 @@
-//! Polynomial evaluation — materializing virtual polynomials and evaluating at points.
+//! Polynomial evaluation: materializing virtual polynomials and evaluating at points.
 
 use super::*;
 use crate::arithmetic::mat_poly::rows::add_scaled_product;
@@ -27,12 +27,10 @@ where
 
     pub fn evaluate_uv(&self, id: TrackerID, pt: &B::F) -> Option<B::F> {
         let mat_poly = self.state.uv_pcs_substate.materialized_polys.get(&id);
-        // TODO: Change this to_vec
         mat_poly.map(|poly| poly.evaluate(pt))
     }
 
     pub fn batch_evaluate_mv(&self, ids: &[TrackerID], pt: &[B::F]) -> Option<Vec<B::F>> {
-        // Find max nv needed
         let mut needed_nvs = BTreeSet::new();
         for &id in ids {
             self.collect_needed_nvs(id, &mut needed_nvs);
@@ -56,14 +54,16 @@ where
                 .collect::<Vec<_>>();
             eq_evals.insert(nv, MLE::from_evaluations_vec(nv, evals));
         }
-        // Handle nv=0 case
         if needed_nvs.contains(&0) {
             eq_evals.insert(0, MLE::from_evaluations_vec(0, vec![B::F::one()]));
         }
 
         let mat_mles = &self.state.mv_pcs_substate.materialized_polys;
         cfg_iter!(ids)
-            .map(|&id| Self::evaluate_mat_mv_with_eq_evals(id, &eq_evals, mat_mles))
+            .map(|id| {
+                let poly = mat_mles.get(id).unwrap();
+                Some(evaluate_with_eq(poly, &eq_evals[&poly.mat_mle().num_vars]))
+            })
             .collect()
     }
 
@@ -85,7 +85,6 @@ where
         }
     }
 
-    /// Evaluates a polynomial at a point
     pub fn evaluate_mv(&self, id: TrackerID, pt: &[B::F]) -> Option<B::F> {
         match self.state.mv_pcs_substate.materialized_polys.get(&id) {
             Some(poly) => {
@@ -99,7 +98,6 @@ where
             }
             None => {
                 let p = self.virt_poly(id).unwrap();
-                // calculate the evaluation of each product list
                 let result = p
                     .iter()
                     .map(|(coeff, prod)| {
@@ -115,23 +113,8 @@ where
         }
     }
 
-    /// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
-    /// This assumes that `eq_evals` contains the evaluations of the eq polynomial for each number
-    /// of variables of the *actual* underlying `DenseMultilinearExtension` of the materialized polynomials.
-    pub fn evaluate_mat_mv_with_eq_evals(
-        id: TrackerID,
-        eq_evals: &BTreeMap<usize, MLE<B::F>>,
-        materialized_polys: &BTreeMap<TrackerID, Arc<MLE<B::F>>>,
-    ) -> Option<B::F> {
-        let poly = materialized_polys.get(&id).unwrap();
-
-        let nv = poly.mat_mle().num_vars;
-        Some(evaluate_with_eq(poly, &eq_evals[&nv]))
-    }
-
-    /// Evaluates a polynomial at a point given the evaluations of the eq polynomial at that point.
-    /// This assumes that `eq_evals` contains the evaluations of the eq polynomial for each number
-    /// of variables of the *actual* underlying `DenseMultilinearExtension` of the materialized polynomials.
+    /// Evaluates `id` at a point, given the evaluations of eq at that point
+    /// for the number of variables of each materialized polynomial under it.
     pub fn evaluate_mv_with_eq_evals(
         &self,
         id: TrackerID,
@@ -161,7 +144,6 @@ where
         }
     }
 
-    /// Returns the evaluations of a polynomial on the boolean hypercube
     pub fn evaluations(&mut self, id: TrackerID) -> Vec<B::F> {
         match self.mat_mv_poly(id) {
             Some(mat_poly) => mat_poly.evaluations(),

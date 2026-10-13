@@ -7,10 +7,9 @@ pub mod claim;
 
 /// The argument that proves lookup claims and keyed sums.
 ///
-/// Both prove the same relations. They differ in what the prover pays and
-/// what the proof carries, and they are not interchangeable: the choice is
-/// part of what the two sides agree on, like the rest of
-/// [`SharedArgConfig`], and a proof made with one is rejected by a verifier
+/// Both prove the same relations and differ in what the prover pays and what
+/// the proof carries. The two sides must agree on one, like on the rest of
+/// [`SharedArgConfig`]: a proof made with one is rejected by a verifier
 /// configured for the other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LookupProtocol {
@@ -37,7 +36,7 @@ impl LookupProtocol {
     /// A value that names no protocol is an error, here and in every
     /// constructor of a prover or verifier that takes a configuration:
     /// [`SharedArgConfig::default`] cannot report it and falls back to the
-    /// built-in default, so the constructors refuse to go on with it.
+    /// built-in default.
     pub fn from_env() -> SnarkResult<Option<Self>> {
         static FROM_ENV: OnceLock<Result<Option<LookupProtocol>, String>> = OnceLock::new();
         FROM_ENV
@@ -98,8 +97,7 @@ impl Display for LookupProtocol {
 /// The part of a proof that belongs to its lookup protocol alone: which
 /// protocol it is and what that protocol sends besides commitments and
 /// subproofs. Serialized as the protocol's tag byte followed by the
-/// messages, so a proof of the protocol without any is one byte longer for
-/// it.
+/// messages.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum LookupMessages<F: PrimeField> {
     /// The sum of every term of every keyed sum, each over the term's own
@@ -184,9 +182,9 @@ impl<F: PrimeField> Valid for LookupMessages<F> {
 /// Shared configuration for ArgProver and ArgVerifier: these parameters must
 /// be identical on both sides, so pass the same instance to each.
 ///
-/// The sumcheck stage buckets claims automatically at compile time; the cost
-/// model in [`crate::tracker_core::bucketing::build_buckets`] decides between
-/// one merged sumcheck and per-nv buckets.
+/// Sumcheck bucketing is not configured here: the cost model in
+/// [`crate::tracker_core::bucketing::build_buckets`] decides between one
+/// merged sumcheck and per-nv buckets.
 #[derive(Clone, Debug)]
 pub struct SharedArgConfig {
     /// Max multiplicative degree allowed per sumcheck term before the prover
@@ -206,15 +204,14 @@ pub struct SharedArgConfig {
     /// instance a power of two of them at a time, whichever lookups or keyed
     /// sums they belong to, and no more of them than the limit has room for:
     /// `2^s` unit-numerator columns of `2^n` rows share an instance only
-    /// while `3 * 2^(n + s)` is within it, and a taller group becomes
-    /// several instances. So a run holds more than the limit only when it
-    /// is a single column that does so by itself, which is never cut and is
-    /// proved alone. Under the default that is a column of more than `2^26`
-    /// rows.
+    /// while `3 * 2^(n + s)` is within it. So a run holds more than the
+    /// limit only when it is a single column that does so by itself, which
+    /// is never cut and is proved alone. Under the default that is a column
+    /// of more than `2^26` rows.
     ///
-    /// The limit is on what a run builds. It does not bound the evaluations
-    /// of the columns themselves: those of a lookup are read out before the
-    /// first run, and each is held until the last run that reads it.
+    /// The limit does not bound the evaluations of the columns themselves:
+    /// those of a lookup are read out before the first run, and each is held
+    /// until the last run that reads it.
     ///
     /// Both the stacks and the runs are part of the proof's shape: a proof
     /// made under a limit that gives another layout than the verifier's is
@@ -228,9 +225,8 @@ pub struct SharedArgConfig {
 
 impl Default for SharedArgConfig {
     /// The lookup protocol is the one [`LOOKUP_PROTOCOL_ENV`] names, and
-    /// LogUp-GKR when the variable is not set. A value that names no
-    /// protocol leaves LogUp-GKR here as well, and makes every constructor
-    /// that takes a configuration fail; see [`LookupProtocol::from_env`].
+    /// LogUp-GKR when the variable is unset or names no protocol; see
+    /// [`LookupProtocol::from_env`].
     fn default() -> Self {
         Self {
             sumcheck_term_degree_limit: 6,
@@ -369,8 +365,6 @@ impl ConstantID {
     }
 }
 
-/// Describes whether a tracked commitment is emitted by this proof or reused
-/// from external context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitmentBinding {
     /// Bound into the transcript and included in proof-owned collections.
@@ -379,9 +373,8 @@ pub enum CommitmentBinding {
     External,
 }
 
-/// One sumcheck round emitted by the prover. The subproof carries one of
-/// these per bucket produced by the compile-time picker (see
-/// [`crate::tracker_core::bucketing`]), ordered by ascending `target_nv`.
+/// The sumcheck of one bucket. A subproof carries one per bucket of
+/// [`crate::tracker_core::bucketing`], ordered by ascending `target_nv`.
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SumcheckBucketProof<F>
 where
@@ -409,14 +402,11 @@ impl<F: PrimeField> SumcheckBucketProof<F> {
     }
 }
 
-// The sumcheck subproof of a SNARK for the ZKSQL protocol.
 #[derive(Clone, Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SumcheckSubproof<F>
 where
     F: PrimeField,
 {
-    // One entry per bucket, ordered by ascending `target_nv` (bucket count is
-    // decided by the compile-time picker in `tracker_core::bucketing`).
     buckets: Vec<SumcheckBucketProof<F>>,
     //TODO: not all protocols use sumcheck_claims; move it into an optional
     // proof-elements field instead of keeping it in every proof.

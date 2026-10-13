@@ -1,8 +1,4 @@
-//! Polynomial Interactive Oracle Proof (PIOP) trait and sub-protocols.
-//!
-//! The [`PIOP`] trait is the main abstraction for implementing custom
-//! interactive proof protocols.  Sub-protocols like sumcheck and lookup-check
-//! are provided as reusable building blocks.
+//! The [`PIOP`] trait and the sub-protocols built into the crate.
 
 use tracing::{Level, span};
 
@@ -13,7 +9,6 @@ pub mod logup_gkr;
 pub mod lookup_check;
 pub mod structs;
 pub mod sum_check;
-/// Helper to get a type name without generic parameters.
 #[inline]
 pub(crate) fn type_name_without_generics<T>() -> &'static str {
     let full = std::any::type_name::<T>();
@@ -22,14 +17,16 @@ pub(crate) fn type_name_without_generics<T>() -> &'static str {
         None => full,
     }
 }
-/// Any PIOP must implement this trait.
+/// A protocol run against the prover and verifier trackers. Implement
+/// [`Self::prove_inner`] and [`Self::verify_inner`]; call [`Self::prove`] and
+/// [`Self::verify`].
 pub trait PIOP<B: SnarkBackend>: Sized {
     type ProverInput: DeepClone<B> + std::fmt::Debug;
     type ProverOutput;
     type VerifierOutput;
     type VerifierInput;
-    /// Proves the PIOP: a default wrapper around [`Self::prove_inner`] adding tracing
-    /// and (optionally) honest-prover checks.
+    /// [`Self::prove_inner`] in a tracing span, after the honest-prover check
+    /// when the `honest-prover` feature is on.
     fn prove(
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
@@ -67,8 +64,7 @@ pub trait PIOP<B: SnarkBackend>: Sized {
         res
     }
 
-    /// Verifies the PIOP: a default wrapper around [`Self::verify_inner`] adding
-    /// tracing instrumentation.
+    /// [`Self::verify_inner`] in a tracing span.
     fn verify(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
@@ -88,20 +84,18 @@ pub trait PIOP<B: SnarkBackend>: Sized {
         res
     }
 
-    /// The actual prover logic, wrapped by [`Self::prove`].
     fn prove_inner(
         prover: &mut ArgProver<B>,
         input: Self::ProverInput,
     ) -> SnarkResult<Self::ProverOutput>;
 
-    /// The actual verifier logic, wrapped by [`Self::verify`].
     fn verify_inner(
         verifier: &mut ArgVerifier<B>,
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput>;
 
-    /// Optional honest-prover check, run on a deep copy of the prover so it cannot
-    /// interfere with protocol state. Costly — for testing/debugging only.
+    /// Run by [`Self::prove`] on a deep copy of the prover, so it cannot
+    /// change protocol state. Costly: for testing and debugging only.
     #[cfg(feature = "honest-prover")]
     #[allow(unused_variables)]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<()> {
@@ -109,8 +103,8 @@ pub trait PIOP<B: SnarkBackend>: Sized {
     }
 }
 
-/// Deep-clones PIOP prover inputs against a fresh prover instance — a plain clone
-/// would interfere with the real prover's protocol state during honest-prover checks.
+/// Clones a PIOP prover input onto `new_prover`. A plain clone would interfere
+/// with the real prover's protocol state during honest-prover checks.
 pub trait DeepClone<B: SnarkBackend> {
     fn deep_clone(&self, new_prover: ArgProver<B>) -> Self;
 }

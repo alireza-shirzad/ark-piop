@@ -1,6 +1,7 @@
 //! Verification pipeline for the verifier.
 
 use super::*;
+use crate::tracker_core::pipeline;
 
 /// `2^exponent` in the field. The exponents here are differences of sizes
 /// the proof declares, so they may exceed any machine word's width.
@@ -41,18 +42,10 @@ fn commitments_by_id<C: Clone + PartialEq>(
 }
 
 impl<B: SnarkBackend> VerifierTracker<B> {
-    /// Batch all zerocheck claims into one via random linear combination.
-    /// Delegates to the generic pipeline.
-    #[instrument(level = "debug", skip_all)]
-    fn batch_z_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
-        crate::tracker_core::pipeline::batch_z_check_claims(self)
-    }
-
-    /// Verifier mirror of the prover's `batch_nozero_check_claims_by_nv`.
-    ///
-    /// Only the *order* matters here — chunk and inverse commitments are
-    /// tracked off `peek_next_id`, so the verifier has to walk the groups
-    /// exactly as the prover committed them. Ascending nv on both sides.
+    /// Mirrors the prover's `batch_nozero_check_claims_by_nv`. Chunk and
+    /// inverse commitments are tracked off `peek_next_id`, so the verifier
+    /// has to walk the groups in the order the prover committed them:
+    /// ascending nv on both sides.
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims_by_nv(&mut self) -> SnarkResult<()> {
         let claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
@@ -98,7 +91,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 chunk_prod_id = self.mul_polys(chunk_prod_id, claim.id());
             }
 
-            // Track the committed chunk product and link it via a zerocheck.
             let chunk_comm_id = self.peek_next_id();
             let _ = self.track_mv_com_by_id(chunk_comm_id)?;
             let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
@@ -113,7 +105,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
         let master_prod_id = master_prod_id.expect("nozero_claims should be non-empty");
 
-        // Track the committed inverse polynomial by id provided in the proof.
         let inverses_poly_id = self.peek_next_id();
         let _ = self.track_mv_com_by_id(inverses_poly_id)?;
 
@@ -128,21 +119,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let diff_id = self.add_scalar(prod_inv_id, -B::F::one());
         self.add_mv_zerocheck_claim(diff_id);
 
-        Ok(())
-    }
-
-    /// Convert the single batched zerocheck claim to a sumcheck claim.
-    /// Delegates to the generic pipeline.
-    #[instrument(level = "debug", skip(self))]
-    fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
-        crate::tracker_core::pipeline::z_check_claim_to_s_check_claim(self, max_nv)
-    }
-
-    /// Aggregate the sumcheck claims via random linear combination.
-    /// Delegates to the generic pipeline (return value ignored).
-    #[instrument(level = "debug", skip_all)]
-    fn batch_s_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
-        let _ = crate::tracker_core::pipeline::batch_s_check_claims(self)?;
         Ok(())
     }
 
@@ -294,16 +270,15 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     ) -> SnarkResult<()> {
         let poly_log_sizes: IndexMap<TrackerID, usize> = self.state.poly_log_sizes.clone();
 
-        // `global_max_nv` is threaded in frozen from BEFORE the bucket loop,
-        // mirroring the prover. Re-reading it live here once grew it across
-        // buckets (chunk commits), underscaled the claims, and failed every
-        // multi-bucket plan's round-0 `p(0)+p(1) != asserted_sum` check.
+        // `global_max_nv` is the value from before the bucket loop, as on
+        // the prover. The live value grows across buckets (chunk commits) and
+        // would underscale the claims.
 
         for claim in &mut self.state.mv_pcs_substate.sum_check_claims {
             // A sum read from the proof's map is `raw * 2^(global_max -
             // poly_nv)`; this bucket's sumcheck runs at `target_nv` and
             // needs `raw * 2^(target_nv - poly_nv)`, so it is divided by
-            // `2^(global_max - target_nv)` (a no-op for single-bucket plans).
+            // `2^(global_max - target_nv)`.
             //
             // Which frame a sum is in was settled when its claim was added,
             // by whether the verifier had read it from the map. The map is
@@ -335,9 +310,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     /// Check one bucket at `target_nv`, mirroring the prover's `run_bucket`
     /// stage for stage. Leaves the aggregated claim slot empty for the next
-    /// bucket; `perform_eval_check` runs once after every bucket. Takes
-    /// `global_max_nv` (the prover's version doesn't) because the verifier
-    /// must un-rescale claims into the bucket's frame *before* batching.
+    /// bucket. Takes `global_max_nv` (the prover's version doesn't) because
+    /// the verifier must un-rescale claims into the bucket's frame before
+    /// batching.
     fn run_bucket(
         &mut self,
         bucket_index: usize,
@@ -352,14 +327,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
         self.state.mv_pcs_substate.sum_check_claims = sum_check_claims;
         self.equalize_sumcheck_claims(target_nv, global_max_nv)?;
-        self.batch_s_check_claims(target_nv)?;
+        pipeline::batch_s_check_claims(self)?;
         self.reduce_sumcheck_dgree(target_nv)?;
-        self.batch_z_check_claims(target_nv)?;
-        self.z_check_claim_to_s_check_claim(target_nv)?;
-        self.batch_s_check_claims(target_nv)?;
+        pipeline::batch_z_check_claims(self)?;
+        pipeline::z_check_claim_to_s_check_claim(self, target_nv)?;
+        pipeline::batch_s_check_claims(self)?;
         self.perform_single_sumcheck(bucket_index, target_nv)?;
-        // Match prover-side cleanup: clear the aggregated sumcheck claim so
-        // the next bucket starts from an empty slate.
         self.state.mv_pcs_substate.sum_check_claims.clear();
         Ok(())
     }
@@ -367,7 +340,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// Drain the sumcheck claims and partition them into buckets.
     #[instrument(level = "debug", skip(self))]
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
-        // 1. First check that all the zerocheck and nozercheck claims are drained
         assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty()
                 && self.state.mv_pcs_substate.no_zero_check_claims.is_empty(),
@@ -375,27 +347,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             self.state.mv_pcs_substate.zero_check_claims.len(),
             self.state.mv_pcs_substate.no_zero_check_claims.len(),
         );
-        // 2. Drain all the sumcheck claims
         let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        // 3. Get the cost model for bucketing from the verifier configuration
         let model =
             crate::tracker_core::bucketing::CostModel::new(self.config.sumcheck_term_degree_limit);
-        // 4. Build the buckets
         crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims, model)
-    }
-
-    /// Check every bucket in order. Mirrors the prover's `run_all_buckets`;
-    /// the verifier accumulates nothing, so there is no `BucketRun` to
-    /// return.
-    fn run_all_buckets(
-        &mut self,
-        buckets: Vec<SumcheckBucket<B>>,
-        global_max_nv: usize,
-    ) -> SnarkResult<()> {
-        for (bucket_index, bucket) in buckets.into_iter().enumerate() {
-            self.run_bucket(bucket_index, bucket, global_max_nv)?;
-        }
-        Ok(())
     }
 
     /// Pad every recorded eval-claim point out to `global_max_nv`, mirroring
@@ -414,16 +369,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 .collect();
     }
 
-    /// Verifier mirror of the prover's `compile_piop_subproof`: same phases,
-    /// same order — create the buckets, freeze the cross-bucket frame, run
-    /// them all.
+    /// Mirrors the prover's `compile_piop_subproof`, same phases in the same
+    /// order: create the buckets, freeze the cross-bucket frame, run them
+    /// all.
     #[instrument(level = "debug", skip_all)]
     fn verify_sc_proofs(&mut self) -> SnarkResult<()> {
         // Mirrors the prover's pre-bucketing pipeline, in its order. Both
         // sides walk the nv groups ascending, so commitments are tracked and
         // challenges drawn identically on each side.
         self.batch_nozero_check_claims_by_nv()?;
-        crate::tracker_core::pipeline::convert_zerochecks_by_nv(self)?;
+        pipeline::convert_zerochecks_by_nv(self)?;
         let buckets = self.create_buckets();
         // Evaluation points are resized to the nv of the proof's last
         // bucket, also by queries made before any bucket is checked. Each
@@ -443,25 +398,27 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             ));
         }
         if !buckets.is_empty() {
-            // Frozen before any bucket runs — see `global_max_nv`.
+            // Read once, before any bucket runs: see `global_max_nv`.
             let global_max_nv = self.global_max_nv();
-            self.run_all_buckets(buckets, global_max_nv)?;
+            for (bucket_index, bucket) in buckets.into_iter().enumerate() {
+                self.run_bucket(bucket_index, bucket, global_max_nv)?;
+            }
             self.pad_eval_claim_points(global_max_nv);
         }
-        // Verify all evaluation claims once, after every bucket.
+        // Once, after all the buckets.
         self.perform_eval_check()
     }
 
-    /// Deterministically reduces the degree of the single aggregated sumcheck claim.
-    ///
-    /// Verifier mirrors prover-side degree reduction:
-    /// 1) Expand each claim term only until factors are *atoms* (linear or material).
+    /// Reduces the degree of the single aggregated sumcheck claim, mirroring
+    /// the prover:
+    /// 1) Expand each claim term only until factors are atoms (linear or material).
     /// 2) Repeatedly pick the most frequent contiguous size-`LIMIT` chunk across
     ///    oversized terms.
     /// 3) Track a fresh commitment id for that chunk, replace chunk occurrences,
     ///    and add zerocheck links.
     ///
-    /// The same tie-breaking/order is used to keep this fully deterministic.
+    /// Both sides use the same tie-breaking and order, which keeps this
+    /// deterministic.
     fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<()> {
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
@@ -562,13 +519,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             out
         }
 
-        fn find_subslice(haystack: &[TrackerID], needle: &[TrackerID]) -> Option<usize> {
-            if needle.is_empty() || haystack.len() < needle.len() {
-                return None;
-            }
-            haystack.windows(needle.len()).position(|w| w == needle)
-        }
-
         #[allow(clippy::too_many_arguments, clippy::type_complexity)]
         fn reduce_poly<B: SnarkBackend>(
             tracker: &mut VerifierTracker<B>,
@@ -661,10 +611,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 }
 
                 let chunk_len = chunk.len();
-                // Mirror prover-side behavior: chunk commitments are tracked at
-                // the current bucket's target nv. In `Single` mode this equals
-                // the historical global max; in `ByClaimNumVars` mode it stays
-                // inside the current bucket's hypercube.
+                // As on the prover, chunk commitments are tracked at the
+                // current bucket's target nv.
                 let chunk_log_size = target_nv;
                 let new_id = tracker.peek_next_id();
                 let _ = tracker.track_mv_com_by_id(new_id)?;
@@ -735,7 +683,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                     .filter(|(_, ids)| ids.len() > max_term_degree)
                 {
                     while ids.len() > max_term_degree {
-                        let Some(pos) = find_subslice(ids, &chosen) else {
+                        let Some(pos) = pipeline::find_subslice(ids, &chosen) else {
                             break;
                         };
                         ids.splice(pos..pos + chosen.len(), [committed_id]);
@@ -839,23 +787,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// to what was committed.
     #[instrument(level = "debug", skip_all)]
     fn verify_mv_pcs_proof(&mut self) -> SnarkResult<()> {
-        // Fetch the deduped evaluation claims (CommitmentID-keyed).
-        // Build a CommitmentID → Commitment lookup from both proof-owned and
-        // external commitments via the comitment_map.
         let proof = self.proof_or_err()?;
         let eval_claims = &proof.mv_pcs_subproof.deduped_query_map;
         let point_map = &proof.mv_pcs_subproof.point_map;
 
-        // Build CommitmentID → Commitment by finding any TrackerID for each
-        // CommitmentID and looking up its materialized commitment.
         let comm_id_to_comm = commitments_by_id(
             &proof.mv_pcs_subproof.comitment_map,
             &self.state.mv_pcs_substate.materialized_comms,
         )?;
 
-        // Assemble (commitment, point, eval) triples, returning a verifier
-        // error rather than panicking if the proof's query_map references a
-        // CommitmentID or PointID that was not populated.
+        // The (commitment, point, eval) triples to open.
         let mut mat_coms = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
@@ -878,7 +819,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 evals.push(*eval);
             }
         }
-        // Invoke the batch verify function
         let pcs_res: bool = if mat_coms.len() == 1 {
             let opening_proof = match self.proof_or_err()?.mv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
@@ -959,8 +899,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             &self.state.uv_pcs_substate.materialized_comms,
         )?;
 
-        // Assemble (commitment, point, eval) triples, rejecting malformed proofs
-        // with a verifier error rather than panicking.
+        // The (commitment, point, eval) triples to open.
         let mut mat_coms = Vec::new();
         let mut points = Vec::new();
         let mut evals = Vec::new();
@@ -983,7 +922,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 evals.push(*eval);
             }
         }
-        // Invoke the batch verify function
         let pcs_res: bool = if mat_coms.len() == 1 {
             let opening_proof = match self.proof_or_err()?.uv_pcs_subproof.opening_proof {
                 PCSOpeningProof::SingleProof(ref proof) => proof,
@@ -1049,12 +987,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Widest materialized commitment — the run's common frame for
-    /// un-scaling claim sums and padding PCS points. Must equal the prover's
-    /// `global_max_nv`, and must be read **once, before any bucket runs**:
-    /// chunk commits grow it during the loop, and reading it live once
-    /// failed every multi-bucket plan's round-0 check. Returns 1 when no
-    /// commitments exist.
+    /// The nv of the widest materialized commitment: the run's common frame
+    /// for un-scaling claim sums and padding PCS points. Must equal the
+    /// prover's `global_max_nv`, and must be read once, before any bucket
+    /// runs: chunk commits grow it during the loop. 1 when no commitments
+    /// exist.
     #[instrument(level = "debug", skip_all)]
     fn global_max_nv(&self) -> usize {
         self.state
@@ -1066,15 +1003,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .unwrap_or(1)
     }
 
-    /// Verify the claims of the proof
-    /// 1. Verify the sumcheck proofs
-    /// 2. Verify the multivariate evaluation claims using the multivariate PCS
-    /// 3. Verify the univariate evaluation claims using the univariate PCS
+    /// Verify the claims of the proof: the sumcheck proofs, then the
+    /// multivariate and the univariate evaluation claims with their PCS.
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&mut self) -> SnarkResult<()> {
-        // Fail fast if the caller forgot to set a proof.
         let proof = self.proof_or_err()?;
-        self.check_lookup_protocol()?;
         if self.state.rejected {
             return Err(SnarkError::VerifierError(
                 VerifierError::VerifierCheckFailed(
@@ -1116,7 +1049,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 )),
             ));
         }
-        // Verify the sumcheck proofs
         self.verify_sc_proofs()?;
         // The sumchecks were checked against evaluations the proof claims
         // for the commitments. The openings are what makes them true.

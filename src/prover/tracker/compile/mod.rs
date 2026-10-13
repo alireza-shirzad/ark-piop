@@ -1,16 +1,6 @@
-//! Proof compilation — the full pipeline from claims to a serializable SNARK
-//! proof. Split into three focused submodules:
-//!
-//! - [`virt_poly`] — virtual polynomial preprocessing (HP-interface
-//!   conversion, linear-term dedup, nv equalization).
-//! - [`sumcheck`] — claim batching, degree reduction, the single aggregated
-//!   sumcheck invocation, nozerocheck batching, and the orchestrating
-//!   `compile_piop_subproof`.
-//! - [`pcs`] — batched multivariate and univariate PCS subproofs.
-//!
-//! This `mod.rs` hosts the top-level `compile_proof` entry point and the
-//! [`SNARK_PROVER_TIMED_SPANS`] contract that subscribers use to turn the
-//! three subproof spans into `bench_stats` timings.
+//! Proof compilation, from claims to a serializable SNARK proof: the
+//! `compile_proof` entry point and the span names that `bench_stats`
+//! subscribers turn into timings.
 
 mod pcs;
 mod sumcheck;
@@ -30,42 +20,37 @@ macro_rules! region {
 }
 pub(crate) use region;
 
-/// The spans whose open→close duration *is* each subproof's timing, paired
-/// with the record key a subscriber files it under. This table is a contract
-/// with out-of-tree subscribers; each span must stay declared
-/// `#[instrument(target = "bench_stats", level = "info")]` (the default env
-/// filter only enables `bench_stats=info`). Renames are caught by the
-/// `snark_prover_timed_spans_are_instrumented` test below.
+/// The spans whose duration is each subproof's timing, paired with the
+/// record key a subscriber files it under. A contract with out-of-tree
+/// subscribers: each span must stay on `bench_stats` at `info`, which is all
+/// the default env filter enables. A test below catches a rename.
 pub const SNARK_PROVER_TIMED_SPANS: &[(&str, &str)] = &[
     ("compile_piop_subproof", "snark_prover_piop_time_s"),
     ("compile_mv_pcs_subproof", "snark_prover_mv_pcs_time_s"),
     ("compile_uv_pcs_subproof", "snark_prover_uv_pcs_time_s"),
 ];
 
-/// The tracing target every span in this module's timing contract is
-/// declared on — [`SNARK_PROVER_TIMED_SPANS`], [`SC_BUCKET_SPAN`], and
-/// [`SC_REGION_SPANS`].
+/// The tracing target of every span in this module's timing contract.
 pub const SNARK_PROVER_SPAN_TARGET: &str = "bench_stats";
 
-/// Span wrapping one bucket's run of the sumcheck compile pipeline. Every
-/// [`SC_REGION_SPANS`] span opened inside it belongs to that bucket — how a
-/// subscriber attributes region durations — and its own timestamps mark
-/// bucket boundaries on the dashboard's RSS curve.
+/// Span around one bucket's run of the sumcheck compile pipeline. A
+/// subscriber attributes every [`SC_REGION_SPANS`] span opened inside it to
+/// that bucket, and its timestamps mark bucket boundaries on the dashboard's
+/// RSS curve.
 pub const SC_BUCKET_SPAN: &str = "sc_bucket";
 
-/// Span around the prover's reduction of its lookup and keyed-sum claims,
-/// which runs before the proof is compiled: the multiplicities, their
-/// commitments and the LogUp-GKR runs. It opens on every proof, also one
-/// with nothing to reduce. Not one of [`SNARK_PROVER_TIMED_SPANS`], whose
-/// three durations it is disjoint from.
+/// Span around the prover's reduction of its lookup and keyed-sum claims
+/// (the multiplicities, their commitments and the LogUp-GKR runs), which runs
+/// before the proof is compiled. It opens on every proof, also one with
+/// nothing to reduce, and is disjoint from the [`SNARK_PROVER_TIMED_SPANS`].
 pub const LOOKUP_REDUCTION_SPAN: &str = "reduce_lookup_claims";
 
-/// Regions whose span duration *is* that stage's timing; the name doubles
-/// as the subscriber's record key. Named at the call site because two
-/// stages run on both sides of degree reduction and are reported as
-/// separate passes. The first two run before the partition is drawn, so
-/// they reach the aggregate but no per-bucket entry. Order is execution
-/// order, which the dashboard renders.
+/// Regions whose span duration is that stage's timing; the name doubles as
+/// the subscriber's record key. Named at the call site because two stages
+/// run on both sides of degree reduction and are reported as separate
+/// passes. The first two run before the partition is drawn, so they reach
+/// the aggregate but no per-bucket entry. Order is execution order, which
+/// the dashboard renders.
 pub const SC_REGION_SPANS: &[&str] = &[
     "nozerocheck_batching",
     // Also covers per-nv batching inside `convert_zerochecks_by_nv`.
@@ -77,13 +62,12 @@ pub const SC_REGION_SPANS: &[&str] = &[
     "sumcheck",
 ];
 
-/// Whether `span_name` is one of [`SC_REGION_SPANS`].
 pub fn is_sc_region_span(span_name: &str) -> bool {
     SC_REGION_SPANS.contains(&span_name)
 }
 
-/// Record key for the span named `span_name`, or `None` if that span
-/// isn't one we derive a timing from.
+/// Record key for the span named `span_name`, or `None` if no timing is
+/// derived from that span.
 pub fn snark_prover_timing_key(span_name: &str) -> Option<&'static str> {
     SNARK_PROVER_TIMED_SPANS
         .iter()
@@ -95,10 +79,6 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Compiles the final proof, which contains three subproofs:
-    /// 1. The batched sumcheck subproof
-    /// 2. The multivariate PCS subproof
-    /// 3. The univariate PCS subproof
     #[instrument(level = "debug", skip(self))]
     pub fn compile_proof(&mut self) -> SnarkResult<SNARKProof<B>>
     where
@@ -158,7 +138,7 @@ mod tests {
                 return;
             }
             // `%`-recorded fields reach a visitor via `record_debug`, whose
-            // Debug output is the Display string — JSON round-trips as-is.
+            // Debug output is the Display string, so JSON round-trips as-is.
             struct PhaseVisitor(Option<String>);
             impl tracing::field::Visit for PhaseVisitor {
                 fn record_debug(
@@ -199,9 +179,9 @@ mod tests {
     }
 
     /// Nothing else fails if a listed function is renamed or loses its
-    /// `bench_stats`/`info` attribute — the metric just silently disappears
-    /// from the dashboard — so assert the spans really open on the target
-    /// and level the subscriber filters on.
+    /// `bench_stats`/`info` attribute: the metric silently disappears from
+    /// the dashboard. So assert the spans open on the target and level the
+    /// subscriber filters on.
     #[test]
     fn snark_prover_timed_spans_are_instrumented() {
         let capture = capture_empty_compile();
@@ -249,7 +229,7 @@ mod tests {
 
     /// The phase strings are a wire contract with the dashboard, and an
     /// unrecognised phase silently degrades to a raw label. Also pins that
-    /// snapshots fire on early-return paths — the `#[piop_stage]` macro
+    /// snapshots fire on early-return paths: the `#[piop_stage]` macro
     /// snapshots after the body closure, which an inline version would skip.
     #[test]
     fn pipeline_boundary_snapshots_fire_on_every_exit_path() {

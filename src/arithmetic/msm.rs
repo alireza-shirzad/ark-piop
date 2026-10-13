@@ -43,7 +43,8 @@ pub const THREAD_TABLE: &[(usize, usize, usize)] = &[
     (131072, usize::MAX, 15),
 ];
 
-/// Look up the preferred thread count for an MSM of size `n`.
+/// The `THREAD_TABLE` thread count for an MSM of size `n`; 1 if no range
+/// holds `n`.
 #[inline]
 pub fn threads_for_size(n: usize) -> usize {
     for &(lo, hi, t) in THREAD_TABLE {
@@ -68,8 +69,7 @@ pub fn naive_msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarF
         .fold(G::zero(), |acc, term| acc + term)
 }
 
-/// Entry point: naive below `NAIVE_THRESHOLD`, else Pippenger in a pool sized
-/// from `THREAD_TABLE`. The preferred thread count is clamped against
+/// The preferred thread count is clamped against
 /// `rayon::current_num_threads()` so a caller-imposed budget is never escaped.
 pub fn msm<G: VariableBaseMSM>(bases: &[G::MulBase], scalars: &[G::ScalarField]) -> G {
     debug_assert_eq!(
@@ -140,7 +140,6 @@ pub mod calibrate {
     use ark_std::{UniformRand, rand::Rng};
     use std::time::{Duration, Instant};
 
-    /// Result of a calibration sweep.
     #[derive(Debug, Clone)]
     pub struct Calibration {
         /// Smallest size at which Pippenger (via arkworks) beats the naive loop.
@@ -193,7 +192,6 @@ pub mod calibrate {
                 let _ = naive_msm::<G>(&bases, &scalars);
             });
 
-            // Best thread count for Pippenger at this size.
             let mut best_threads = 1usize;
             let mut best_pip_time = Duration::MAX;
             for t in 1..=max_threads {
@@ -204,7 +202,7 @@ pub mod calibrate {
                 }
             }
 
-            // Smallest size where Pippenger wins → becomes the naive threshold.
+            // The smallest size where Pippenger wins is the naive threshold.
             if naive_threshold == usize::MAX && best_pip_time < naive_time {
                 naive_threshold = n;
             }
@@ -216,11 +214,10 @@ pub mod calibrate {
         }
 
         if naive_threshold == usize::MAX {
-            // Pippenger never won in the swept range — keep naive for everything.
+            // Pippenger never won in the swept range: keep naive for everything.
             naive_threshold = *sizes.last().unwrap();
         }
 
-        // Collapse adjacent sizes with the same winning thread count into ranges.
         let mut thread_table: Vec<(usize, usize, usize)> = Vec::new();
         for (n, t) in &per_size {
             match thread_table.last_mut() {

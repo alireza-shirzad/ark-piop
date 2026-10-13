@@ -25,7 +25,7 @@ pub(super) fn pool_threads() -> usize {
 }
 
 /// Maps `f` over `jobs` in order, on the thread pool if `parallel` is set
-/// (and the feature is on). The caller builds ONE flat list per step and
+/// (and the feature is on). The caller builds one flat list per step and
 /// decides `parallel` from its total work, so parallel loops never nest.
 pub(super) fn map_jobs<T: Send, R: Send>(
     jobs: Vec<T>,

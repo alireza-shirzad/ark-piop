@@ -17,7 +17,6 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use super::SumCheckSubClaim;
 
 impl<F: PrimeField> SumcheckVerifierState<F> {
-    /// Initialize the verifier's state.
     pub(crate) fn verifier_init(index_info: &VPAuxInfo<F>) -> Self {
         Self {
             round: 1,
@@ -29,8 +28,9 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
         }
     }
 
-    /// Run one verifier round: sample and store the challenge only. The actual
-    /// checks are deferred in batch to `check_and_generate_subclaim`.
+    /// One verifier round: samples and stores the challenge. The round checks
+    /// (P(0) + P(1) == expected; expected := P(r)) are deferred to
+    /// `check_and_generate_subclaim`.
     pub(crate) fn verify_round_and_update_state(
         &mut self,
         prover_msg: &SumcheckProverMessage<F>,
@@ -42,8 +42,6 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
             ));
         }
 
-        // The interactive checks (P(0) + P(1) == expected; expected := P(r)) are safely
-        // deferred to `check_and_generate_subclaim` in the non-interactive setting.
         let challenge = transcript.get_and_append_challenge(b"Internal round")?;
         self.challenges.push(challenge);
         self.polynomials_received
@@ -57,10 +55,9 @@ impl<F: PrimeField> SumcheckVerifierState<F> {
         Ok(challenge)
     }
 
-    /// Run the deferred per-round checks and produce the subclaim, erroring if the
-    /// proof fails. If the asserted sum is correct, the polynomial evaluated at
-    /// `subclaim.point` equals `subclaim.expected_evaluation` (soundness error
-    /// shrinks with field size).
+    /// Runs the deferred per-round checks. The asserted sum then holds if the
+    /// polynomial evaluates to `subclaim.expected_evaluation` at
+    /// `subclaim.point`, which the caller must check.
     pub fn check_and_generate_subclaim(
         &self,
         asserted_sum: &F,
@@ -175,7 +172,6 @@ fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyI
             res += p_i[i] * prod * F::from(ratio_denominator)
                 / (last_denominator * ratio_numerator_f * evals[i]);
 
-            // compute denom for the next step is current_denom * (len-i)/i
             if i != 0 {
                 ratio_numerator *= -(len as i64 - i as i64);
                 ratio_denominator *= i as u64;
@@ -196,7 +192,6 @@ fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyI
             res += p_i[i] * prod * F::from(ratio_denominator)
                 / (last_denominator * ratio_numerator_f * evals[i]);
 
-            // compute denom for the next step is current_denom * (len-i)/i
             if i != 0 {
                 ratio_numerator *= -(len as i128 - i as i128);
                 ratio_denominator *= i as u128;
@@ -209,7 +204,6 @@ fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyI
         for i in (0..len).rev() {
             res += p_i[i] * prod * denom_down / (denom_up * evals[i]);
 
-            // compute denom for the next step is current_denom * (len-i)/i
             if i != 0 {
                 denom_up *= -F::from((len - i) as u64);
                 denom_down *= F::from(i as u64);
@@ -219,7 +213,6 @@ fn interpolate_uni_poly<F: PrimeField>(p_i: &[F], eval_at: F) -> Result<F, PolyI
     Ok(res)
 }
 
-/// compute the factorial(a) = 1 * 2 * ... * a
 #[inline]
 fn field_factorial<F: PrimeField>(a: usize) -> F {
     let mut res = F::one();
@@ -229,7 +222,6 @@ fn field_factorial<F: PrimeField>(a: usize) -> F {
     res
 }
 
-/// compute the factorial(a) = 1 * 2 * ... * a
 #[inline]
 fn u128_factorial(a: usize) -> u128 {
     let mut res = 1u128;
@@ -239,7 +231,6 @@ fn u128_factorial(a: usize) -> u128 {
     res
 }
 
-/// compute the factorial(a) = 1 * 2 * ... * a
 #[inline]
 fn u64_factorial(a: usize) -> u64 {
     let mut res = 1u64;
@@ -260,7 +251,7 @@ mod test {
     fn test_interpolation() -> Result<(), PolyIOPErrors> {
         let mut prng = ark_std::test_rng();
 
-        // test a polynomial with 20 known points, i.e., with degree 19
+        // 20, 33 and 64 points cover the i64, i128 and field branches.
         let poly = LDE::<Fr>::rand(20 - 1, &mut prng);
         let evals = (0..20)
             .map(|i| poly.evaluate(&Fr::from(i)))
@@ -269,7 +260,6 @@ mod test {
 
         assert_eq!(poly.evaluate(&query), interpolate_uni_poly(&evals, query)?);
 
-        // test a polynomial with 33 known points, i.e., with degree 32
         let poly = LDE::<Fr>::rand(33 - 1, &mut prng);
         let evals = (0..33)
             .map(|i| poly.evaluate(&Fr::from(i)))
@@ -278,7 +268,6 @@ mod test {
 
         assert_eq!(poly.evaluate(&query), interpolate_uni_poly(&evals, query)?);
 
-        // test a polynomial with 64 known points, i.e., with degree 63
         let poly = LDE::<Fr>::rand(64 - 1, &mut prng);
         let evals = (0..64)
             .map(|i| poly.evaluate(&Fr::from(i)))

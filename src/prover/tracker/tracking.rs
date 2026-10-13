@@ -1,4 +1,4 @@
-//! Polynomial tracking — registering, committing, and looking up tracked polynomials.
+//! Polynomial tracking: registering, committing, and looking up tracked polynomials.
 
 use super::*;
 
@@ -6,15 +6,9 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Tracks a materialized polynomial.
-    ///
-    /// moves the polynomial to heap, assigns a TracckerID to it in map and
-    /// returns the TrackerID
     pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackerID {
-        // Auto-compress consistently with `track_and_commit_mat_mv_p` and
-        // `track_mat_mv_p_with_commitment`. Callers that skip commit (e.g.
-        // tt-core's `track_arith_table_without_commitment` for the output
-        // table) still get the storage-width reduction.
+        // Compressed as in the committing entry points, so a polynomial
+        // tracked without a commitment gets the narrow storage too.
         let polynomial = Arc::new(polynomial.compressed());
         self.track_mat_arc_mv_poly(polynomial)
     }
@@ -28,37 +22,25 @@ where
         id
     }
 
-    /// Tracks a materialized polynomial.
-    ///
-    /// moves the polynomial to heap, assigns a TracckerID to it in map and
-    /// returns the TrackerID
     pub fn track_mat_uv_poly(&mut self, polynomial: LDE<B::F>) -> TrackerID {
         let polynomial = Arc::new(polynomial);
         self.track_mat_arc_uv_poly(polynomial)
     }
-    /// Tracks materialized polynomial by reference.
-    ///
-    /// Assumes the input polynomial is already on the heap and assigns a
-    /// TrackerID to it in the map
+
     pub(super) fn track_mat_arc_mv_poly(
         &mut self,
         polynomial: impl Into<Arc<MLE<B::F>>>,
     ) -> TrackerID {
         let polynomial = polynomial.into();
-        // Create the new TrackerID
         let poly_id = self.gen_id();
-
-        // Add the polynomial to the materialized map
         self.state
             .mv_pcs_substate
             .materialized_polys
             .insert(poly_id, polynomial.clone());
         self.state.num_vars.insert(poly_id, polynomial.num_vars());
-        // Return the new TrackerID
         poly_id
     }
 
-    /// Returns true if a materialized MV polynomial exists for the given ID.
     pub fn has_materialized_mv_poly(&self, id: TrackerID) -> bool {
         self.state
             .mv_pcs_substate
@@ -66,9 +48,9 @@ where
             .contains_key(&id)
     }
 
-    /// Registers a materialized polynomial under an **existing** TrackerID.
-    /// Used for lazy materialization of constants: the ID was already allocated
-    /// by `gen_id()`, but the MLE is only created when actually needed.
+    /// Registers a materialized polynomial under an existing TrackerID, for
+    /// the lazy materialization of constants: `gen_id()` allocated the ID and
+    /// the MLE is created only when it is needed.
     pub fn register_mat_mv_poly(&mut self, id: TrackerID, polynomial: impl Into<Arc<MLE<B::F>>>) {
         let polynomial = polynomial.into();
         self.state.num_vars.insert(id, polynomial.num_vars());
@@ -79,33 +61,26 @@ where
     }
 
     fn track_mat_arc_uv_poly(&mut self, polynomial: Arc<LDE<B::F>>) -> TrackerID {
-        // Create the new TrackerID
         let poly_id = self.gen_id();
-
-        // Add the polynomial to the materialized map
         self.state
             .uv_pcs_substate
             .materialized_polys
             .insert(poly_id, polynomial.clone());
-
-        // Return the new TrackerID
         poly_id
     }
 
-    /// Tracks a materialized polynomial and sends a commitment to the verifier.
-    /// If the polynomial is constant, skips the expensive PCS commitment and
-    /// instead transcript-binds the constant value. The polynomial is still
-    /// tracked with a TrackerID so it can participate in sumcheck/zerocheck claims.
-    /// Returns `Left(id)` for normal polynomials, `Right((id, cnst))` for constants.
+    /// Tracks a materialized polynomial and commits to it. A constant
+    /// polynomial skips the PCS commitment: its value is bound to the
+    /// transcript instead, and it still gets a TrackerID so claims can name
+    /// it. Returns `Left(id)`, or `Right((id, cnst))` for a constant.
     pub fn track_and_commit_mat_mv_p(
         &mut self,
         polynomial: &MLE<B::F>,
         use_cache: bool,
     ) -> SnarkResult<Either<TrackerID, (TrackerID, B::F)>> {
         if polynomial.is_constant() {
-            // Storage-aware read: `polynomial[0]` (Index<usize>) only supports
-            // Field storage; the constant is available via the storage lift
-            // for every variant.
+            // `polynomial[0]` only supports Field storage; `lift` reads
+            // every variant.
             let cnst = polynomial.storage().lift(0);
             let id = self.track_and_commit_mv_constant(cnst, polynomial.num_vars())?;
             return Ok(Either::Right((id, cnst)));
@@ -137,26 +112,21 @@ where
         )?))
     }
 
-    /// Tracks a constant polynomial: generates an ID, stores the constant in
-    /// the proof, transcript-binds it, and registers a materialized MLE so the
-    /// polynomial can be referenced in sumcheck/zerocheck claims.
+    /// Tracks a constant polynomial: allocates an ID, stores the constant in
+    /// the proof in place of a commitment and binds it to the transcript. No
+    /// MLE is created: the constant propagates as `Either::Right(cnst)`
+    /// through `TrackedPoly` arithmetic, and is materialized lazily if
+    /// `.id()` is called on the `TrackedPoly`.
     fn track_and_commit_mv_constant(
         &mut self,
         cnst: B::F,
         num_vars: usize,
     ) -> SnarkResult<TrackerID> {
-        // Just generate an ID and transcript-bind the constant value.
-        // No MLE is created — the constant propagates as Either::Right(cnst)
-        // through TrackedPoly arithmetic. If .id() is ever called on the
-        // TrackedPoly (rare: standalone sumcheck claim on a constant), it
-        // lazily materializes at that point.
         let id = self.gen_id();
         self.state.num_vars.insert(id, num_vars);
-        // Store constant in proof (instead of a commitment).
         self.state.mv_pcs_substate.constants.insert(id, cnst);
-        // Emit num_vars so the verifier can mirror `poly_log_sizes` and keep
-        // downstream arithmetic (add/mul, chunk-commit max_nv) in sync — see
-        // PROOF_ENCODING_VERSION note.
+        // The verifier needs num_vars to mirror `poly_log_sizes` and keep
+        // downstream arithmetic (add/mul, chunk-commit max_nv) in sync.
         self.state
             .mv_pcs_substate
             .constants_num_vars
@@ -168,10 +138,9 @@ where
         Ok(id)
     }
 
-    /// Tracks a materialized polynomial using a supplied commitment.
-    ///
-    /// `binding` controls whether the commitment is transcript-bound as part of
-    /// this proof or merely referenced from external context.
+    /// Tracks a materialized polynomial under a supplied commitment.
+    /// `binding` says whether this proof binds the commitment to the
+    /// transcript or only references it from external context.
     pub fn track_mat_mv_p_with_commitment(
         &mut self,
         polynomial: &MLE<B::F>,
@@ -179,10 +148,7 @@ where
         binding: CommitmentBinding,
         use_cache: bool,
     ) -> SnarkResult<TrackerID> {
-        // Auto-compress: same policy as `track_and_commit_mat_mv_p`. Callers
-        // supplying externally-committed polys (e.g. tt-core's main-table
-        // tracking pass) get the same 8×-256× tracker-storage reduction
-        // without having to compress at each call site.
+        // Compressed as in `track_and_commit_mat_mv_p`.
         let polynomial = Arc::new(polynomial.clone().compressed());
 
         if use_cache {
@@ -196,10 +162,7 @@ where
                 .or_insert_with(|| commitment.clone());
         }
 
-        // track the polynomial and get its id
         let poly_id = self.track_mat_arc_mv_poly(polynomial);
-
-        // add the commitment to the commitment map with the same poly_id
         self.state
             .mv_pcs_substate
             .materialized_comms
@@ -231,7 +194,6 @@ where
         polynomial: LDE<B::F>,
     ) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial);
-        // commit to the polynomial
         let commitment = B::UvPCS::commit(self.pk.uv_pcs_param.as_ref(), &polynomial)?;
         self.track_mat_uv_p_with_commitment(
             &polynomial,
@@ -240,11 +202,7 @@ where
         )
     }
 
-    /// Tracks a materialized univariate polynomial using a supplied
-    /// commitment.
-    ///
-    /// `binding` controls whether the commitment is transcript-bound as part of
-    /// this proof or merely referenced from external context.
+    /// The univariate [`Self::track_mat_mv_p_with_commitment`].
     pub fn track_mat_uv_p_with_commitment(
         &mut self,
         polynomial: &LDE<B::F>,
@@ -253,10 +211,7 @@ where
     ) -> SnarkResult<TrackerID> {
         let polynomial = Arc::new(polynomial.clone());
 
-        // track the polynomial and get its id
         let poly_id = self.track_mat_arc_uv_poly(polynomial);
-
-        // add the commitment to the commitment map with the same poly_id
         self.state
             .uv_pcs_substate
             .materialized_comms
@@ -283,9 +238,6 @@ where
         Ok(poly_id)
     }
 
-    /// Tracks a virtual polynomial
-    ///
-    /// generates a new TrackerID and adds the virtual polynomial to the map
     pub(super) fn track_virt_poly(&mut self, p: VirtualPoly<B::F>) -> TrackerID {
         let poly_id = self.gen_id();
 
@@ -296,23 +248,17 @@ where
             .unwrap_or_default();
         self.state.num_vars.insert(poly_id, nv);
         self.state.virtual_polys.insert(poly_id, p);
-        // No need to commit to virtual polynomials
         poly_id
     }
 
-    /// Get a reference to a materialized multivariate polynomial on the heap,
-    /// from the map, by its TrackerID
     pub fn mat_mv_poly(&self, id: TrackerID) -> Option<&Arc<MLE<B::F>>> {
         self.state.mv_pcs_substate.materialized_polys.get(&id)
     }
 
-    /// Get a reference to a materialized univariate polynomial on the heap,
-    /// from the map, by its TrackerID
     pub fn mat_uv_poly(&self, id: TrackerID) -> Option<&Arc<LDE<B::F>>> {
         self.state.uv_pcs_substate.materialized_polys.get(&id)
     }
 
-    /// Get a virtual polynomial, from the map, by its TrackerID
     pub fn virt_poly(&self, id: TrackerID) -> Option<&VirtualPoly<B::F>> {
         self.state.virtual_polys.get(&id)
     }

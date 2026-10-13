@@ -1,19 +1,18 @@
-//! This module defines structs that are shared by all sub protocols.
+//! Sumcheck proof and state types.
 
 use ark_ff::PrimeField;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use std::sync::Arc;
 
 use crate::arithmetic::{mat_poly::mle::MLE, virt_poly::hp_interface::HPVirtualPolynomial};
-/// An IOP proof: per-round prover messages plus the transcript-generated
-/// evaluation point.
+/// Per-round prover messages plus the transcript-generated evaluation point.
 #[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SumcheckProof<F: PrimeField> {
     pub point: Vec<F>,
     pub proofs: Vec<SumcheckProverMessage<F>>,
 }
 
-/// A per-round prover message: a list of evaluations.
+/// The round polynomial, in evaluation form.
 #[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct SumcheckProverMessage<F: PrimeField> {
     pub(crate) evaluations: Vec<F>,
@@ -25,19 +24,16 @@ pub struct SumcheckProverMessage<F: PrimeField> {
 /// `Streaming` reads through compressed storage without materializing: value at `j`
 /// is `Σ_k stream_eq_table[k] * original.lift(k | (j << m))` for `m` accumulated
 /// challenges, until the transition round materializes it. Streaming defers the
-/// Field-materialization blowup that dominates sumcheck peak memory.
+/// materialization to field elements that dominates sumcheck peak memory.
 pub(crate) enum MleSlot<F: PrimeField> {
     Materialized(MLE<F>),
     Streaming(Arc<MLE<F>>),
 }
 
-/// Prover State of a PolyIOP.
 pub struct SumcheckProverState<F: PrimeField> {
-    /// sampled randomness given by the verifier
+    /// The verifier's challenges so far.
     pub challenges: Vec<F>,
-    /// the current round number
     pub(crate) round: usize,
-    /// pointer to the virtual polynomial
     pub(crate) poly: HPVirtualPolynomial<F>,
     /// Points with precomputed barycentric weights for extrapolating smaller
     /// degree uni-polys to `max_degree + 1` evaluations.
@@ -57,7 +53,6 @@ pub struct SumcheckProverState<F: PrimeField> {
     pub(crate) stream_eq_table: Vec<F>,
 }
 
-/// Verifier state of a PolyIOP.
 pub struct SumcheckVerifierState<F: PrimeField> {
     pub(crate) round: usize,
     pub(crate) num_vars: usize,

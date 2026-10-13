@@ -57,10 +57,9 @@ thread_local! {
     static PROTOCOL: Cell<Option<LookupProtocol>> = const { Cell::new(None) };
 }
 
-/// Runs `test` once under each lookup protocol. [`setup`] configures both
-/// sides for the protocol of the run, so a statement is put to both
-/// protocols by the same code; `test` is told which one it is under for
-/// the few things that differ between them. The protocol is printed, to
+/// Runs `test` once under each lookup protocol; [`setup`] configures both
+/// sides for the protocol of the run. `test` is told which one it is under
+/// for the few things that differ between them. The protocol is printed, to
 /// show in a failure which run it was.
 fn under_each_protocol(test: impl Fn(LookupProtocol)) {
     for protocol in PROTOCOLS {
@@ -120,7 +119,7 @@ fn track_all(
 /// same transcript. Probed on copies so the real trackers stay untouched.
 fn assert_prover_verifier_in_sync(prover: &ArgProver<B>, verifier: &ArgVerifier<B>) {
     let mut prover = prover.deep_copy();
-    let mut verifier = verifier.deep_copy();
+    let mut verifier = verifier.fork();
     assert_eq!(
         prover.peek_next_id(),
         verifier.peek_next_id(),
@@ -2042,8 +2041,6 @@ fn deferred_keyed_sum_activator_numerator_semantics() {
     });
 }
 
-// ─── Keyed sums claimed for the proof's batch ────────────────────────────
-
 /// Two lookup groups and two keyed sums, interleaved with each other and
 /// with an ordinary claim. Claimed for later, the keyed sums join the lookups
 /// in one LogUp-GKR batch; proved on the spot, each is a batch of its own.
@@ -2467,8 +2464,6 @@ fn keyed_sumcheck_checks_its_shape_on_both_sides() {
         ));
     });
 }
-
-// ─── The lookup protocol as a choice ─────────────────────────────────────
 
 fn other(protocol: LookupProtocol) -> LookupProtocol {
     match protocol {

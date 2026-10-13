@@ -1,6 +1,6 @@
-//! A PIOP checking that two unions of multiset columns (each weighted by optional
-//! multiplicity polynomials) are equal — a generalization of
-//! [Logup](https://eprint.iacr.org/2022/1530.pdf), used heavily by other PIOPs.
+//! A PIOP checking that two unions of multiset columns, each weighted by an
+//! optional multiplicity polynomial, are equal: a generalization of
+//! [Logup](https://eprint.iacr.org/2022/1530.pdf), used by other PIOPs.
 //!
 //! The sums of fractions are proved by the lookup protocol the two sides
 //! are configured for ([`LookupProtocol`](crate::types::LookupProtocol)):
@@ -125,9 +125,17 @@ impl<B: SnarkBackend> KeyedSumcheckProverInput<B> {
     pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
         KeyedSumRelation {
             fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
-            mfxs: self.mfxs.iter().map(optional_term).collect(),
+            mfxs: self
+                .mfxs
+                .iter()
+                .map(|m| m.as_ref().map(KeyedTerm::from))
+                .collect(),
             gxs: self.gxs.iter().map(KeyedTerm::from).collect(),
-            mgxs: self.mgxs.iter().map(optional_term).collect(),
+            mgxs: self
+                .mgxs
+                .iter()
+                .map(|m| m.as_ref().map(KeyedTerm::from))
+                .collect(),
         }
     }
 }
@@ -146,9 +154,17 @@ impl<B: SnarkBackend> KeyedSumcheckVerifierInput<B> {
     pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
         KeyedSumRelation {
             fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
-            mfxs: self.mfxs.iter().map(optional_term).collect(),
+            mfxs: self
+                .mfxs
+                .iter()
+                .map(|m| m.as_ref().map(KeyedTerm::from))
+                .collect(),
             gxs: self.gxs.iter().map(KeyedTerm::from).collect(),
-            mgxs: self.mgxs.iter().map(optional_term).collect(),
+            mgxs: self
+                .mgxs
+                .iter()
+                .map(|m| m.as_ref().map(KeyedTerm::from))
+                .collect(),
         }
     }
 }
@@ -178,11 +194,4 @@ impl<B: SnarkBackend> From<&TrackedOracle<B>> for KeyedTerm<B::F> {
             },
         }
     }
-}
-
-fn optional_term<'a, T, F>(term: &'a Option<T>) -> Option<KeyedTerm<F>>
-where
-    KeyedTerm<F>: From<&'a T>,
-{
-    term.as_ref().map(KeyedTerm::from)
 }

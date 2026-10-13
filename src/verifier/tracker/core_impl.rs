@@ -1,8 +1,6 @@
-//! [`TrackerCore`] implementation for [`VerifierTracker`].
-//!
-//! Each method delegates to the existing `VerifierTracker` API. The
-//! verifier-side seam methods (`track_eq_x_r`) create succinct oracle
-//! closures rather than materializing polynomial data.
+//! [`TrackerCore`] for [`VerifierTracker`]. The seam method `track_eq_x_r`
+//! creates a succinct oracle closure rather than materializing the
+//! polynomial.
 
 use ark_ff::Zero;
 use std::mem::take;
@@ -23,8 +21,6 @@ use super::VerifierTracker;
 
 impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
     type F = B::F;
-
-    // ── Transcript ──────────────────────────────────────────────────
 
     fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<Self::F> {
         VerifierTracker::get_and_append_challenge(self, label)
@@ -47,8 +43,6 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
             .append_field_element(label, element)
             .map_err(crate::errors::SnarkError::from)
     }
-
-    // ── Virtual polynomial operations ───────────────────────────────
 
     fn track_empty_virtual_poly(&mut self) -> TrackerID {
         VerifierTracker::track_empty_virtual_poly(
@@ -90,8 +84,6 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
         self.state.virtual_polys.get(&id)
     }
 
-    // ── Materialization query ───────────────────────────────────────
-
     fn is_material(&self, id: TrackerID) -> bool {
         self.state
             .poly_is_material
@@ -99,8 +91,6 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
             .copied()
             .unwrap_or(false)
     }
-
-    // ── Zerocheck claims ────────────────────────────────────────────
 
     fn take_zerocheck_claims(&mut self) -> Vec<TrackerZerocheckClaim> {
         take(&mut self.state.mv_pcs_substate.zero_check_claims)
@@ -136,8 +126,6 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
             .id()
     }
 
-    // ── Sumcheck claims ─────────────────────────────────────────────
-
     fn take_sumcheck_claims(&mut self) -> Vec<TrackerSumcheckClaim<Self::F>> {
         take(&mut self.state.mv_pcs_substate.sum_check_claims)
     }
@@ -162,13 +150,9 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
         self.state.mv_pcs_substate.sum_check_claims.is_empty()
     }
 
-    // ── Nozerocheck claims ──────────────────────────────────────────
-
     fn take_nozerocheck_claims(&mut self) -> Vec<TrackerNoZerocheckClaim> {
         take(&mut self.state.mv_pcs_substate.no_zero_check_claims)
     }
-
-    // ── Configuration ───────────────────────────────────────────────
 
     fn config(&self) -> &SharedArgConfig {
         &self.config
@@ -178,15 +162,13 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }
 
-    // ── Seam: verifier-specific ─────────────────────────────────────
-
     fn track_eq_x_r(&mut self, r: &[Self::F], max_nv: usize) -> SnarkResult<TrackerID> {
         // The oracle may be queried at a point longer than `r` (extended
         // eval-claim points; `eq` built at a claim's nv then lifted to its
         // bucket). The prover lifts by cyclic repeat, so a lifted `eq` is
         // constant in the added variables: truncate the point to `r.len()`.
         // Zero-extending `r` instead would multiply in a spurious
-        // `Π (1 - p_i)` that is wrong at a random sumcheck point.
+        // `Π (1 - p_i)`.
         let r = r.to_vec();
         let eq_x_r_closure = move |pt: Vec<B::F>| -> SnarkResult<B::F> {
             let mut pt = pt;

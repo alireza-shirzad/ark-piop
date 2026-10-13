@@ -19,8 +19,8 @@ use std::{
     sync::Arc,
 };
 
-/// Backward-compatible alias: the verifier uses the same [`VirtualPoly`] type
-/// as the prover to represent symbolic sum-of-products expressions.
+/// The verifier represents symbolic sum-of-products expressions with the
+/// prover's [`VirtualPoly`].
 pub type VirtualOracle<F> = VirtualPoly<F>;
 
 pub trait CloneableFn<F: 'static, In>: Fn(In) -> SnarkResult<F> + Send + Sync {
@@ -94,8 +94,6 @@ impl<F: 'static + Field> Oracle<F> {
 }
 
 impl<F: PrimeField> Oracle<F> {
-    /// Wrap an owned multilinear polynomial into a multivariate oracle
-    /// without closure boilerplate.
     pub fn from_mle(poly: crate::arithmetic::mat_poly::mle::MLE<F>) -> Self {
         use ark_poly::Polynomial;
         let nv = poly.num_vars();
@@ -131,12 +129,11 @@ impl<B> TrackedOracle<B>
 where
     B: SnarkBackend,
 {
-    /// Returns the number of variables in the tracked oracle
     pub fn log_size(&self) -> usize {
         self.log_size
     }
 
-    /// Return the max multiplicative degree of the tracked oracle.
+    /// The max multiplicative degree.
     pub fn degree(&self) -> usize {
         match &self.id_or_const {
             Either::Left(id) => self.tracker.borrow().virt_poly_degree(*id),
@@ -173,19 +170,16 @@ impl<B> TrackedOracle<B>
 where
     B: SnarkBackend,
 {
-    /// Return a new tracked oracle equal to `self * scalar`.
     pub fn mul_scalar_oracle(&self, scalar: B::F) -> Self {
         let id_or_const = self.compute_mul_scalar(scalar);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 
-    /// Return a new tracked oracle equal to `self + scalar`.
     pub fn add_scalar_oracle(&self, scalar: B::F) -> Self {
         let id_or_const = self.compute_add_scalar(scalar);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
     }
 
-    /// Return a new tracked oracle equal to `self - scalar`.
     pub fn sub_scalar_oracle(&self, scalar: B::F) -> Self {
         let id_or_const = self.compute_sub_scalar(scalar);
         TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
@@ -209,9 +203,8 @@ where
         }
     }
 
-    /// Create a new tracked oracle for a committed constant.
-    /// Arithmetic sees `Either::Right(cnst)` for constant-folding,
-    /// while `.id()` returns the committed tracker ID.
+    /// A committed constant: arithmetic sees `Either::Right(cnst)` for
+    /// constant folding, while `.id()` returns the committed tracker id.
     pub fn new_committed_constant(
         cnst: B::F,
         committed_id: TrackerID,
@@ -233,7 +226,7 @@ where
                 if let Some(id) = self.cached_constant_id.get() {
                     return id;
                 }
-                // Derived constant — materialize as a constant oracle so
+                // A derived constant: materialize it as a constant oracle so
                 // claims can reference it. The prover mirrors this call.
                 let oracle = Oracle::new_constant(self.log_size, *cnst);
                 let id = self.tracker.borrow_mut().track_base_oracle(oracle);
@@ -247,8 +240,7 @@ where
         self.id_or_const
     }
 
-    /// `Some(c)` if this is a folded constant not yet materialized into a
-    /// constant oracle, `None` otherwise.
+    /// The value, if this is a constant (folded or committed).
     pub fn as_constant(&self) -> Option<B::F> {
         match self.id_or_const {
             Either::Right(c) => Some(c),
@@ -256,7 +248,6 @@ where
         }
     }
 
-    /// `true` if this tracked oracle is a folded constant.
     pub fn is_constant(&self) -> bool {
         matches!(self.id_or_const, Either::Right(_))
     }
@@ -286,11 +277,10 @@ where
         }
     }
 
-    /// The size of the handle for `self op rhs`, given what the operation
-    /// came out as. A folded constant has no tracker entry: its rows are
-    /// the handle's, and are what a claim on it will be about. It therefore
-    /// takes the size the prover's handle takes, that of the operand with
-    /// rows when the other has none.
+    /// The size of the handle for `self op rhs`. A folded constant has no
+    /// tracker entry, so a claim on it is about the handle's rows: it takes
+    /// the size the prover's handle takes, that of the operand with rows
+    /// when the other has none.
     fn result_log_size(&self, rhs: &TrackedOracle<B>, result: &Either<TrackerID, B::F>) -> usize {
         if result.is_right() && self.log_size == 0 {
             rhs.log_size
@@ -326,7 +316,7 @@ where
                 Either::Left(new_id)
             }
             (Either::Left(id1), Either::Right(c2)) => {
-                let new_id = self.tracker.borrow_mut().sub_scalar(*id1, *c2);
+                let new_id = self.tracker.borrow_mut().add_scalar(*id1, -*c2);
                 Either::Left(new_id)
             }
             (Either::Right(c1), Either::Left(id2)) => {
@@ -373,7 +363,7 @@ where
     fn compute_sub_scalar(&self, scalar: B::F) -> Either<TrackerID, B::F> {
         match &self.id_or_const {
             Either::Left(id) => {
-                let new_id = self.tracker.borrow_mut().sub_scalar(*id, scalar);
+                let new_id = self.tracker.borrow_mut().add_scalar(*id, -scalar);
                 Either::Left(new_id)
             }
             Either::Right(c) => Either::Right(*c - scalar),
@@ -391,7 +381,6 @@ where
     }
 }
 
-// ====================== Operator Trait Implementations ======================
 impl<'b, B: SnarkBackend> Add<&'b TrackedOracle<B>> for &TrackedOracle<B> {
     type Output = TrackedOracle<B>;
 
@@ -430,8 +419,7 @@ impl<B: SnarkBackend> Add<B::F> for TrackedOracle<B> {
 
     #[inline]
     fn add(self, rhs: B::F) -> Self::Output {
-        let id_or_const = self.compute_add_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        self.add_scalar_oracle(rhs)
     }
 }
 
@@ -440,8 +428,7 @@ impl<B: SnarkBackend> Sub<B::F> for TrackedOracle<B> {
 
     #[inline]
     fn sub(self, rhs: B::F) -> Self::Output {
-        let id_or_const = self.compute_sub_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        self.sub_scalar_oracle(rhs)
     }
 }
 
@@ -450,8 +437,7 @@ impl<B: SnarkBackend> Mul<B::F> for TrackedOracle<B> {
 
     #[inline]
     fn mul(self, rhs: B::F) -> Self::Output {
-        let id_or_const = self.compute_mul_scalar(rhs);
-        TrackedOracle::new(id_or_const, self.tracker.clone(), self.log_size)
+        self.mul_scalar_oracle(rhs)
     }
 }
 

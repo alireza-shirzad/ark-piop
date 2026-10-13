@@ -5,10 +5,8 @@ use ark_std::rand::RngCore;
 
 use crate::arithmetic::mat_poly::mle::MLE;
 
-/// Sample a random list of multilinear polynomials.
-/// Returns
-/// - the list of polynomials,
-/// - its sum of polynomial evaluations over the boolean hypercube.
+/// `degree` random multilinear polynomials and the sum of their product over
+/// the boolean hypercube.
 #[allow(dead_code)]
 pub fn random_mle_list<F: PrimeField, R: RngCore>(
     nv: usize,
@@ -42,10 +40,8 @@ pub fn random_mle_list<F: PrimeField, R: RngCore>(
 
 // TODO: Write tests for sumcheck piop
 
-// Streaming vs eager parity: the streaming prover must produce bit-identical round
-// messages to the eager path — any deviation would silently break soundness. Tests
-// drive the same poly at k = 0 (eager), k = nv (full), and partial k.
-
+// The streaming prover must produce the same round messages as the eager path.
+// Each test drives one poly at k = 0 (eager), k = nv (full) and a partial k.
 #[cfg(test)]
 mod streaming_parity {
     use crate::arithmetic::mat_poly::mle::MLE;
@@ -74,8 +70,8 @@ mod streaming_parity {
         msgs
     }
 
-    /// Product of two u32-storage MLEs — the shape native-typed arithmetization
-    /// emits; the primary streaming regression test.
+    /// Product of two u32-storage MLEs, the shape native-typed arithmetization
+    /// emits.
     #[test]
     fn u32_storage_product_stream_matches_eager() {
         let nv = 5;
@@ -128,7 +124,6 @@ mod streaming_parity {
         let nv = 5;
         let len = 1usize << nv;
         let byte_len = len.div_ceil(8);
-        // Alternating bit pattern, mid-density.
         let mut bits_a = vec![0u8; byte_len];
         let mut bits_b = vec![0u8; byte_len];
         for i in 0..len {
@@ -152,9 +147,8 @@ mod streaming_parity {
         assert_eq!(eager, partial);
     }
 
-    /// Asserts `decide_auto_stream_k`'s decision directly: no streaming below nv=20
-    /// or when all factors are Field-backed; streaming when enough compressed
-    /// factors are present.
+    /// No streaming below nv=20 or when all factors are Field-backed; streaming
+    /// when enough compressed factors are present.
     #[test]
     fn auto_stream_k_decision_matches_expected_shape() {
         use crate::piop::sum_check::prover::decide_auto_stream_k;
@@ -194,7 +188,7 @@ mod streaming_parity {
             let nv = 22;
             let n = 1usize << nv;
             let mut poly = HPVirtualPolynomial::<Fr>::new(nv);
-            // 5 distinct U32-backed factors — above the 4-factor threshold.
+            // 5 distinct U32-backed factors, above the 4-factor threshold.
             for i in 0..5 {
                 let arc = Arc::new(MLE::<Fr>::from_u32s(vec![i as u32; n], nv));
                 poly.add_mle_list([arc], Fr::from(1u64)).unwrap();
@@ -208,7 +202,7 @@ mod streaming_parity {
     }
 
     /// Mixed Field + U32 storage: the Field factor is always Materialized, the U32
-    /// one Streaming when k > 0 — confirms per-slot routing.
+    /// one Streaming when k > 0.
     #[test]
     fn mixed_field_and_u32_storage_stream_matches_eager() {
         let nv = 4;

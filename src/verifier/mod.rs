@@ -123,13 +123,11 @@ where
         Rc::clone(&self.tracker_rc)
     }
 
-    /// Get the range tracked oracle given the label
     #[instrument(level = "debug", skip_all)]
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
         RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label)
     }
 
-    /// Insert or update an indexed tracked oracle.
     #[instrument(level = "debug", skip_all)]
     pub fn add_indexed_tracked_poly(
         &mut self,
@@ -197,7 +195,6 @@ where
         Ok(tracked_oracle)
     }
 
-    /// Track a constant multivariate oracle.
     #[instrument(level = "debug", skip(self))]
     pub fn track_mat_mv_cnst_oracle(&mut self, nv: usize, cnst: B::F) -> TrackedOracle<B> {
         if tracing::level_enabled!(tracing::Level::TRACE) {
@@ -332,16 +329,12 @@ where
     /// Claim the keyed sum `input` states, mirroring
     /// [`ArgProver::add_mv_keyed_sum_claim`](crate::prover::ArgProver::add_mv_keyed_sum_claim).
     ///
-    /// The claim is only recorded here. [`Self::verify`] checks it in the
-    /// batch of the lookup claims, after them and in the order of these
-    /// calls, which has to be the prover's.
-    ///
-    /// All columns and multiplicities must already be tracked by this
-    /// verifier: the claim keeps their ids, not the handles, and tracks
-    /// nothing itself.
-    ///
-    /// A side without columns or without a multiplicity slot per column is
-    /// refused.
+    /// The claim is only recorded: [`Self::verify`] checks it in the batch of
+    /// the lookup claims, after them and in the order of these calls, which
+    /// has to be the prover's. The claim keeps the ids of its columns and
+    /// multiplicities and tracks nothing itself, so they must already be
+    /// tracked by this verifier. A side without columns or without a
+    /// multiplicity slot per column is refused.
     #[instrument(level = "debug", skip_all)]
     pub fn add_mv_keyed_sum_claim(
         &mut self,
@@ -386,9 +379,9 @@ where
         self.tracker_rc.borrow_mut().commitment_num_vars(id)
     }
 
-    /// Track the next multivariate commitment the prover emitted: a fused
-    /// `peek_next_id()` + `track_mv_com_by_id(id)` — the split pattern is
-    /// race-prone, as a claim between the two calls desyncs tracker IDs.
+    /// Track the next multivariate commitment the prover emitted. Use this
+    /// instead of `peek_next_id()` then `track_mv_com_by_id(id)`: a claim
+    /// made between the two calls desyncs the tracker ids.
     #[instrument(level = "debug", skip(self))]
     pub fn track_next_mv_com(&mut self) -> SnarkResult<TrackedOracle<B>> {
         let id = self.tracker_rc.borrow_mut().peek_next_id();
@@ -398,7 +391,6 @@ where
     // TODO: Rename to get oracle
     #[instrument(level = "debug", skip(self))]
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<TrackedOracle<B>> {
-        // Check if this is a constant before borrowing the tracker.
         let maybe_cnst = self.tracker_rc.borrow().proof_mv_constant(id);
         if let Some(cnst) = maybe_cnst {
             let (nv, tracker_id) = self.tracker_rc.borrow_mut().track_mv_com_by_id(id)?;
@@ -522,10 +514,5 @@ where
     #[cfg(feature = "test-utils")]
     pub fn clone_underlying_tracker(&self) -> VerifierTracker<B> {
         RefCell::borrow(&self.tracker_rc).clone()
-    }
-    #[instrument(level = "debug", skip_all)]
-    #[cfg(feature = "test-utils")]
-    pub fn deep_copy(&self) -> ArgVerifier<B> {
-        ArgVerifier::new_from_tracker((*RefCell::borrow(&self.tracker_rc)).clone())
     }
 }

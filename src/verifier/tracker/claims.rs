@@ -91,7 +91,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .push(TrackerZerocheckClaim::new(poly_id));
     }
 
-    /// Adds a nozerocheck claim to the verifier state.
     pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) {
         if let Some(terms) = self.state.virtual_polys.get(&poly_id) {
             trace!(?poly_id, ?terms, "add_mv_nozerocheck_claim virtual");
@@ -144,7 +143,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    // Set range comitments for the tracker
     pub(crate) fn set_indexed_tracked_polys(
         &mut self,
         range_tr_comms: BTreeMap<String, TrackedOracle<B>>,
@@ -160,7 +158,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.indexed_tracked_polys.insert(label, oracle)
     }
 
-    // Get a range commitment for the given label
     pub(crate) fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
         match self.state.indexed_tracked_polys.get(&label) {
             Some(poly) => Ok(poly.clone()),

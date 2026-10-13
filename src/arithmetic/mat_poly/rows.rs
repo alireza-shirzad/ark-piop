@@ -2,9 +2,9 @@
 //!
 //! Expanding a compressed column to field elements costs a conversion per
 //! row, and a product of such columns a multiplication per factor on top.
-//! Most products a prover materializes are much simpler than that: a column
-//! of small integers switched on and off by 0/1 columns and scaled by a
-//! constant. Those are read here as what they are.
+//! Most products a prover materializes are a column of small integers
+//! switched on and off by 0/1 columns and scaled by a constant, and are
+//! computed here from that form.
 
 use std::borrow::Cow;
 

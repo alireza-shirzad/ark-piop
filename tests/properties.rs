@@ -1,8 +1,6 @@
-//! Property-based tests for algebraic invariants in ark-piop.
-//!
-//! These tests exercise the prover tracker's virtual polynomial algebra
-//! (add/sub/mul/scalar operations, degree computation) on randomly-generated
-//! inputs to catch edge cases that hand-written tests miss.
+//! Property-based tests of the MLE arithmetic and of the prover tracker's
+//! virtual polynomial algebra (add/sub/mul/scalar operations, degree
+//! computation).
 #![cfg(feature = "test-utils")]
 
 use ark_ff::Zero;
@@ -14,20 +12,15 @@ use proptest::prelude::*;
 type B = DefaultSnarkBackend;
 type F = <B as SnarkBackend>::F;
 
-/// Strategy for generating a vector of 2^nv field elements representing
-/// the evaluations of a multilinear polynomial.
+/// The `2^nv` evaluations of a multilinear polynomial.
 fn mle_evals_strategy(nv: usize) -> impl Strategy<Value = Vec<F>> {
     let size = 1usize << nv;
     prop::collection::vec(any::<u64>().prop_map(F::from), size..=size)
 }
 
-/// Build an MLE from a raw u64 evaluation vector (for tests that prefer
-/// small explicit inputs rather than the full u64 range).
 fn mle_from_u64s(nv: usize, evals: &[u64]) -> MLE<F> {
     MLE::from_evaluations_vec(nv, evals.iter().copied().map(F::from).collect())
 }
-
-// ─── MLE arithmetic identities ────────────────────────────────────────────
 
 proptest! {
     /// `a + b` produces the same evaluations as `b + a`.
@@ -99,11 +92,7 @@ proptest! {
     }
 }
 
-// ─── Prover tracker algebra identities ────────────────────────────────────
-//
-// These go through full key generation per iteration, so cap the case count
-// to keep the test suite snappy.
-
+// Each case of the tracker tests generates keys, so the case count is capped.
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(16))]
 
@@ -119,7 +108,7 @@ proptest! {
     ) {
         let (prover, _verifier) = test_prelude::<B>().unwrap();
         let mut tracker = prover.tracker().borrow_mut().clone();
-        let _ = prover;  // drop early
+        let _ = prover;
 
         let a_id = tracker.track_mat_mv_poly(MLE::from_evaluations_vec(3, evals_a));
         let b_id = tracker.track_mat_mv_poly(MLE::from_evaluations_vec(3, evals_b));
@@ -192,9 +181,8 @@ proptest! {
         prop_assert_eq!(tracker.virt_poly_degree(sum), 1);
     }
 
-    /// Degree of a product equals sum of the inputs' degrees.
-    /// Two materialized polys (each degree 1) multiplied → degree 2.
-    /// Then (a*b) * c → degree 3.
+    /// Degree of a product equals sum of the inputs' degrees: `n`
+    /// materialized polys (each degree 1) multiplied → degree `n`.
     #[test]
     fn tracker_mul_polys_degree_is_sum(n in 2usize..=5) {
         let (prover, _verifier) = test_prelude::<B>().unwrap();

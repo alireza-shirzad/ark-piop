@@ -3,17 +3,14 @@
 //! orchestrating `compile_piop_subproof`.
 
 use super::super::*;
-// Mid-function span wrapper for the bucket-pipeline stages; whole functions
-// use `#[piop_stage]` instead.
 use super::region;
+use crate::tracker_core::pipeline;
 
 use crate::pcs::PolynomialCommitment;
 impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Converts all the zerocheck claims into a single zero-check claim via random
-    /// linear combination. Delegates to the generic pipeline.
     #[instrument(level = "debug", skip(self))]
     fn batch_z_check_claims(&mut self) -> SnarkResult<()> {
         debug!(
@@ -29,21 +26,7 @@ where
                 .collect::<Vec<String>>()
                 .join(", ")
         );
-        crate::tracker_core::pipeline::batch_z_check_claims(self)
-    }
-
-    /// Aggregate the sumcheck claims via random linear combination.
-    /// Delegates to the generic pipeline.
-    #[instrument(level = "debug", skip(self))]
-    fn batch_s_check_claims(&mut self) -> SnarkResult<BTreeMap<TrackerID, B::F>> {
-        crate::tracker_core::pipeline::batch_s_check_claims(self)
-    }
-
-    /// Convert the single batched zerocheck claim to a sumcheck claim.
-    /// Delegates to the generic pipeline.
-    #[instrument(level = "debug", skip(self))]
-    fn z_check_claim_to_s_check_claim(&mut self, max_nv: usize) -> SnarkResult<()> {
-        crate::tracker_core::pipeline::z_check_claim_to_s_check_claim(self, max_nv)
+        pipeline::batch_z_check_claims(self)
     }
 
     #[allow(clippy::type_complexity)]
@@ -54,7 +37,6 @@ where
     ) -> SnarkResult<(SumcheckProof<B::F>, VPAuxInfo<B::F>)> {
         assert!(self.state.mv_pcs_substate.sum_check_claims.len() == 1);
 
-        // Get the sumcheck claim polynomial id
         let sumcheck_aggr_id = self
             .state
             .mv_pcs_substate
@@ -62,7 +44,6 @@ where
             .last()
             .unwrap()
             .id();
-        // Generate a sumcheck proof
         let sc_avp = self.to_hp_virtual_poly(sumcheck_aggr_id, target_nv);
         debug!(
             "The final virtual polynomial for sumcheck has {} terms, {} degree, and {} number of variables",
@@ -76,21 +57,19 @@ where
         Ok((sc_proof, sc_aux_info))
     }
 
-    /// Deterministically reduces the degree of the single aggregated sumcheck claim.
+    /// Reduces the degree of the single aggregated sumcheck claim:
+    /// 1. Expand each claim term until it is a product of atoms. An atom is
+    ///    a material MLE or a linear virtual polynomial (a sum of
+    ///    single-factor terms). Products of atoms are not distributed:
+    ///    `(a+b)(c+d)` stays two factors.
+    /// 2. While some term has more than `sumcheck_term_degree_limit - 1`
+    ///    factors, find the most frequent contiguous chunk of that many
+    ///    factors among the oversized terms.
+    /// 3. Commit to the chunk's product once, replace its occurrences by the
+    ///    new id, and add the zerocheck that links the two.
     ///
-    /// Algorithm:
-    /// 1) Expand each claim term only until it is a product of *atoms*.
-    ///    - Atom = material MLE, or a linear virtual polynomial
-    ///      (sum of single-factor terms / scalar-times-MLE).
-    ///    - We do *not* distribute atom products. For example, `(a+b)(c+d)` stays
-    ///      as two factors if both factors are atoms.
-    /// 2) While some terms exceed `SUMCHECK_TERM_DEGREE_LIMIT`, find the most
-    ///    frequent contiguous size-`LIMIT` chunk among oversized terms.
-    /// 3) Commit that chunk polynomial once, replace chunk occurrences by the new
-    ///    tracked id, and add the corresponding zerocheck link constraint.
-    ///
-    /// The procedure is fully deterministic (stable ordering/tie-breaks) and
-    /// mirrors verifier-side reduction.
+    /// The procedure is deterministic (stable ordering and tie-breaks) and
+    /// mirrors the verifier's reduction.
     fn reduce_sumcheck_dgree(&mut self, target_nv: usize) -> SnarkResult<()> {
         debug_assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty(),
@@ -177,12 +156,11 @@ where
             out
         }
 
-        /// Evaluate poly `id` to a `Vec<F>` at its NATIVE size (never larger
-        /// than `1 << target_nv`): leaf polys at their inner storage size,
-        /// virtual polys at the max native size of their factors. Consumers
-        /// cyclically broadcast (`v[i % v.len()]`) up to target positions.
-        /// This is the key memory optimization for large buckets — full
-        /// target-size intermediates at nv 28 were 8 GiB each.
+        /// The evaluations of `id` at its native size, never more than
+        /// `1 << target_nv`: a leaf at its inner storage size, a virtual
+        /// poly at the max native size of its factors. Consumers broadcast
+        /// cyclically (`v[i % v.len()]`); a full-size intermediate at nv 28
+        /// is 8 GiB.
         fn eval_vector<B: SnarkBackend>(
             tracker: &ProverTracker<B>,
             id: TrackerID,
@@ -223,7 +201,6 @@ where
                         if fv_len == max_len {
                             cfg_iter_mut!(term).zip(fv).for_each(|(a, b)| *a *= b);
                         } else {
-                            // Cyclic broadcast: term[i] *= fv[i % fv_len].
                             cfg_iter_mut!(term)
                                 .enumerate()
                                 .for_each(|(i, a)| *a *= fv[i % fv_len]);
@@ -237,13 +214,6 @@ where
             };
             cache.insert((id, target_nv), res.clone());
             res
-        }
-
-        fn find_subslice(haystack: &[TrackerID], needle: &[TrackerID]) -> Option<usize> {
-            if needle.is_empty() || haystack.len() < needle.len() {
-                return None;
-            }
-            haystack.windows(needle.len()).position(|w| w == needle)
         }
 
         #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -354,8 +324,7 @@ where
                             .for_each(|(i, a)| *a *= v[i % v_len]);
                     }
                 }
-                // Move `evals` into the MLE — cloning an 8 GiB Vec here was a
-                // major transient memory spike.
+                // `evals` is moved, not cloned: it can be 8 GiB.
                 let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
                 let prover_param = tracker.pk.mv_pcs_param.clone();
                 let com = B::MvPCS::commit(prover_param.as_ref(), &mle)?;
@@ -367,9 +336,9 @@ where
                 )?;
                 chunk_cache.insert(chunk.to_vec(), committed_id);
                 *committed_chunks += 1;
-                // Do NOT re-cache `evals`: the poly is now a tracker leaf
-                // that `eval_vector` reads natively; keeping a huge Vec alive
-                // in the cache would defeat the native-size point.
+                // `evals` is not cached: the poly is a tracker leaf that
+                // `eval_vector` reads natively, and the cache would keep a
+                // full-size Vec alive.
                 let _ = eval_cache;
                 let mut chunk_poly = VirtualPoly::new();
                 chunk_poly.push((B::F::one(), chunk.to_vec()));
@@ -418,7 +387,7 @@ where
                     .filter(|(_, ids)| ids.len() > max_term_degree)
                 {
                     while ids.len() > max_term_degree {
-                        let Some(pos) = find_subslice(ids, &chosen) else {
+                        let Some(pos) = pipeline::find_subslice(ids, &chosen) else {
                             break;
                         };
                         ids.splice(pos..pos + chosen.len(), [committed_id]);
@@ -498,8 +467,8 @@ where
     /// Discharge every pending nozerocheck claim, one `num_vars` group at a
     /// time, leaving the link constraints on the zerocheck list. Runs before
     /// bucketing so the partitioner never sees a nozerocheck claim. Groups
-    /// are walked in ascending nv so both sides commit — and the verifier
-    /// tracks ids off `peek_next_id` — in the same order.
+    /// are walked in ascending nv so that both sides commit, and the
+    /// verifier tracks ids off `peek_next_id`, in the same order.
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims_by_nv(&mut self) -> SnarkResult<()> {
         let claims = take(&mut self.state.mv_pcs_substate.no_zero_check_claims);
@@ -634,13 +603,12 @@ where
         Ok(())
     }
 
-    /// Run the full sumcheck compile pipeline for **one bucket** at its
-    /// `target_nv`: installs the bucket's claims into `state`, and produces
-    /// at most one [`SumcheckBucketProof`], the pre-batching claim map to
-    /// embed in the proof, and a [`BucketRunStats`] snapshot. Emits no
-    /// `bench_stats` events itself (deferred to the caller so buckets don't
-    /// overwrite each other) and measures no timings (the nested tracing
-    /// spans carry those).
+    /// Run the sumcheck compile pipeline for one bucket at its `target_nv`:
+    /// install the bucket's claims into `state` and produce at most one
+    /// [`SumcheckBucketProof`], the pre-batching claim map to embed in the
+    /// proof, and a [`BucketRunStats`]. Emits no `bench_stats` events (the
+    /// caller does, so buckets don't overwrite each other) and measures no
+    /// timings (the nested spans carry those).
     #[allow(clippy::type_complexity)]
     #[instrument(
         target = "bench_stats",
@@ -668,8 +636,8 @@ where
             sum_check_claims,
         } = bucket;
 
-        // Zero/nozero counts are zero by construction — both kinds were
-        // discharged before partitioning; kept so the record keeps its shape.
+        // Zero/nozero counts are zero by construction: both kinds are
+        // discharged before partitioning. Kept so the record keeps its shape.
         let mut stats = BucketRunStats {
             bucket_index,
             target_nv,
@@ -689,8 +657,10 @@ where
         // Identical by construction; kept so the stats record keeps its shape.
         stats.before_after_nozero_batching = self.current_claim_stage_stats();
         stats.before_after_zero_batching = self.current_claim_stage_stats();
-        let mut individual_sumcheck_claims =
-            region!("first_batch_sumcheck", self.batch_s_check_claims()?);
+        let mut individual_sumcheck_claims = region!(
+            "first_batch_sumcheck",
+            pipeline::batch_s_check_claims(self)?
+        );
         stats.before_after_sum_batching = self.current_claim_stage_stats();
         if self.state.mv_pcs_substate.sum_check_claims.is_empty() {
             debug!("No sumcheck claims to prove in this bucket");
@@ -704,10 +674,10 @@ where
         stats.after_after_zero_batching = self.current_claim_stage_stats();
         region!(
             "second_zerocheck_to_sumcheck",
-            self.z_check_claim_to_s_check_claim(target_nv)?
+            pipeline::z_check_claim_to_s_check_claim(self, target_nv)?
         );
         // Untimed so the reported breakdown keeps its shape.
-        let additional_sumcheck_claims = self.batch_s_check_claims()?;
+        let additional_sumcheck_claims = pipeline::batch_s_check_claims(self)?;
         stats.after_after_sum_batching = self.current_claim_stage_stats();
         for (id, claim) in additional_sumcheck_claims {
             individual_sumcheck_claims.entry(id).or_insert(claim);
@@ -728,7 +698,6 @@ where
     /// Drain the sumcheck claims and partition them into buckets.
     #[instrument(level = "debug", skip(self))]
     fn create_buckets(&mut self) -> Vec<SumcheckBucket<B>> {
-        // 1. First check that all the zerocheck and nozercheck claims are drained
         assert!(
             self.state.mv_pcs_substate.zero_check_claims.is_empty()
                 && self.state.mv_pcs_substate.no_zero_check_claims.is_empty(),
@@ -736,12 +705,9 @@ where
             self.state.mv_pcs_substate.zero_check_claims.len(),
             self.state.mv_pcs_substate.no_zero_check_claims.len(),
         );
-        // 2. Drain all the sumcheck claims
         let sum_check_claims = take(&mut self.state.mv_pcs_substate.sum_check_claims);
-        // 3. Get the cost model for bucketing from the prover configuration
         let model =
             crate::tracker_core::bucketing::CostModel::new(self.config.sumcheck_term_degree_limit);
-        // 4. Build the buckets
         crate::tracker_core::bucketing::build_buckets::<B, _>(self, sum_check_claims, model)
     }
 
@@ -789,7 +755,6 @@ where
         Ok(run)
     }
 
-    /// Run the PIOP based protocols and get the PIOP subproof
     #[piop_stage(
         span = "compile_piop_subproof",
         snapshot_start = "compile_start",

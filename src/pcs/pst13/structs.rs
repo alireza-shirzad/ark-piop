@@ -15,9 +15,7 @@ use derivative::Derivative;
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-/// A commitment is an Affine point.
 pub struct PST13Commitment<E: Pairing> {
-    /// the actual commitment is an affine point.
     pub com: E::G1Affine,
     pub nv: u8,
 }
@@ -30,7 +28,6 @@ impl<E: Pairing> PolynomialCommitment<E::ScalarField> for PST13Commitment<E> {
     }
 }
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-/// proof of opening
 pub struct PST13Proof<E: Pairing> {
     /// Evaluation of quotients
     pub proofs: Vec<E::G1Affine>,

@@ -1,11 +1,5 @@
-//! Polynomial Commitment Scheme (PCS) abstraction and implementations.
-//!
-//! The [`PCS`] trait defines the interface for committing to polynomials,
-//! opening them at evaluation points, and verifying openings.
-//!
-//! Implementations:
-//! - [`kzg10`] — univariate KZG10 commitments
-//! - [`pst13`] — multivariate PST13 commitments
+//! The [`PCS`] trait and its implementations: univariate [`kzg10`] and
+//! multivariate [`pst13`].
 
 pub(crate) mod errors;
 pub mod kzg10;
@@ -28,16 +22,11 @@ use tracing::Level;
 
 use ark_std::test_rng;
 use tracing::instrument;
-/// This trait defines APIs for polynomial commitment schemes.
-/// Note that for our usage of PCS, we do not require the hiding property.
+/// A polynomial commitment scheme. It need not be hiding.
 pub trait PCS<F: PrimeField>: Clone {
-    /// Prover parameters
     type ProverParam: Clone + Sync + Send + CanonicalSerialize + CanonicalDeserialize;
-    /// Verifier parameters
     type VerifierParam: Clone + CanonicalSerialize + CanonicalDeserialize;
-    /// Structured reference string
     type SRS: Clone + Debug + CanonicalSerialize + CanonicalDeserialize;
-    /// Polynomial and its associated types
     type Poly: Polynomial<F>
         + Clone
         + Debug
@@ -46,7 +35,6 @@ pub trait PCS<F: PrimeField>: Clone {
         + Eq
         + CanonicalSerialize
         + CanonicalDeserialize;
-    /// comitments
     type Commitment: PolynomialCommitment<F>
         + Clone
         + CanonicalSerialize
@@ -55,9 +43,7 @@ pub trait PCS<F: PrimeField>: Clone {
         + PartialEq
         + Send
         + Eq;
-    /// Proofs
     type Proof: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq + Default;
-    /// Batch proofs
     type BatchProof: Clone
         + PartialEq
         + Eq
@@ -69,7 +55,7 @@ pub trait PCS<F: PrimeField>: Clone {
     /// Build SRS for testing. `supported_size` is the max degree (univariate) or the
     /// number of variables (multilinear).
     ///
-    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
+    /// WARNING: TESTING ONLY. The output SRS must not be used in production.
     fn gen_srs_for_testing_inner<R: Rng>(
         rng: &mut R,
         supported_size: usize,
@@ -77,21 +63,18 @@ pub trait PCS<F: PrimeField>: Clone {
 
     /// Trim the universal parameters: `supported_degree` for univariate,
     /// `supported_num_vars` for multilinear. `impl Borrow<_>` lets callers pass the
-    /// (typically huge) SRS via any pointer type (`&`, `Box`, `Arc`, ...).
+    /// (typically huge) SRS via any pointer type.
     fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
         supported_num_vars: Option<usize>,
     ) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
-    /// Generate a commitment for a polynomial. `impl Borrow<_>` lets callers pass the
-    /// prover params via any pointer type — see [`Self::trim_impl_inner`].
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment>;
 
-    /// Produce an opening proof for `polynomial` at `point`.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -99,7 +82,6 @@ pub trait PCS<F: PrimeField>: Clone {
         commitment: Option<&Self::Commitment>,
     ) -> SnarkResult<(Self::Proof, F)>;
 
-    /// Compute a multi-opening for `polynomials` at the corresponding `points`.
     fn multi_open_inner(
         _prover_param: impl Borrow<Self::ProverParam>,
         _polynomials: &[Arc<Self::Poly>],
@@ -255,27 +237,22 @@ pub trait PCS<F: PrimeField>: Clone {
     }
 }
 
-/// API definitions for structured reference string
 pub trait StructuredReferenceString<E: Pairing>: Sized {
-    /// Prover parameters
     type ProverParam;
-    /// Verifier parameters
     type VerifierParam;
 
-    /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_size: usize) -> Self::ProverParam;
-    /// Extract the verifier parameters from the public parameters.
     fn extract_verifier_param(&self, supported_size: usize) -> Self::VerifierParam;
 
     /// Trim the universal parameters to committer and verifier keys for
-    /// `supported_size`: the max degree (univariate) or `2^num_vars` (multilinear).
-    /// `supported_log_size` should be in range `1..=params.log_size`.
+    /// `supported_size`: the max degree (univariate) or the number of
+    /// variables (multilinear).
     fn trim(&self, supported_size: usize) -> SnarkResult<(Self::ProverParam, Self::VerifierParam)>;
 
     /// Build SRS for testing. `supported_size` is the max degree (univariate) or the
     /// number of variables (multilinear).
     ///
-    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
+    /// WARNING: TESTING ONLY. The output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, supported_size: usize) -> SnarkResult<Self>;
 }
 

@@ -136,9 +136,9 @@ pub(crate) fn multiplicities_by_sorting<F: PrimeField>(
     included_col_evals: &[&[F]],
     super_col_evals: &[F],
 ) -> Vec<F> {
-    // Sort-based rather than a hash map: on a 2^23-entry super column the
-    // map version was several seconds of one core per lookup, and this
-    // runs inside a parallel job per super column.
+    // Sorting rather than a hash map: a map over a large super column keeps
+    // one core busy for seconds, and this runs inside a parallel job per
+    // super column.
     let mut included: Vec<F> = included_col_evals
         .iter()
         .flat_map(|evals| evals.iter().copied())
@@ -374,9 +374,8 @@ mod tests {
         }
     }
 
-    /// Regression test for the multiplicity double-count bug that appeared
-    /// when the super column has repeated values.  The total multiplicity
-    /// must equal the total count in the sub-column union.
+    /// A super column with repeated values must not count a sub value once
+    /// per repeat: the total multiplicity equals the size of the sub union.
     #[test]
     fn multiplicity_sums_to_total_sub_count_when_super_has_duplicates() {
         // super repeats each of 0..4 twice → 8 entries, N_super(v) = 2.
@@ -403,8 +402,7 @@ mod tests {
     }
 
     /// Two sub columns sharing a super column: total multiplicity must equal
-    /// the sum of the sub column sizes.  This is the exact case exercised by
-    /// the `end_to_end_pipeline` integration test.
+    /// the sum of the sub column sizes.
     #[test]
     fn multiplicity_with_two_sub_columns_and_duplicated_super() {
         // super has values 0..7 each appearing twice (16 entries).
@@ -427,8 +425,7 @@ mod tests {
         assert_eq!(total_m, expected);
     }
 
-    /// Sanity check: with a distinct-valued super column, multiplicities are
-    /// unchanged from the natural per-position count.
+    /// With a distinct-valued super column each position has its own count.
     #[test]
     fn multiplicity_unchanged_when_super_has_distinct_values() {
         // super has values 0..7 exactly once.

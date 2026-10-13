@@ -8,18 +8,16 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Compiles the PCS subproof: commitments the verifier needs oracle
-    /// access to, the query map, and the batch opening proof.
-    /// `bench_stats`/`info` because the stats subscriber times this span to
-    /// record `snark_prover_mv_pcs_time_s`.
+    /// Compiles the multivariate PCS subproof: the commitments the verifier
+    /// needs oracle access to, the query map, and the batch opening proof.
+    /// Its span is one of `SNARK_PROVER_TIMED_SPANS`.
     #[piop_stage(
         span = "compile_mv_pcs_subproof",
         snapshot_end = "after_compile_mv_pcs_subproof"
     )]
     pub fn compile_mv_pcs_subproof(&mut self) -> SnarkResult<PCSSubproof<B::F, B::MvPCS>> {
-        // -- Step 1: Build the CommitmentID dedup map FIRST --
-        // We need this before building openings so we can deduplicate by
-        // (CommitmentID, PointID) instead of (TrackerID, PointID).
+        // The CommitmentID map comes first: openings are deduplicated by
+        // (CommitmentID, PointID), not (TrackerID, PointID).
         let mut unique_comitments: BTreeMap<CommitmentID, _> = BTreeMap::new();
         let mut comitment_map: BTreeMap<TrackerID, CommitmentID> = BTreeMap::new();
         let mut comm_to_id: BTreeMap<Vec<u8>, CommitmentID> = BTreeMap::new();
@@ -43,7 +41,6 @@ where
             comitment_map.insert(*tracker_id, comm_id);
         }
 
-        // -- Step 2: Evaluate all claims, deduplicate by (CommitmentID, PointID) --
         let mut query_map: BTreeMap<CommitmentID, BTreeMap<PointID, B::F>> = BTreeMap::new();
         let mut point_map: BTreeMap<PointID, Vec<B::F>> = BTreeMap::new();
         let mut point_to_id: BTreeMap<Vec<B::F>, PointID> = BTreeMap::new();
@@ -81,11 +78,9 @@ where
                 .into_iter()
                 .collect();
 
-            // A point whose only claims are on materialized/base polys (no
-            // PCS commitment to open) yields no openable ids — nothing to
-            // batch-evaluate, and `batch_evaluate_mv` returns `None` on an
-            // empty id set. Skip it; the verifier checks such claims by
-            // direct evaluation of the reconstructed base poly.
+            // A point whose claims are all on uncommitted polys has nothing
+            // to open, and `batch_evaluate_mv` returns `None` on an empty id
+            // set. The verifier checks such claims by direct evaluation.
             if all_mat_ids.is_empty() {
                 continue;
             }
@@ -106,7 +101,6 @@ where
                 let eval = *id_to_eval.get(&(mat_id, point_id)).unwrap();
                 let comm_id = comitment_map[&mat_id];
 
-                // Always populate the CommitmentID-keyed query map.
                 query_map.entry(comm_id).or_default().insert(point_id, eval);
                 opened_polys
                     .entry(comm_id)
@@ -128,7 +122,6 @@ where
             }
         }
 
-        // -- Step 3: Build the batch opening proof --
         let opening_proof: PCSOpeningProof<B::F, B::MvPCS>;
         if mat_polys.len() == 1 {
             let single_proof = B::MvPCS::open(
@@ -152,7 +145,7 @@ where
             opening_proof = PCSOpeningProof::Empty;
         }
 
-        // -- Step 4: Deduplicate constants --
+        // Deduplicate the constants.
         let mut unique_constants: BTreeMap<ConstantID, B::F> = BTreeMap::new();
         let mut constant_map: BTreeMap<TrackerID, ConstantID> = BTreeMap::new();
         let mut val_to_const_id: BTreeMap<B::F, ConstantID> = BTreeMap::new();
@@ -168,9 +161,9 @@ where
             constant_map.insert(*tracker_id, const_id);
         }
 
-        // Emit per-TrackerID num_vars so the verifier mirrors `poly_log_sizes`.
-        // Fall back to 0 for any constant that wasn't recorded (shouldn't
-        // happen — `track_and_commit_mv_constant` always writes both maps).
+        // Per-TrackerID num_vars, so the verifier mirrors `poly_log_sizes`.
+        // The fallback to 0 is never taken: `track_and_commit_mv_constant`
+        // writes both maps.
         let constant_num_vars: BTreeMap<TrackerID, u32> = self
             .state
             .mv_pcs_substate
@@ -200,10 +193,7 @@ where
         })
     }
 
-    /// Compiles the PCS subproof: commitments the verifier needs oracle
-    /// access to, the query map, and the batch opening proof.
-    /// `bench_stats`/`info` because the stats subscriber times this span to
-    /// record `snark_prover_uv_pcs_time_s`.
+    /// The univariate [`Self::compile_mv_pcs_subproof`].
     #[piop_stage(
         span = "compile_uv_pcs_subproof",
         snapshot_end = "after_compile_uv_pcs_subproof"
@@ -232,7 +222,8 @@ where
             }
         }
 
-        // Deduplicate UV commitments (same logic as MV).
+        // Deduplicate the commitments by their bytes; external ones are
+        // left out.
         let mut unique_comitments: BTreeMap<CommitmentID, _> = BTreeMap::new();
         let mut comitment_map: BTreeMap<TrackerID, CommitmentID> = BTreeMap::new();
         let mut comm_to_id: BTreeMap<Vec<u8>, CommitmentID> = BTreeMap::new();

@@ -50,24 +50,22 @@ impl<B> KeyGenerator<B>
 where
     B: SnarkBackend,
 {
-    /// Creates a new `KeyGenerator` instance.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Sets the log of number of table maximum size.
+    /// Sets the log of the maximum table size.
     pub fn with_num_mv_vars(mut self, log_size: usize) -> Self {
         self.log_size = log_size;
         self
     }
 
-    /// Sets the path to the SRS file.
+    /// Sets the directory the SRS files are read from and written to.
     pub fn with_srs_path(mut self, srs_path: PathBuf) -> Self {
         self.srs_path = srs_path;
         self
     }
 
-    /// Generate the proving and verifying keys.
     #[allow(clippy::type_complexity)]
     #[instrument(level = "debug", skip(self))]
     pub fn gen_keys(self) -> SnarkResult<(SNARKPk<B>, SNARKVk<B>)> {

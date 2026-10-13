@@ -1,4 +1,4 @@
-//! Implementing Structured Reference Strings for univariate polynomial KZG
+//! Structured reference string for univariate KZG.
 
 use crate::errors::SnarkResult;
 use crate::pcs::StructuredReferenceString;
@@ -9,7 +9,6 @@ use ark_std::rand::Rng;
 use derivative::Derivative;
 
 use std::ops::Mul;
-/// `UniversalParams` are the universal parameters for the KZG10 scheme.
 // Adapted from
 // https://github.com/arkworks-rs/poly-commit/blob/master/src/kzg10/data_structures.rs#L20
 #[derive(Debug, Clone, Eq, PartialEq, CanonicalSerialize, CanonicalDeserialize, Default)]
@@ -24,21 +23,16 @@ pub struct KZG10UniversalParams<E: Pairing> {
 }
 
 impl<E: Pairing> KZG10UniversalParams<E> {
-    /// Returns the maximum supported degree
     pub fn max_degree(&self) -> usize {
         self.powers_of_g.len()
     }
 }
 
-/// `KZG10ProverParam` is used to generate a proof
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct KZG10ProverParam<C: AffineRepr> {
-    /// Parameters
     pub powers_of_g: Vec<C>,
 }
 
-/// `KZG10VerifierParam` is used to check evaluation proofs for a given
-/// commitment.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
     Default(bound = ""),
@@ -61,14 +55,12 @@ impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
     type ProverParam = KZG10ProverParam<E::G1Affine>;
     type VerifierParam = KZG10VerifierParam<E>;
 
-    /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_size: usize) -> Self::ProverParam {
         let powers_of_g = self.powers_of_g[..=supported_size].to_vec();
 
         Self::ProverParam { powers_of_g }
     }
 
-    /// Extract the verifier parameters from the public parameters.
     fn extract_verifier_param(&self, _supported_size: usize) -> Self::VerifierParam {
         Self::VerifierParam {
             g: self.powers_of_g[0],
@@ -91,8 +83,6 @@ impl<E: Pairing> StructuredReferenceString<E> for KZG10UniversalParams<E> {
         Ok((pk, vk))
     }
 
-    /// Build SRS for testing.
-    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, max_degree: usize) -> SnarkResult<Self> {
         let beta = E::ScalarField::rand(rng);
         let g = E::G1::rand(rng);

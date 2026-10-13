@@ -64,11 +64,8 @@ impl<'a, F: PrimeField> Messages<'a, F> {
 }
 
 /// Verifies a batch against the statement `shape` and returns the claims the
-/// caller has to finish: the relation on the roots and the openings of the
-/// input layers at `point[..n_i]`.
-///
-/// Every rejection is a [`VerifierError::VerifierCheckFailed`]; no proof
-/// value makes it panic.
+/// caller has to finish (see the module docs). Every rejection is a
+/// [`VerifierError::VerifierCheckFailed`]; no proof value makes it panic.
 pub(crate) fn verify_batch<F: PrimeField>(
     shape: &[GkrShape],
     proof: &LogupGkrProof<F>,
@@ -150,10 +147,8 @@ pub(crate) fn verify_batch<F: PrimeField>(
                 let r = tr.get_and_append_challenge(RHO_LABEL)?;
 
                 // The round polynomial is
-                // 2^(t-1-round)·done + eq(z, X)·(a + b·X + c·X^2): each
-                // variable still summed over doubles what the finished
-                // instances contribute. Its values at 0 and 1 have to add
-                // up to the claim, which leaves one choice for `a`.
+                // 2^(t-1-round)·done + eq(z, X)·(a + b·X + c·X^2). Its
+                // values at 0 and 1 add up to the claim, which fixes `a`.
                 let z = point[round];
                 let a = claim - pow2[t - round] * done - z * (b + c);
                 let zr = z * r;

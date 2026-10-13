@@ -63,7 +63,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(acc)
     }
 
-    pub(super) fn eval_virtual_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
+    pub fn query_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
         let terms = self.state.virtual_polys.get(&oracle_id).ok_or_else(|| {
             SnarkError::VerifierError(VerifierError::VerifierCheckFailed(format!(
                 "virtual oracle {} not tracked",
@@ -120,20 +120,14 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.eval_virtual_mv(oracle_id, &equalized_point)
     }
 
-    pub fn query_uv(&self, oracle_id: TrackerID, point: B::F) -> SnarkResult<B::F> {
-        self.eval_virtual_uv(oracle_id, point)
-    }
-
     pub(super) fn equalized_mv_point(&self, point: &[B::F]) -> SnarkResult<Vec<B::F>> {
         let subproof = self.proof_or_err()?.sc_subproof.as_ref().ok_or_else(|| {
             SnarkError::VerifierError(VerifierError::VerifierCheckFailed(
                 "proof has no sumcheck subproof".to_string(),
             ))
         })?;
-        // Pad to the last (largest) bucket's num_vars — for Single mode this
-        // is the only bucket; for ByClaimNumVars it's the biggest sumcheck
-        // in the subproof, which is what the largest claim would be evaluated
-        // against.
+        // Pad to the num_vars of the last bucket, the largest sumcheck of
+        // the subproof.
         let target_nv = subproof
             .buckets()
             .last()

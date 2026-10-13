@@ -14,9 +14,7 @@ use ark_ec::AffineRepr;
     PartialEq(bound = ""),
     Eq(bound = "")
 )]
-/// A commitment is an Affine point.
 pub struct KZG10Commitment<E: Pairing> {
-    /// the actual commitment is an affine point.
     pub com: E::G1Affine,
     pub nv: u8,
 }
@@ -30,7 +28,6 @@ impl<E: Pairing> PolynomialCommitment<E::ScalarField> for KZG10Commitment<E> {
 }
 
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
-/// proof of opening
 pub struct KZG10Proof<E: Pairing> {
     /// Evaluation of quotients
     pub proof: E::G1Affine,
@@ -42,7 +39,7 @@ impl<E: Pairing> Default for KZG10Proof<E> {
         }
     }
 }
-/// batch proof
+/// One proof per claim.
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct KZG10BatchProof<E: Pairing>(pub Vec<KZG10Proof<E>>);
 

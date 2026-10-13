@@ -1,4 +1,4 @@
-/// Convert a vector of anything to a vector of field elements
+/// Convert a vector of integers to field elements, through `i64`.
 #[macro_export]
 macro_rules! to_field_vec {
     ($vec:expr, $field:ty) => {

@@ -23,9 +23,6 @@ use std::{
 ///
 /// `Bit` packing is little-endian per byte: bit `i` lives at
 /// `bits[i / 8] >> (i % 8) & 1`, and `bits.len() == inner_len().div_ceil(8)`.
-///
-/// `CanonicalSerialize` / `CanonicalDeserialize` are hand-implemented below
-/// because arkworks' derive macros only support structs.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum MLEStorage<F: Field> {
     Field(DenseMultilinearExtension<F>),
@@ -90,14 +87,13 @@ pub enum MLEStorage<F: Field> {
     },
     /// Packed unsigned-decimal storage (Arrow `Decimal128` columns): each
     /// row's 128-bit magnitude split across parallel `high`/`low` u64 vectors
-    /// (16 B/row vs 32 B as `Field`). `scale` is carried for decoders but NOT
-    /// baked into the polynomial value or the commitment.
+    /// (16 B/row vs 32 B as `Field`). `scale` is carried for decoders but is
+    /// not part of the polynomial value or the commitment.
     ///
     /// Invariants: `high.len() == low.len() == 1 << inner_num_vars`.
-    /// `lift(i)` rebuilds `((high[i] as u128) << 64) | low[i]` and lifts via
-    /// the same `Field`-generic path the eager encoder used, so results are
-    /// bit-identical. Unsigned only: signed decimals must be sign-peeked at
-    /// ingest and fall back to the eager `Field` path.
+    /// `lift(i)` is `((high[i] as u128) << 64) | low[i]` as a field element.
+    /// Unsigned only: signed decimals must be sign-peeked at ingest and fall
+    /// back to `Field` storage.
     PackedDecimal {
         high: Vec<u64>,
         low: Vec<u64>,
@@ -107,12 +103,11 @@ pub enum MLEStorage<F: Field> {
     /// Lazy inverse-shifted: `1/(source(x) - shift)` at every point, in O(1)
     /// storage: the helper `1/(p - γ)` of a LogUp argument once it has been
     /// committed. Keyed sums under the LogUp lookup protocol register one in
-    /// place of every helper table they commit. Sumcheck streams
-    /// non-`Field` storage via `storage().lift(i)`.
+    /// place of every helper table they commit.
     ///
     /// Contract: `lift(i) = (source.lift(i) - shift).inverse().unwrap_or(0)`,
     /// with `inner_num_vars` that of `source`.
-    /// Callers must ensure `source(x) - shift != 0` where they read — `shift`
+    /// Callers must ensure `source(x) - shift != 0` where they read. `shift`
     /// is a post-commit transcript challenge, so the zero fallback is only a
     /// safety net over a measure-zero exceptional set.
     LazyInverseShifted {
@@ -148,7 +143,6 @@ impl<F: Field> MLEStorage<F> {
         if runs.is_empty() {
             return None;
         }
-        // Merge adjacent same-value runs to keep the "shortest RLE" invariant.
         let mut merged: Vec<(F, u32)> = Vec::with_capacity(runs.len());
         for (v, c) in runs {
             if c == 0 {
@@ -285,9 +279,7 @@ impl<F: Field> MLEStorage<F> {
         })
     }
 
-    /// Construct a `PackedDecimal` variant, enforcing the length invariants.
-    /// Returns `None` if `high.len() != low.len()` or if the length doesn't
-    /// match `1 << inner_num_vars`.
+    /// `None` unless `high.len() == low.len() == 1 << inner_num_vars`.
     pub fn new_packed_decimal(
         high: Vec<u64>,
         low: Vec<u64>,
@@ -446,9 +438,9 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
                 scale.serialize_with_mode(&mut writer, compress)?;
                 (*inner_num_vars as u64).serialize_with_mode(&mut writer, compress)?;
             }
-            // Lazy variants are internal-only and NEVER part of a serialized
+            // Lazy variants are internal-only and never part of a serialized
             // artifact (proofs carry the helper's commitment, not the MLE);
-            // reaching this arm indicates a lazy poly leaked to a boundary.
+            // reaching this arm means a lazy poly leaked to a boundary.
             Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => {
                 return Err(ark_serialize::SerializationError::NotEnoughSpace);
             }
@@ -601,7 +593,6 @@ impl<F: Field> Valid for MLEStorage<F> {
                 }
                 Ok(())
             }
-            // Lazy variants: sources validate themselves via their own `check`.
             Self::LazyInverseShifted { source, shift, .. } => {
                 source.storage().check()?;
                 shift.check()
@@ -761,8 +752,8 @@ impl<F: Field> CanonicalDeserialize for MLEStorage<F> {
 
 impl<F: Field> MLEStorage<F> {
     /// Short label for this storage variant, used in tracker snapshots, logs,
-    /// and the bench dashboard. Treat as a wire format: renaming a label is a
-    /// dashboard-breaking change that needs coordinated migration.
+    /// and the bench dashboard. A wire format: renaming a label breaks the
+    /// dashboard.
     #[inline]
     pub const fn kind_tag(&self) -> &'static str {
         match self {
@@ -783,7 +774,7 @@ impl<F: Field> MLEStorage<F> {
         }
     }
 
-    /// The `num_vars` of the *inner* (unpadded) hypercube.
+    /// The `num_vars` of the inner (unpadded) hypercube.
     #[inline]
     pub fn inner_num_vars(&self) -> usize {
         match self {
@@ -804,7 +795,6 @@ impl<F: Field> MLEStorage<F> {
         }
     }
 
-    /// The number of inner evaluation slots (`1 << inner_num_vars`).
     #[inline]
     pub fn inner_len(&self) -> usize {
         1usize << self.inner_num_vars()
@@ -892,19 +882,17 @@ impl<F: Field> MLEStorage<F> {
                 };
                 F::from(word)
             }
-            // Reassemble the 128-bit magnitude and lift via `F::from(u128)`:
-            // same field element as the eager `from_le_bytes_mod_order` path
-            // (the encoder rejects negatives at ingest).
+            // The same field element as `from_le_bytes_mod_order` on the
+            // 128-bit magnitude (the encoder rejects negatives at ingest).
             Self::PackedDecimal { high, low, .. } => {
                 let value: u128 = ((high[i] as u128) << 64) | (low[i] as u128);
                 F::from(value)
             }
-            // Lazy inverse, computed on demand. The zero fallback is safety
-            // only: `shift` is a post-commit transcript challenge, so a
-            // non-invertible value is a soundness event best signalled by a
-            // downstream check, not a crash. `i` is cycled modulo the
-            // source's inner_len so reads stay consistent with virtual
-            // padding after the outer nv is bumped.
+            // The zero fallback is safety only: `shift` is a post-commit
+            // transcript challenge, so a non-invertible value is a soundness
+            // event for a downstream check to signal, not a crash. `i` cycles
+            // modulo the source's inner_len so reads stay consistent with
+            // virtual padding after the outer nv is bumped.
             Self::LazyInverseShifted { source, shift, .. } => {
                 let src_storage = source.storage();
                 let idx = i % src_storage.inner_len();
@@ -965,7 +953,6 @@ impl<F: Field> MLEStorage<F> {
         }
     }
 
-    /// True if this storage is the `Field` variant.
     #[inline]
     pub fn is_field(&self) -> bool {
         matches!(self, Self::Field(_))
@@ -1004,10 +991,9 @@ impl<F: Field> MLEStorage<F> {
         }
         let inner_nv = self.inner_num_vars();
         // Count runs of Copy+Eq scalars; `Some(runs)` when ≤ RLE_MAX_RUNS,
-        // `None` to keep dense storage. Comparing in the native scalar type
-        // matters a LOT: lifting each element through `F::from` (~100 ns
-        // Montgomery conversion on BN254) once caused a ~50% wall-clock
-        // regression; this pays one integer eq per element, `F::from` per RUN.
+        // `None` to keep dense storage. Compares in the native scalar type:
+        // one integer eq per element and one `F::from` (a Montgomery
+        // conversion) per run, not per element.
         fn scan_runs_native<S, F>(
             slice: &[S],
             lift: impl Fn(S) -> F,
@@ -1224,10 +1210,10 @@ impl<F: Field> MLEStorage<F> {
     pub fn to_field(&self) -> Cow<'_, DenseMultilinearExtension<F>> {
         match self {
             Self::Field(m) => Cow::Borrowed(m),
-            // Route through `to_evaluations_vec` for its lazy-inverse batch
-            // fast paths: element-wise `lift` here costs one inversion per
-            // slot when the backing is lazy (and this is called per poly per
-            // eval point during PCS query-map construction).
+            // Through `to_evaluations_vec` for its batch inversion:
+            // element-wise `lift` costs one inversion per slot on a lazy
+            // backing, and this is called per poly per eval point during PCS
+            // query-map construction.
             _ => {
                 let n = self.inner_num_vars();
                 Cow::Owned(DenseMultilinearExtension::from_evaluations_vec(
@@ -1242,11 +1228,9 @@ impl<F: Field> MLEStorage<F> {
     pub fn to_evaluations_vec(&self) -> Vec<F> {
         match self {
             Self::Field(m) => m.evaluations.clone(),
-            // Batch-inversion fast paths: per-element `lift` pays one field
-            // inversion per slot, which turns materializing a lazy helper into
-            // 2^nv sequential inversions (the dominant cost of PCS-opening
-            // one). Montgomery batching makes it one inversion + 3 muls per
-            // slot. `batch_inversion` leaves zeros at zero, matching `lift`'s
+            // Batch inversion: per-element `lift` pays one field inversion
+            // per slot, the dominant cost of PCS-opening a lazy helper.
+            // `batch_inversion` leaves zeros at zero, matching `lift`'s
             // `.inverse().unwrap_or(zero)` fallback.
             Self::LazyInverseShifted { source, shift, .. } => {
                 let src = source.storage();
@@ -1272,9 +1256,8 @@ impl<F: Field> MLEStorage<F> {
                 cfg_iter_mut!(a).zip(b).for_each(|(x, y)| *x += y);
                 a
             }
-            // Element-wise lift of compressed storage, in parallel: a 2^23
-            // column expanded this way sat on one core for most of the
-            // virtual-polynomial build before each big sumcheck.
+            // In parallel: large compressed columns are expanded this way in
+            // the virtual-polynomial build before each big sumcheck.
             _ => cfg_into_iter!(0..self.inner_len())
                 .map(|i| self.lift(i))
                 .collect(),
@@ -1284,17 +1267,16 @@ impl<F: Field> MLEStorage<F> {
 
 /// A multilinear extension with (a) an optional virtual `nv`: when set, the
 /// hypercube has size `2^nv` and the inner evaluation vector is (virtually)
-/// repeated cyclically to fit — more variables without more memory; and (b) an
-/// [`MLEStorage`] backing that keeps small-scalar data compressed until
-/// field-form evaluations are needed. Supports everything
-/// `DenseMultilinearExtension` supports.
+/// repeated cyclically to fit, giving more variables without more memory; and
+/// (b) an [`MLEStorage`] backing that keeps small-scalar data compressed until
+/// field-form evaluations are needed.
 #[derive(Clone, PartialEq, Eq, Hash, Default, CanonicalSerialize, CanonicalDeserialize)]
 pub struct MLE<F: Field> {
     storage: MLEStorage<F>,
     nv: Option<usize>,
 }
 
-/// Repeat `inner` cyclically out to `outer_len` elements — the materialized
+/// Repeat `inner` cyclically out to `outer_len` elements: the materialized
 /// form of virtual-nv padding, matching `lift(i % inner_len)`.
 fn cyclic_repeat<F: Clone>(inner: Vec<F>, outer_len: usize) -> Vec<F> {
     if inner.len() >= outer_len {
@@ -1320,9 +1302,9 @@ impl<F: Field> MLE<F> {
 
     /// Wrap `source` in a lazy `1/(source - shift)` backing (O(1) heap), to
     /// re-register a LogUp helper after it has been committed. Mirrors
-    /// `source`'s outer `num_vars` including virtual padding — required so
-    /// downstream sumcheck term-nv comparisons match a dense helper — and
-    /// cycles `lift(i)` modulo the source's inner_len, like the source does.
+    /// `source`'s outer `num_vars` including virtual padding, so that
+    /// sumcheck term-nv comparisons match a dense helper, and cycles
+    /// `lift(i)` modulo the source's inner_len, like the source does.
     pub fn from_lazy_inverse_shifted(source: Arc<MLE<F>>, shift: F) -> Self {
         let inner_num_vars = source.inner_num_vars();
         let outer_num_vars = source.num_vars();
@@ -1488,19 +1470,18 @@ impl<F: Field> MLE<F> {
     }
 
     /// Prefix activator: first `active_len` slots are `1`, the rest `0`.
-    /// Built directly as a compact form — O(1) storage, no bit vector.
+    /// O(1) storage, no bit vector.
     pub fn from_prefix_activator(active_len: usize, num_vars: usize) -> Self {
         Self::from_window_activator(0, active_len, num_vars)
     }
 
     /// Window activator: `skip` zeros, `active_len` ones, then zeros up to
     /// `1 << num_vars`. Stored as [`MLEStorage::Constant`] or a 2/3-run
-    /// [`MLEStorage::Rle`] — O(1) memory regardless of `num_vars`. Panics if
+    /// [`MLEStorage::Rle`]: O(1) memory regardless of `num_vars`. Panics if
     /// the window exceeds the domain.
     pub fn from_window_activator(skip: usize, active_len: usize, num_vars: usize) -> Self {
         let len = 1usize << num_vars;
-        // RLE run counts are u32; guard so segment lengths can't silently
-        // truncate on a future large-nv misuse.
+        // RLE run counts are u32: a longer segment would truncate.
         assert!(
             len <= u32::MAX as usize,
             "from_window_activator: 2^num_vars {} exceeds u32::MAX; RLE run counts would truncate",
@@ -1527,7 +1508,6 @@ impl<F: Field> MLE<F> {
                 inner_num_vars: num_vars,
             }
         } else {
-            // Compose a 2- or 3-run RLE from the non-empty segments.
             let mut runs: Vec<(F, u32)> = Vec::with_capacity(3);
             if skip > 0 {
                 runs.push((F::zero(), skip as u32));
@@ -1634,8 +1614,8 @@ impl<F: Field> MLE<F> {
     }
 
     /// Owned `MLE` with `Field` storage: a clone if already `Field`, else a
-    /// materialization. For callers that need `&F` slice access. The at-rest
-    /// tracker copy is unaffected — only the returned copy is promoted.
+    /// materialization. For callers that need `&F` slice access. Only the
+    /// returned copy is promoted; the tracker's copy is unaffected.
     pub fn to_field_owned(&self) -> Self {
         match &self.storage {
             MLEStorage::Field(_) => self.clone(),
@@ -1646,14 +1626,14 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Fold one variable at `p` in place, with zero fresh allocations —
-    /// sumcheck's replacement for per-round `fix_variables(&[p])`. Panics on
+    /// Fold one variable at `p` in place, without allocating: what sumcheck
+    /// calls each round in place of `fix_variables(&[p])`. Panics on
     /// non-`Field` storage (call [`MLE::to_field_owned`] first).
     ///
-    /// Correctness: pass 1 folds disjoint 2-element chunks into their own
-    /// `c[0]` (race-free in parallel); pass 2 serially compacts the even-index
-    /// fold heads into `[0..len/2]`, safe because read index `2i` is strictly
-    /// greater than every previously written index. Folding one *outer*
+    /// Pass 1 folds disjoint 2-element chunks into their own `c[0]`
+    /// (race-free in parallel); pass 2 serially compacts the even-index fold
+    /// heads into `[0..len/2]`, safe because read index `2i` is strictly
+    /// greater than every previously written index. Folding one outer
     /// variable of a virtually padded MLE equals one inner fold plus `nv -= 1`
     /// (`nv` cleared once the outer size no longer exceeds inner storage).
     pub fn fix_one_variable_in_place(&mut self, p: &F) {
@@ -1664,15 +1644,14 @@ impl<F: Field> MLE<F> {
                     debug_assert!(old_len.is_power_of_two());
                     let new_len = old_len / 2;
                     let evals = &mut m.evaluations;
-                    // Pass 1 (parallel over disjoint pairs): fold into c[0].
+                    // Pass 1.
                     cfg_chunks_mut!(evals, 2).for_each(|c| {
                         let lo = c[0];
                         let hi = c[1];
                         let diff = hi - lo;
                         c[0] = if diff.is_zero() { lo } else { lo + diff * p };
                     });
-                    // Pass 2 (serial): pull even-index fold heads into
-                    // `[0..new_len]`; safe because `2·i > i`.
+                    // Pass 2.
                     for i in 1..new_len {
                         evals[i] = evals[2 * i];
                     }
@@ -1701,8 +1680,6 @@ impl<F: Field> MLE<F> {
     where
         F: ark_ff::PrimeField,
     {
-        // Any element that overflows the current kind bumps to the next
-        // looser one (Bit → U8 → U32 → U64 → Field).
         #[derive(Copy, Clone, PartialEq, Eq)]
         enum Kind {
             Bit,
@@ -1785,7 +1762,6 @@ impl<F: Field> MLE<F> {
                 let nv = self.nv;
                 let mut out =
                     Self::from_evaluations_vec_compressed(inner.num_vars, inner.evaluations);
-                // Preserve the outer virtual nv (padding) if present.
                 if let Some(target_nv) = nv
                     && target_nv > out.inner_num_vars()
                 {
@@ -1867,8 +1843,8 @@ impl<F: Field> MLE<F> {
     pub fn evaluations(&self) -> Vec<F> {
         match (self.nv, &self.storage) {
             // Materialize the inner backing once (batch-inverting lazy
-            // storage), then repeat cyclically — element-wise `lift` here
-            // would bypass the lazy fast path and pay per-slot inversions.
+            // storage), then repeat cyclically: element-wise `lift` would pay
+            // an inversion per slot.
             (Some(nv), _) => cyclic_repeat(self.storage.to_evaluations_vec(), 1usize << nv),
             (None, MLEStorage::Field(m)) => m.evaluations.clone(),
             (None, _) => self.storage.to_evaluations_vec(),
@@ -1948,7 +1924,7 @@ impl<F: Field> MLE<F> {
         // Compact variants answer in O(1). Lazy variants conservatively
         // return false: checking would cost the O(2^n) inversions lazy
         // storage exists to avoid, and a wrong `false` only skips an
-        // optimisation — never a soundness error.
+        // optimisation.
         match &self.storage {
             MLEStorage::Constant { .. } => return true,
             MLEStorage::Rle { runs, .. } => return runs.len() == 1,
@@ -1970,8 +1946,7 @@ impl<F: Field> MLE<F> {
     }
 }
 
-/// Iterator yielded by [`MLE::iter`]. Owns nothing but a borrow on the
-/// underlying storage; each `next()` lifts one evaluation to `F`.
+/// Iterator of [`MLE::iter`]; each `next()` lifts one evaluation to `F`.
 pub struct MLEValueIter<'a, F: Field> {
     storage: &'a MLEStorage<F>,
     outer_len: usize,
@@ -2059,10 +2034,9 @@ impl<F: Field> Index<usize> for MLE<F> {
 
     #[inline]
     fn index(&self, _index: usize) -> &Self::Output {
-        // NOTE: legacy accessor; only `Field` storage can hand out `&F`
-        // (materialize-on-demand has no owned `F` to reference). Hot sumcheck
-        // callers are `Field`-backed because the first fold promotes to
-        // Field; compressed variants must use `iter()` / `storage().lift(i)`.
+        // Only `Field` storage can hand out `&F`. Sumcheck callers are
+        // `Field`-backed because the first fold promotes to Field; compressed
+        // variants must use `iter()` / `storage().lift(i)`.
         let index = if self.nv.is_some() {
             _index % (1 << self.storage.inner_num_vars())
         } else {
@@ -2258,7 +2232,6 @@ impl<'a, F: Field> MulAssign<&'a F> for MLE<F> {
 
 impl<F: Field> fmt::Debug for MLE<F> {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), fmt::Error> {
-        // Debug prints via the materialized Field view (pre-refactor format).
         let field = self.storage.to_field();
         match self.nv {
             Some(nv) => write!(f, "real-nv= {}, wrapped-poly= {:?}", nv, field.as_ref())?,
@@ -2347,8 +2320,6 @@ mod tests {
         Fr::from(value)
     }
 
-    // ── is_constant / constant ──────────────────────────────────────
-
     #[test]
     fn constant_creates_zero_var_mle() {
         let c = MLE::constant(fr(42));
@@ -2379,8 +2350,6 @@ mod tests {
         let mle = MLE::new(inner, Some(5));
         assert!(mle.is_constant());
     }
-
-    // ── MLE arithmetic ──────────────────────────────────────────────
 
     #[test]
     fn add_two_mles_same_nv() {
@@ -2426,8 +2395,6 @@ mod tests {
         let sum = &a + &neg_a;
         assert!(sum.evaluations().iter().all(|v| v.is_zero()));
     }
-
-    // ── fix_variables ────────────────────────────────────────────────
 
     #[test]
     fn fix_variables_matches_materialized_path_while_repetition_remains_virtual() {
@@ -2483,12 +2450,9 @@ mod tests {
         assert_eq!(optimized.nv, Some(1));
     }
 
-    // ── fix_one_variable_in_place ───────────────────────────────────
-
     #[test]
     fn fix_one_variable_in_place_matches_fix_variables_single_step() {
-        // Small enough to hit every branch. Verify equivalence for a range of
-        // sizes, both `nv = None` and `nv = Some(_)`.
+        // A range of sizes, with `nv = None` and `nv = Some(_)`.
         for nv_inner in 1usize..=4 {
             let n = 1usize << nv_inner;
             let evals: Vec<Fr> = (0..n).map(|i| fr(i as u64 * 7 + 3)).collect();
@@ -2523,10 +2487,8 @@ mod tests {
 
     #[test]
     fn fix_one_variable_in_place_matches_after_repeated_folds() {
-        // Fold the same MLE 4 times in a row via in-place; compare to the
-        // batched `fix_variables(&[r1, r2, r3, r4])`. This exercises the
-        // Vec::truncate-then-cfg_chunks_mut path across many rounds — the
-        // exact shape sumcheck's round loop generates.
+        // Four in-place folds in a row, as in sumcheck's round loop, against
+        // the batched `fix_variables(&[r1, r2, r3, r4])`.
         let evals: Vec<Fr> = (0..16u64).map(|i| fr(i * 3 + 1)).collect();
         let points = vec![fr(2), fr(5), fr(11), fr(17)];
         let baseline = MLE::from_evaluations_vec(4, evals.clone()).fix_variables(&points);
@@ -2541,8 +2503,8 @@ mod tests {
 
     #[test]
     fn fix_one_variable_in_place_matches_when_virtually_padded() {
-        // Virtual padding: inner nv=2 but outer nv=4. Sumcheck should fold the
-        // outer variable, which we implement as inner fold + nv--.
+        // Inner nv=2, outer nv=4: folding the outer variable is an inner fold
+        // plus nv - 1.
         let mut wrapped = MLE::new(
             DenseMultilinearExtension::from_evaluations_vec(2, vec![fr(1), fr(2), fr(3), fr(4)]),
             Some(4),
@@ -2566,8 +2528,6 @@ mod tests {
         assert_eq!(wrapped.evaluations(), vec![fr(42); 4]);
         assert_eq!(wrapped.nv, Some(2));
     }
-
-    // ── Small-scalar storage ────────────────────────────────────────
 
     #[test]
     fn from_bits_matches_field_evaluations() {
@@ -2663,15 +2623,11 @@ mod tests {
         let field_bytes = field_backing.storage().heap_bytes();
         // 4096 bits = 512 bytes; 4096 * 32 bytes = 131072 bytes → 256× ratio.
         assert_eq!(bit_bytes, 512);
-        // 4096 bytes.
         assert_eq!(byte_bytes, 4096);
-        // 4096 * 32 = 131072.
         assert_eq!(field_bytes, 131072);
         assert!(bit_bytes * 200 < field_bytes);
         assert!(byte_bytes * 20 < field_bytes);
     }
-
-    // ── Constant / Rle redundancy compression ──────────────────────────
 
     #[test]
     fn constant_variant_lifts_uniformly() {
@@ -2702,7 +2658,6 @@ mod tests {
 
     #[test]
     fn rle_constructor_merges_adjacent_same_value_runs() {
-        // Input has three runs that are actually all the same value; must merge.
         let runs = vec![(fr(1), 3u32), (fr(1), 2u32), (fr(1), 3u32)];
         let s = MLEStorage::<Fr>::new_rle(runs, 3).expect("valid Rle");
         match &s {
@@ -2743,7 +2698,7 @@ mod tests {
 
     #[test]
     fn detect_redundancy_finds_the_127_zeros_1_one_pattern() {
-        // The user's motivating example: 127 zeros, 1 one → 2-run Rle.
+        // 127 zeros, 1 one → 2-run Rle.
         let mut bits = vec![0u8; 16];
         bits[15] = 0b1000_0000; // bit 127
         let storage = MLEStorage::<Fr>::Bit {
@@ -2803,9 +2758,8 @@ mod tests {
 
     #[test]
     fn compressed_then_detect_redundancy_collapses_all_zeros() {
-        // `.compressed()` alone lands us at Bit (native-int classifier);
-        // `.detect_redundancy()` then collapses to Constant. The two are
-        // separate so hot registration paths can pay for just the classifier.
+        // `.compressed()` alone gives Bit; `.detect_redundancy()` then
+        // collapses it to Constant.
         let field_zeros = MLE::<Fr>::from_evaluations_vec(4, vec![Fr::zero(); 16]);
         let out = field_zeros.compressed().detect_redundancy();
         assert!(matches!(out.storage(), MLEStorage::Constant { value, .. } if value.is_zero()));
@@ -2820,8 +2774,7 @@ mod tests {
             },
             nv: None,
         };
-        // Should be O(1) — we don't verify timing but we do verify correctness
-        // on a large `inner_num_vars` that would otherwise be an expensive scan.
+        // An `inner_num_vars` for which a scan would be expensive.
         assert!(mle.is_constant());
     }
 
@@ -2846,15 +2799,8 @@ mod tests {
         }
     }
 
-    // ── from_prefix_activator emits compact forms directly ─────────────
-
-    // ── from_bit_backing: preserves caller-declared num_vars ───────────
-
-    /// Regression: for `num_vars < 3` (targets smaller than one byte),
-    /// the resulting MLE must report `num_vars == the caller-declared value`,
-    /// not `log2(bits.len() * 8) = 3`. This was the source of the
-    /// `row-domain segment num_vars 3 != table log_vars 2` failure in the
-    /// arithmetization pass at TPC-H nation test scale (4-row tables).
+    /// For `num_vars < 3` (less than one byte) the MLE must report the
+    /// caller's `num_vars`, not `log2(bits.len() * 8) = 3`.
     #[test]
     fn from_bit_backing_small_num_vars_reports_correct_num_vars() {
         for nv in 0..=2 {
@@ -2871,8 +2817,7 @@ mod tests {
         }
     }
 
-    /// Same, but with non-zero bits — verifies the fallback Field-storage
-    /// path preserves values, not just num_vars.
+    /// The Field fallback for `num_vars < 3` preserves the bit values.
     #[test]
     fn from_bit_backing_small_num_vars_preserves_values() {
         // nv=2, 4 slots: bits [1, 0, 1, 1] → byte 0b0000_1101 = 13
@@ -2886,12 +2831,9 @@ mod tests {
         );
     }
 
-    /// The `num_vars >= 3` path (one or more full bytes) still uses Bit
-    /// storage — the small-nv fallback only kicks in below the byte
-    /// granularity boundary.
+    /// `num_vars >= 3` (one or more full bytes) keeps Bit storage.
     #[test]
     fn from_bit_backing_medium_num_vars_uses_bit_storage() {
-        // nv=3, 8 slots, one byte: still Bit storage.
         let mle = MLE::<Fr>::from_bit_backing(vec![0b0000_1101], 3);
         assert_eq!(mle.num_vars(), 3);
         assert!(
@@ -2947,7 +2889,6 @@ mod tests {
             }
             _ => panic!("expected 2-run Rle"),
         }
-        // Also verify the lifted evaluations match the semantic contract.
         let expected: Vec<Fr> = (0..8)
             .map(|i| if i < 5 { Fr::one() } else { Fr::zero() })
             .collect();
@@ -2956,8 +2897,8 @@ mod tests {
 
     #[test]
     fn from_prefix_activator_heap_bytes_dwarfs_prior_bit_backing() {
-        // A large-nv prefix activator: the compact form is ~72 bytes vs the
-        // prior packed-bit backing which would have been 2^(nv-3) bytes.
+        // The compact form is ~72 bytes; a packed-bit backing is 2^(nv-3)
+        // bytes.
         let nv = 24;
         let active_len = 1_000_000;
         let mle = MLE::<Fr>::from_prefix_activator(active_len, nv);
@@ -2970,8 +2911,6 @@ mod tests {
         // A packed-bit alternative would be (1 << 24) / 8 = 2 MiB.
         assert!(bytes * 20_000 < (1u64 << nv) / 8);
     }
-
-    // ── from_window_activator: [0 x skip, 1 x active, 0 x tail] ─────────
 
     #[test]
     fn from_window_activator_zero_active_is_constant_zero() {
@@ -3059,7 +2998,6 @@ mod tests {
             }
             _ => panic!("expected 3-run Rle"),
         }
-        // Semantic contract: the lifted evaluations exactly match the window.
         let expected: Vec<Fr> = (0..8)
             .map(|i| {
                 if i >= 2 && i < 5 {
@@ -3074,9 +3012,8 @@ mod tests {
 
     #[test]
     fn from_window_activator_large_nv_stays_tiny() {
-        // Char-domain-scale window: nv=24 (16.7M slots), a 1M-slot active
-        // window in the middle. Storage must remain O(runs) — a full
-        // Field `Vec<F>` would be 512 MiB on BN254.
+        // nv=24 (16.7M slots) with a 1M-slot window in the middle: storage
+        // stays O(runs), where a Field `Vec<F>` is 512 MiB on BN254.
         let nv = 24;
         let skip = 100_000;
         let active_len = 1_000_000;
@@ -3088,8 +3025,6 @@ mod tests {
             "window activator storage should be tiny, got {bytes} bytes"
         );
     }
-
-    // ── Sparse variant ────────────────────────────────────────────────
 
     #[test]
     fn sparse_lift_returns_default_and_exception_values() {
@@ -3109,8 +3044,6 @@ mod tests {
 
     #[test]
     fn sparse_constructor_sorts_and_drops_default_valued_entries() {
-        // Callers may hand us an unsorted vector with a redundant entry
-        // (value equals default); the constructor should normalize it.
         let storage = MLEStorage::<Fr>::new_sparse(
             fr(0),
             vec![(5, fr(99)), (2, fr(42)), (4, fr(0))], // (4, 0) is a no-op
@@ -3155,8 +3088,6 @@ mod tests {
 
     #[test]
     fn sparse_matches_field_evaluations() {
-        // Materializing a Sparse MLE must yield the same evals as building
-        // the equivalent dense Field MLE from a Vec<F>.
         let nv = 5;
         let inner_len = 1usize << nv;
         let mut dense = vec![fr(3); inner_len];
@@ -3172,15 +3103,11 @@ mod tests {
 
     #[test]
     fn detect_redundancy_finds_sparse_from_field_storage() {
-        // Field-storage input (values that don't fit in u64 — anything past
-        // the u64 range) should collapse to the F-valued `Sparse` variant.
-        // Same "scattered with dominant mode" shape as the native-typed
-        // variants' tests: ~300 alternating transitions between two values,
-        // enough to blow past RLE_MAX_RUNS = 256.
+        // Field-storage input with ~300 alternating transitions between two
+        // values, past RLE_MAX_RUNS = 256, collapses to the F-valued `Sparse`.
         let nv = 16;
         let inner_len = 1usize << nv;
-        // Pick values that force Field storage (past u64 range) so
-        // `compressed()` doesn't reclassify to a smaller variant.
+        // `b` is past the u64 range, as Field storage needs.
         let a: Fr = fr(7);
         let b: Fr = -fr(1); // MODULUS - 1, a 254-bit scalar
         let mut evals = vec![a; inner_len];
@@ -3211,8 +3138,8 @@ mod tests {
 
     #[test]
     fn detect_redundancy_keeps_dense_when_no_dominant_mode() {
-        // Genuinely dense: every slot different. Sparse detection should
-        // give up (exceptions to mode > threshold) and return self unchanged.
+        // Every slot different: sparse detection gives up and returns self
+        // unchanged.
         let nv = 10;
         let inner_len = 1usize << nv;
         let words: Vec<u32> = (0..inner_len as u32).collect();
@@ -3246,8 +3173,6 @@ mod tests {
         // A dense Field alternative would be 2^20 * 32 = 32 MiB.
         assert!(sparse_bytes * 8_000 < (1u64 << nv) * 32);
     }
-
-    // ── Native-typed sparse variants (SparseU8 / SparseU32 / SparseU64) ────
 
     #[test]
     fn sparse_u8_lift_matches_dense_u8_field_evaluations() {
@@ -3303,11 +3228,7 @@ mod tests {
 
     #[test]
     fn packed_decimal_lift_matches_field() {
-        // Every u128 value's `PackedDecimal` lift must equal the value the
-        // eager `Field` path would have produced from the same u128 via
-        // `F::from(u128)`. Both paths run the same `From<u128>` blanket
-        // impl on `Field`, so the fields end up bit-identical for
-        // unsigned magnitudes.
+        // The `PackedDecimal` lift of a u128 equals `F::from` of it.
         let nv = 3;
         let inner_len = 1usize << nv;
         let values: Vec<u128> = (0..inner_len as u128)
@@ -3365,8 +3286,8 @@ mod tests {
 
     #[test]
     fn detect_redundancy_emits_native_typed_sparse_for_u8_input() {
-        // Same alternating pattern as the F-valued Sparse test, but U8
-        // input — we expect SparseU8 out, not Sparse (F).
+        // Same alternating pattern as the F-valued Sparse test, on U8
+        // input: SparseU8 out, not Sparse (F).
         let nv = 16;
         let inner_len = 1usize << nv;
         let mut bytes: Vec<u8> = vec![7u8; inner_len];
@@ -3425,7 +3346,7 @@ mod tests {
     fn native_typed_sparse_beats_f_valued_sparse_on_heap_bytes() {
         // For a u8 column with 100 exceptions, SparseU8 stores
         // 1 + 100 * (4 + 1) = 501 bytes, vs F-valued Sparse at
-        // 32 + 100 * (4 + 32) = 3632 bytes — 7× tighter.
+        // 32 + 100 * (4 + 32) = 3632 bytes, 7× tighter.
         let nv = 20;
         let sparse_u8 = MLE::<Fr>::from_sparse_u8(
             0u8,
@@ -3447,8 +3368,6 @@ mod tests {
             "SparseU8 should be ≥5× smaller than Sparse(F): u8={u8_bytes}, f={f_bytes}"
         );
     }
-
-    // ── Lazy inverse-shifted helpers ───────────────────────────────────
 
     /// The values a lazy helper has to stand for: `sum_s 1/(s - shift)`
     /// over the outer hypercube of its sources.

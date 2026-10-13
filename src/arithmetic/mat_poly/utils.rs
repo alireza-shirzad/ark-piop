@@ -25,7 +25,6 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
         .sum::<F>()
 }
 
-/// Evaluate eq polynomial.
 pub(crate) fn eq_eval<F: PrimeField>(x: &[F], y: &[F]) -> SnarkResult<F> {
     if x.len() != y.len() {
         return Err(
@@ -53,9 +52,8 @@ pub fn build_eq_x_r<F: PrimeField>(r: &[F]) -> SnarkResult<MLE<F>> {
     for (k, ri) in r.iter().enumerate() {
         let active = 1 << k;
         let one_minus_ri = F::one() - *ri;
-        // split into disjoint halves — no borrow conflict
         let (lo, hi) = buf[..active * 2].split_at_mut(active);
-        hi.copy_from_slice(lo); // copy source
+        hi.copy_from_slice(lo);
         cfg_iter_mut!(lo).for_each(|x| *x *= one_minus_ri); // lower half: x_k = 0
         cfg_iter_mut!(hi).for_each(|x| *x *= *ri); // upper half: x_k = 1
     }

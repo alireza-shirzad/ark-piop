@@ -7,33 +7,12 @@ use crate::{
     types::artifact::{Artifact, SizeBreakdown},
 };
 
-/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump on
-/// wire-format changes so mismatched clients fail fast with
-/// [`SnarkError::Artifact`] instead of silently decoding garbage.
-///
-/// v2: `PCSSubproof.constant_num_vars` carries per-constant `num_vars` so the
-/// verifier mirrors `poly_log_sizes`; v1 hardcoded 0, causing gen_id drift.
-///
-/// v3: `SNARKProof.logup_gkr_subproofs` carries the LogUp-GKR runs. Their
-/// message shapes are part of the format: changing what a
-/// [`LogupGkrProof`] holds per round or per layer is another bump.
-///
-/// v4: a LogUp-GKR run is one flat list of messages: the first layer of
-/// every instance in place of its root, two coefficients per sumcheck round
-/// in place of three evaluations, and each gate where its instance runs out
-/// of variables. The lookups and keyed sums of a batch share its instances,
-/// each under a `gamma` of its own.
-///
-/// v5: `SNARKProof.lookup_messages` names the lookup protocol the proof was
-/// made with and carries the term sums of LogUp.
-///
-/// v6: the multivariate batch opening is over polynomials of mixed sizes,
-/// binds its claims to the transcript before it draws its challenge, and no
-/// longer repeats the claimed evaluations, which the query map holds.
-///
-/// v7: no change of layout. The sums of sumcheck claims are bound to the
-/// transcript before the claims are batched, so the challenges drawn from
-/// there on, and every byte of a proof that depends on them, are others.
+/// One-byte version tag prepended to every serialized [`SNARKProof`]. Bump it
+/// on every change of the wire format, so that mismatched clients fail with
+/// [`SnarkError::Artifact`] instead of decoding garbage. The message shapes
+/// of a [`LogupGkrProof`] are part of the format, and so is what the
+/// transcript binds and when: that changes the bytes of a proof without
+/// changing its layout.
 pub const PROOF_ENCODING_VERSION: u8 = 7;
 use crate::{
     pcs::PCS,
@@ -46,7 +25,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use derivative::Derivative;
-/// The proof of a SNARK for the ZKSQL protocol.
+
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(Clone(bound = ""), Default(bound = ""), Debug(bound = ""))]
 pub struct SNARKProof<B>
@@ -66,7 +45,6 @@ where
     pub lookup_messages: LookupMessages<B::F>,
 }
 
-/// The PCS subproof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative, CanonicalSerialize, CanonicalDeserialize)]
 #[derivative(
     Clone(bound = "PC: PCS<F>"),
@@ -89,8 +67,7 @@ where
     /// Maps each TrackerID to its ConstantID in `unique_constants`.
     pub constant_map: BTreeMap<TrackerID, ConstantID>,
     /// Per-TrackerID `num_vars` for constants; the verifier mirrors these into
-    /// `poly_log_sizes` so both sides compute identical sizes (pre-v2 the
-    /// verifier assumed 0, causing gen_id drift for `num_vars > 0` constants).
+    /// `poly_log_sizes` so both sides compute identical sizes.
     pub constant_num_vars: BTreeMap<TrackerID, u32>,
     pub point_map: PointMap<F, PC>,
     /// One evaluation per unique (commitment, point) pair, avoiding duplicate

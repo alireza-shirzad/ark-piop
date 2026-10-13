@@ -71,11 +71,10 @@ thread_local! {
     static PROTOCOL: Cell<LookupProtocol> = const { Cell::new(LookupProtocol::LogUpGkr) };
 }
 
-/// Runs `test` once under each lookup protocol, for what holds whichever
-/// protocol reduces the relations: every pair `test` sets up is configured
-/// for the protocol of the run, and `test` is told which one that is for
-/// the few things that differ. The protocol is printed, to show in a
-/// failure which run it was.
+/// Runs `test` once under each lookup protocol: every pair `test` sets up
+/// is configured for the protocol of the run, and `test` is told which one
+/// that is for the few things that differ. The protocol is printed, to show
+/// in a failure which run it was.
 fn under_each_protocol(test: impl Fn(LookupProtocol)) {
     for protocol in [LookupProtocol::LogUp, LookupProtocol::LogUpGkr] {
         println!("under {protocol}");
@@ -584,8 +583,6 @@ fn lookup_session(table: &[F], counted: &[Vec<F>], committed: &[Vec<F>]) -> Sess
     Session::new(&columns, &[], &[(f, vec![(0, Some(1))])])
 }
 
-// ─── Cheating provers ────────────────────────────────────────────────────
-
 /// The committed sub column has a value outside the table. The prover runs
 /// the GKR on a column that has not, with the multiplicities to match, so
 /// every GKR check passes and the two sides balance.
@@ -1063,8 +1060,6 @@ fn relations_whose_errors_cancel_over_the_batch_are_rejected() {
     });
 }
 
-// ─── Instances shared by relations ───────────────────────────────────────
-
 /// Two sub columns of 8 rows for each of the tables `0..8` and `100..108`.
 fn two_lookup_subs() -> [Vec<F>; 4] {
     let second = |seed| {
@@ -1315,8 +1310,6 @@ fn batch_sums_are_compared_as_fractions_and_refuse_a_zero_denominator() {
     assert!(check(&[(Left, [5, 6]), (Right, [1, 0])]).is_err());
     assert!(check(&[(Left, [0, 0]), (Right, [0, 0])]).is_err());
 }
-
-// ─── Runs of bounded size ────────────────────────────────────────────────
 
 /// What the run budget counts for an instance: 3 field elements per
 /// fraction when the numerators are 1, 4 otherwise.
@@ -2177,8 +2170,6 @@ fn lookups_and_deferred_keyed_sums_are_reduced_in_runs_under_a_small_budget() {
     }
 }
 
-// ─── Layout of the batch ─────────────────────────────────────────────────
-
 /// `add_mv_lookup_claim` for every sub against one committed table, with
 /// nothing else in the proof. Returns the proof when it is accepted.
 fn lookup_e2e(table: &[F], subs: &[Vec<F>]) -> SnarkResult<SNARKProof<B>> {
@@ -2795,8 +2786,6 @@ fn products_with_a_one_row_factor_take_their_size_from_the_tracker() {
     });
 }
 
-// ─── Honest-prover check ─────────────────────────────────────────────────
-
 /// A column and its multiplicity of different sizes: the verdict of the
 /// protocol, and under `honest-prover` that of the prover's own check, is
 /// the one of the sum taken over the larger of the two with the smaller one
@@ -2851,8 +2840,6 @@ fn honest_check_agrees_with_protocol_on_mixed_col_mult_nv() {
         }
     });
 }
-
-// ─── Parity ──────────────────────────────────────────────────────────────
 
 /// Lookups into three tables, two of them with several sub columns of
 /// mixed sizes, interleaved with ordinary claims and with keyed sums proved
@@ -3188,8 +3175,6 @@ fn both_sides_are_in_step_after_reducing_their_deferred_keyed_sums() {
     });
 }
 
-// ─── Fast paths of the prover ────────────────────────────────────────────
-
 /// The evaluations of `id` with every factor expanded to field elements
 /// first, whatever it is stored as.
 fn expanded_evaluations(tracker: &ProverTracker<B>, id: TrackerID) -> Vec<F> {
@@ -3376,8 +3361,6 @@ fn proof_by_the_fast_paths_is_the_proof_by_the_slow_ones() {
     }
     verifier.verify().unwrap();
 }
-
-// ─── LogUp: the sums and the helpers ─────────────────────────────────────
 
 /// A lookup of three sub columns of different sizes, so that each has a
 /// helper and a sum of its own, sent in this order before the table's.
@@ -4095,8 +4078,6 @@ fn logup_pairs_adjacent_unit_columns_of_one_size() {
     session.verify(&proof).unwrap();
 }
 
-// ─── The proof before the protocol was a choice ──────────────────────────
-
 /// What `prover` proves about [`fast_path_columns`] when its statement
 /// reaches the reduction by every route: a keyed sum proved on the spot,
 /// the lookups of [`fast_path_lookups`], a keyed sum claimed for later, and
@@ -4144,17 +4125,11 @@ fn all_routes_proof(mut prover: ArgProver<B>) -> SNARKProof<B> {
 }
 
 /// The bytes of a LogUp-GKR proof, pinned so that a change to them is a
-/// decision. The protocol being a choice shows in two places and nowhere
+/// decision. The lookup protocol shows in a proof in two places and nowhere
 /// else: proofs end in the protocol's tag, and their transcript opens with
-/// the protocol, which moves every challenge.
-///
-/// A prover whose transcript does not open that way therefore gives,
-/// between the version byte and the tag, the proof of [`all_routes_proof`]
-/// as it would be without the choice: 20694 bytes with this hash. Up to
-/// proof encoding 5 those were the 21214 bytes of the commit before the
-/// choice (b1dc5e2). Encoding 6 changed the batch opening, which no longer
-/// repeats the evaluations it opens, and encoding 7 the transcript, which
-/// holds the sums of sumcheck claims before they are batched.
+/// the protocol, which moves every challenge. The pinned bytes are those
+/// between the version byte and the tag of the proof of
+/// [`all_routes_proof`] by a prover whose transcript does not open that way.
 #[test]
 fn logup_gkr_proof_bytes_are_pinned() {
     const PINNED: &str = "425b3c43791203faac33eadfab65849f6898a1436c216ad4881f23b68aa0d675";
@@ -4230,8 +4205,6 @@ fn lookup_protocol_is_the_byte_0_for_logup_and_1_for_gkr() {
     assert!(decoded(&[2]).is_err());
     assert!(decoded(&[]).is_err());
 }
-
-// ─── Proof plumbing ──────────────────────────────────────────────────────
 
 #[test]
 fn proof_with_a_lookup_carries_its_gkr_subproof_through_a_roundtrip() {
@@ -4323,8 +4296,6 @@ fn stacked_instance_lays_its_entries_out_by_row_then_entry() {
     let other_side_den: Vec<F> = (0..8).map(|j| cols[0][j & 1] - gammas[j >> 2]).collect();
     assert_eq!(rest[1].den, other_side_den);
 }
-
-// ─── Claims of every kind of instance ────────────────────────────────────
 
 /// Weighted columns of one size share a stacked instance: one claim on the
 /// weighted sum of their columns and one on that of their multiplicities.
@@ -4963,8 +4934,6 @@ fn claims_under_a_constant_window_activator_have_one_degree_on_both_sides() {
         }
     });
 }
-
-// ─── A verdict that stays ────────────────────────────────────────────────
 
 /// A false lookup by a prover that is honest about everything else: the GKR
 /// and every input claim are true statements about the committed columns,

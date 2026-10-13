@@ -1,41 +1,12 @@
 //! Measures what lookup claims add to a proof, one configuration per process
-//! (so that peak RSS belongs to that configuration alone).
+//! (so that peak RSS belongs to that configuration alone). Prints one
+//! tab-separated line; `build_proof_ms` and `verify_ms` are minima over the
+//! repetitions.
 //!
 //! Run with:
 //!     cargo run --release --example bench_lookup --features test-utils -- \
-//!         [--header] [--reps N] [--protocol P] \
-//!         <shape> <table_log> <sub_log> <n_subs> <mode>
-//!
-//! Protocols (`--protocol`), for both sides:
-//!   gkr       LogUp-GKR.
-//!   logup     LogUp with committed helpers.
-//! Without the option the protocol is that of a default configuration: the
-//! one `ARK_PIOP_LOOKUP_PROTOCOL` names, and LogUp-GKR when it is not set.
-//! The option decides when both are given.
-//!
-//! Shapes:
-//!   material  the table `0..2^table_log` is committed; every sub is a
-//!             committed column of `2^sub_log` random table values.
-//!   tt        the shape of a downstream range check: the table
-//!             `0..2^table_log` is transparent (an uncommitted polynomial on
-//!             the prover, a closure on the verifier); every sub is the
-//!             virtual product of a committed limb column and a committed
-//!             0/1 activator. Inactive rows of a limb column are zero, and
-//!             `ACT_GROUP` subs (default 16) share one activator, as the
-//!             limbs of the checked columns of one table do.
-//!
-//! Modes:
-//!   lookup    one `add_mv_lookup_claim` per sub.
-//!   control   the same commitments with one ordinary sumcheck claim per
-//!             committed column and no lookup, so `lookup - control` is the
-//!             cost of the lookups themselves.
-//!
-//! Prints one tab-separated line, which ends in the protocol the proofs
-//! were made with; `--header` prints the column names first (alone, when no
-//! configuration is given). `build_proof_ms` and `verify_ms`
-//! are minima over the repetitions; a repetition whose `build_proof` took
-//! 30 s or more is the last one. Input commitments are computed once, outside
-//! the timed region. The verifier checks every proof.
+//!         [--header] [--reps N] [--protocol <logup|gkr>] \
+//!         <material|tt> <table_log> <sub_log> <n_subs> <lookup|control>
 //!
 //! Environment: `SRS_NV` (default 19) and `SRS_DIR` (default
 //! `<cwd>/../artifacts/srs`) select the SRS; `RAYON_NUM_THREADS` the threads.
@@ -66,13 +37,23 @@ const REPEAT_BELOW_MS: f64 = 30_000.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Shape {
+    /// The table `0..2^table_log` is committed; every sub is a committed
+    /// column of `2^sub_log` random table values.
     Material,
+    /// The shape of a downstream range check: the table is transparent (an
+    /// uncommitted polynomial on the prover, a closure on the verifier), and
+    /// every sub is the virtual product of a committed limb column and a
+    /// committed 0/1 activator, shared by `ACT_GROUP` subs (default 16).
     Tt,
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
+    /// One `add_mv_lookup_claim` per sub.
     Lookup,
+    /// The same commitments with one ordinary sumcheck claim per committed
+    /// column and no lookup, so `lookup - control` is the cost of the
+    /// lookups themselves.
     Control,
 }
 

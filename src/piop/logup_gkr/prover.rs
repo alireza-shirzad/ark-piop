@@ -464,7 +464,7 @@ fn reduce_claims<F: PrimeField>(
 /// Proves a batch of instances and returns the proof with the claims the
 /// caller has to discharge (see the module docs).
 ///
-/// The statement is NOT checked: an instance with a zero denominator or a
+/// The statement is not checked: an instance with a zero denominator or a
 /// batch whose roots do not satisfy the caller's relation still yields a
 /// proof, which the verifier side rejects.
 pub(crate) fn prove_batch<F: PrimeField>(
