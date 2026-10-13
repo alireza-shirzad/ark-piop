@@ -81,8 +81,7 @@ fn eq_points(a: &[Fr], b: &[Fr]) -> Fr {
 
 /// The input claims the statement `shape` over `instances` implies at
 /// `point`: what the caller of `verify_batch` compares `inputs` with when it
-/// opens the input layers. A unit-numerator instance has nothing to open on
-/// the numerator side.
+/// opens the input layers.
 fn direct_inputs(
     instances: &[FractionInstance<Fr>],
     shape: &[GkrShape],
@@ -105,8 +104,6 @@ fn direct_inputs(
 fn root_sum(roots: &[[Fr; 2]]) -> Fr {
     roots.iter().map(|[p, q]| *p / q).sum()
 }
-
-// ─── Layout of a proof ───────────────────────────────────────────────────
 
 /// Where each message sits in the proof of a batch, worked out from the
 /// protocol description in the module docs and not by the code under test.
@@ -178,8 +175,6 @@ fn roots_in(shape: &[GkrShape], proof: &LogupGkrProof<Fr>) -> Vec<[Fr; 2]> {
         })
         .collect()
 }
-
-// ─── Reference prover ────────────────────────────────────────────────────
 
 /// Where a cheating reference prover leaves the protocol.
 #[derive(Clone, Copy, Debug)]
@@ -643,8 +638,6 @@ pub(crate) fn naive_prove_batch(
     (proof, claims)
 }
 
-// ─── Honest runs ─────────────────────────────────────────────────────────
-
 #[test]
 fn prove_batch_matches_reference_prover() {
     let mut batches: Vec<Vec<(usize, bool)>> = Vec::new();
@@ -728,7 +721,7 @@ proptest! {
 }
 
 /// Instances of different sizes share one point, and each one's claims are
-/// its input MLEs at the PREFIX of that point.
+/// its input MLEs at the prefix of that point.
 #[test]
 fn mixed_size_claims_are_prefix_evaluations() {
     let sizes = [0, 1, 3, 6];
@@ -883,8 +876,6 @@ fn logup_gkr_proof_roundtrip() {
     }
 }
 
-// ─── Proof size ──────────────────────────────────────────────────────────
-
 /// A proof is `N(N-1)` round coefficients, four values per instance and
 /// layer from the first on, two less where the input numerators are one,
 /// and two for an instance of one fraction. Nothing else is serialized but
@@ -944,8 +935,6 @@ fn proof_length_follows_the_statement() {
     }
 }
 
-// ─── Cheating provers ────────────────────────────────────────────────────
-
 /// How a transcript produced by the reference prover fares.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
@@ -990,14 +979,12 @@ fn outcome(instances: &[FractionInstance<Fr>], shape: &[GkrShape], fault: Fault)
     outcome_of(instances, shape, &proof)
 }
 
-/// What every fault below comes to, by how long the cheater keeps patching,
-/// provided the lie is told at least one layer above the input:
-/// - it stops before the last iteration: the first iteration that gets true
-///   masks while a claim is false fails its LAYER CHECK (the claim left by
-///   the last round against the masks sent);
-/// - it never stops: `verify_batch` accepts, since each layer check was made
-///   to pass, and the lie ends in an input claim. Only the CALLER'S OPENING
-///   of the input layers catches that.
+/// What every fault below comes to, provided the lie is told at least one
+/// layer above the input. A cheater that stops patching before the last
+/// iteration fails the layer check (the claim left by the last round against
+/// the masks sent) of the first iteration that gets true masks while a claim
+/// is false. One that never stops is accepted by `verify_batch` with a false
+/// input claim, which only the caller's opening of the input layers catches.
 fn expected_outcome(patch_until: usize, n_max: usize) -> Outcome {
     if patch_until < n_max {
         Outcome::Rejected
@@ -1033,12 +1020,9 @@ fn cheating_prover_is_rejected_at_root() {
     assert_eq!(outcome(&instances, &shape, identity), Outcome::Accepted);
 
     // An equal fraction, and two roots swapped: neither changes the sum of
-    // the roots, so the caller's relation on the roots cannot see them. A
-    // root is only ever what a first layer gives, so the lie is in a first
-    // layer, and it becomes a false claim when `mu` folds that layer in the
-    // iteration the instance joins in (0 for the size-3 instances, 1 for
-    // the size-2 ones). The layer check of the next iteration, or of the
-    // first later one the cheater does not patch, rejects.
+    // the roots, so the caller's relation on the roots cannot see them. The
+    // lie is in a first layer and becomes a false claim when `mu` folds that
+    // layer; the first later layer check that is not patched rejects.
     let mut deviations: Vec<Deviation> = (0..4)
         .map(|instance| Deviation::ScaleRoot {
             instance,
@@ -1089,7 +1073,7 @@ fn cheating_prover_is_rejected_at_root() {
         }
     }
 
-    // A zero-variable instance has no layer: its root IS its input claim, so
+    // A zero-variable instance has no layer: its root is its input claim, so
     // `verify_batch` has nothing to check and the caller's opening is the
     // only defence.
     let fault = Fault {
@@ -1140,13 +1124,12 @@ fn forged_first_layer_with_the_true_root_is_caught_below_it() {
             assert_eq!(roots_in(&shape, &proof), honest_claims.roots);
 
             let expected = if n == 1 {
-                // The first layer is the input layer. No layer check is
-                // left to fail: `verify_batch` ACCEPTS whatever the cheater
-                // does next, and the forged values are the instance's input
-                // claim, which the CALLER'S OPENING refutes.
+                // The first layer is the input layer and no layer check is
+                // left to fail: `verify_batch` accepts, and the forged
+                // values are the input claim the caller's opening refutes.
                 Outcome::FalseInputs
             } else {
-                // The LAYER CHECK of the iteration after the instance
+                // The layer check of the iteration after the instance
                 // joined fails, or of the first later one that is not
                 // patched; patched to the end, the lie is an input claim.
                 expected_outcome(patch_until, n_max)
@@ -1183,13 +1166,11 @@ fn cheating_prover_is_rejected_at_round_poly() {
                 Outcome::Accepted
             );
 
-            // Whatever two coefficients are sent, the round polynomial the
-            // verifier builds from them sums to its claim: the constant
-            // coefficient is derived for that. But its value at the
-            // challenge is not the true partial sum. The remaining rounds
-            // cannot repair that, so the LAYER CHECK at the end of the same
-            // iteration fails; a cheater that patches a mask there is
-            // caught one iteration later, and so on.
+            // The verifier derives the constant coefficient, so the round
+            // polynomial sums to its claim whatever two coefficients are
+            // sent, but its value at the challenge is not the true partial
+            // sum. The layer check of the same iteration fails, or of the
+            // first later one that is not patched.
             for delta in [[7, 0], [0, 7], [3, 5]] {
                 for patch_until in 0..=n_max {
                     let fault = fault(delta, patch_until);
@@ -1219,7 +1200,8 @@ fn cheating_prover_is_rejected_at_mask() {
     let shape = shape_of(&instances);
     let n_max = 4;
 
-    // Every iteration but the last (see the next test for that one).
+    // Every iteration but the last, which
+    // `cheating_prover_is_rejected_at_final_mask` covers.
     for iteration in 0..n_max - 1 {
         for (instance, s) in shape.iter().enumerate() {
             if s.n_vars + iteration < n_max {
@@ -1239,11 +1221,9 @@ fn cheating_prover_is_rejected_at_mask() {
             );
 
             // The altered mask has the same gate value, so the layer check
-            // of its own iteration passes: nothing is wrong yet from the
-            // verifier's side. But the mask is absorbed before `mu`, so the
-            // claims folded from it are false, and the LAYER CHECK of the
-            // NEXT iteration fails (or of the first one the cheater stops
-            // patching in).
+            // of its own iteration passes. The mask is absorbed before `mu`,
+            // so the claims folded from it are false, and the layer check
+            // of the next iteration that is not patched fails.
             for patch_until in 0..=n_max {
                 assert_eq!(
                     outcome(&instances, &shape, fault(9, patch_until)),
@@ -1255,12 +1235,11 @@ fn cheating_prover_is_rejected_at_mask() {
     }
 }
 
-/// An instance smaller than the largest runs out of variables before the
-/// iteration's sumcheck ends and sends its mask at that point. From then on
-/// the verifier subtracts the mask's gate value, doubled per variable still
-/// summed over, from its claim. A mask that is not what the tables fold to
-/// therefore bends every later round of the iteration, although the cheater
-/// goes on sending the round messages of the true tables.
+/// An instance smaller than the largest sends its mask before the
+/// iteration's sumcheck ends, and the verifier takes the mask's gate value
+/// off its claim in every later round. A mask that is not what the tables
+/// fold to therefore bends those rounds, although the cheater goes on
+/// sending the round messages of the true tables.
 #[test]
 fn cheating_prover_is_rejected_at_early_mask() {
     let batch = [(4, false), (4, true), (3, true), (3, false), (2, false)];
@@ -1299,10 +1278,9 @@ fn cheating_prover_is_rejected_at_early_mask() {
             }
 
             // Not patched in its own iteration, the mask fails that
-            // iteration's LAYER CHECK: the masks sent no longer come to
-            // the claim the rounds arrive at. Patched there, by a mask of
-            // a largest instance sent after the last round, both masks
-            // fold into false claims and the next iteration's check fails;
+            // iteration's layer check. Patched there, by a mask of a
+            // largest instance sent after the last round, both masks fold
+            // into false claims and the next iteration's check fails;
             // patched to the end, the lie is an input claim.
             for patch_until in 0..=n_max {
                 let fault = fault(9, patch_until);
@@ -1329,10 +1307,9 @@ fn cheating_prover_is_rejected_at_early_mask() {
 /// A false round message can be made up for inside its iteration by an
 /// instance that runs out of variables after it. The gate value of that
 /// instance's mask is a constant of every later round, so the cheater picks
-/// the one under which the false claim is where the true messages go on
-/// from, and the iteration's layer check passes with every other mask true.
-/// What it has to give for that is the mask itself, which is absorbed
-/// before the next challenge and is not what the tables fold to.
+/// the one under which the iteration's layer check passes with every other
+/// mask true. The mask itself is absorbed before the next challenge and is
+/// not what the tables fold to.
 #[test]
 fn cheating_prover_making_up_for_a_round_by_an_early_mask_is_rejected() {
     let batch = [(4, false), (4, true), (3, true), (3, false), (2, false)];
@@ -1399,13 +1376,11 @@ fn cheating_prover_making_up_for_a_round_by_an_early_mask_is_rejected() {
                             "{fault:?}"
                         );
                     } else if iteration + 1 == n_max {
-                        // The reference prover has checked that the masks
-                        // of this iteration come to its claim. It is the
-                        // last one and the mask is of the input layer:
-                        // `verify_batch` ACCEPTS without any mask patched
-                        // after the last round, and the false claim is the
-                        // one on the inputs of that instance, left to the
-                        // CALLER'S OPENING.
+                        // The last iteration, and the mask is of the input
+                        // layer: `verify_batch` accepts without any mask
+                        // patched after the last round, and the false claim
+                        // on the inputs of that instance is left to the
+                        // caller's opening.
                         let claims = verify_batch(&shape, &proof, &mut transcript()).unwrap();
                         let truth = direct_inputs(&instances, &shape, &claims.point);
                         for (i, (claim, truth)) in claims.inputs.iter().zip(&truth).enumerate() {
@@ -1413,7 +1388,7 @@ fn cheating_prover_making_up_for_a_round_by_an_early_mask_is_rejected() {
                         }
                     } else {
                         // The claim folded from that mask is false, and the
-                        // LAYER CHECK of the next iteration fails, or of the
+                        // layer check of the next iteration fails, or of the
                         // first later one that is not patched.
                         assert_eq!(
                             outcome_of(&instances, &shape, &proof),
@@ -1444,9 +1419,8 @@ fn cheating_prover_is_rejected_at_final_mask() {
 
     // The mask each instance sends on its input layer: after the last round
     // for the two largest, after the first round for the third, and as its
-    // first layer for the smallest. Both the four-value mask of a general
-    // instance and the two-value mask of a unit-numerator one can be moved
-    // without changing their value.
+    // first layer for the smallest. The four-value mask of a general
+    // instance and the two-value mask of a unit-numerator one are both moved.
     for instance in 0..instances.len() {
         let fault = Fault {
             deviation: Deviation::Mask {
@@ -1471,10 +1445,9 @@ fn cheating_prover_is_rejected_at_final_mask() {
         }
         assert_eq!(roots_in(&shape, &proof), honest_claims.roots);
 
-        // There is no later layer check to fail: `verify_batch` ACCEPTS, and
-        // the input claim of that instance is false. This is the case that
-        // rests entirely on the CALLER'S OPENING of the input layers at
-        // `point[..n_i]`.
+        // There is no later layer check to fail: `verify_batch` accepts with
+        // a false input claim for that instance, which rests entirely on
+        // the caller's opening of the input layers at `point[..n_i]`.
         let claims = verify_batch(&shape, &proof, &mut transcript()).unwrap();
         let truth = direct_inputs(&instances, &shape, &claims.point);
         for (i, (claim, truth)) in claims.inputs.iter().zip(&truth).enumerate() {
@@ -1497,8 +1470,8 @@ fn values_instance_proved_but_shape_says_one_is_rejected() {
         shape[instance].numerator_is_one = true;
 
         // The honest proof of the true statement has a four-value input
-        // mask where the statement allows two: rejected by the LENGTH
-        // CHECK, before anything is absorbed. The converse likewise.
+        // mask where the statement allows two: rejected by the length
+        // check, before anything is absorbed. The converse likewise.
         let (proof, _) = prove_batch(instances.clone(), &mut transcript()).unwrap();
         assert_eq!(outcome_of(&instances, &shape, &proof), Outcome::Rejected);
         let mut converse = shape_of(&instances);
@@ -1507,7 +1480,7 @@ fn values_instance_proved_but_shape_says_one_is_rejected() {
 
         // A cheater that formats its proof for the statement instead: the
         // tree was built on the real numerators, so with p0 = p1 = 1 filled
-        // in by the verifier the LAYER CHECK of the last iteration fails.
+        // in by the verifier the layer check of the last iteration fails.
         // Patching that check turns the lie into a false input claim.
         for patch_until in 0..=n_max {
             let fault = Fault {
@@ -1540,7 +1513,7 @@ fn one_instance_nv0_root_numerator_must_be_one() {
 
     // A zero-variable instance goes through no layer, so the verifier never
     // fills in its numerator: the root the prover sends is the claim. The
-    // POST-CONDITION on unit numerators is the only thing between a forged
+    // post-condition on unit numerators is the only thing between a forged
     // root numerator and the caller's relation on the roots.
     for others in [vec![], vec![(3, false), (2, true)]] {
         let fault = Fault {
@@ -1598,7 +1571,7 @@ fn one_instance_nv0_root_numerator_must_be_one_at_every_position() {
 fn zero_denominator_root_is_rejected() {
     // With a zero denominator the root is 0/0 whatever the other fractions
     // are, so the root says nothing about the sum. The honest prover does
-    // not refuse such a statement; the verifier's ROOT DENOMINATOR CHECK
+    // not refuse such a statement; the verifier's root denominator check
     // does, on the root it works out from the first layer.
     for (batch, instance, index) in [
         (vec![(3, false)], 0, 5),
@@ -1643,8 +1616,6 @@ fn zero_denominator_root_is_refused_with_the_transcript_untouched() {
         assert!(tr.get_and_append_challenge(b"probe").is_err(), "{batch:?}");
     }
 }
-
-// ─── Malformed proofs ────────────────────────────────────────────────────
 
 #[test]
 fn malformed_proof_returns_error_not_panic() {
@@ -1752,8 +1723,6 @@ fn proof_length_is_validated_before_the_transcript_is_touched() {
     }
 }
 
-// ─── Self-consistent malformed proofs ────────────────────────────────────
-
 /// How a simulated transcript departs from the format the statement dictates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Malformation {
@@ -1777,13 +1746,11 @@ enum Malformation {
 /// A prover without a witness: every message is random except one mask value
 /// per iteration, which is solved so that the layer check passes.
 /// `verify_batch` opens nothing, so it accepts such a transcript; only the
-/// caller's openings would not. That makes it the right probe for the length
-/// check: an honest proof edited after the fact derails every later
-/// challenge and is rejected by the layer check whatever the length check
-/// does, whereas here the surplus or missing values are absorbed like any
-/// other by the prover that sends them, and where they come last nothing
-/// but the length check itself can reject. It also reaches sizes no honest
-/// prover can.
+/// caller's openings would not. That makes it the probe for the length
+/// check: an honest proof edited after the fact fails a layer check whatever
+/// its length, whereas here the surplus or missing values are absorbed like
+/// any other, and where they come last only the length check can reject. It
+/// also reaches sizes no honest prover can.
 fn simulate_batch(shape: &[GkrShape], seed: u64, malformation: Malformation) -> LogupGkrProof<Fr> {
     let mut rng = StdRng::seed_from_u64(seed);
     let mut tr = transcript();
@@ -2093,17 +2060,14 @@ proptest! {
     }
 }
 
-// ─── Timing ──────────────────────────────────────────────────────────────
-
 /// Prints prover and verifier seconds for 4 unit-numerator instances and
 /// one general instance of 2^18 fractions each. Run with
 /// `cargo test --features test-utils logup_gkr_timing -- --ignored --nocapture`
 /// (the test profile is optimised), under `RAYON_NUM_THREADS` as needed.
 ///
 /// The test profile keeps debug assertions, and `sum_of_products` in ark-ff
-/// has one that recomputes every product: the prover then runs about 1.4
-/// times slower than in a release build. For release figures add
-/// `CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false` and
+/// has one that recomputes every product, which slows the prover down. For
+/// release figures add `CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=false` and
 /// `CARGO_PROFILE_TEST_OVERFLOW_CHECKS=false` to the environment.
 #[test]
 #[ignore = "timing only, asserts nothing about time"]

@@ -30,9 +30,6 @@ where
         }
         let poly = poly.unwrap(); // Invariant: contains only material PolyIDs
 
-        // Optimize away linear combinations of committed polynomials by
-        // materializing them into fresh MLEs (no new commitments). Identical
-        // linear combos are deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
         let (poly_terms, mut optimized_terms) = self.optimize_linear_terms(poly, nv);
         if poly_terms.is_empty() && optimized_terms.is_empty() {
             // The zero polynomial still gets a sumcheck of `nv` rounds and
@@ -152,9 +149,10 @@ where
             .collect()
     }
 
-    /// Pulls out linear terms (single committed MLEs and constants) from a virtual
-    /// polynomial and materializes them into fresh MLEs. Identical linear combos
-    /// are deduplicated so (a+b)*d + (a+b)*e becomes c*d + c*e.
+    /// Pulls out linear terms (single committed MLEs and constants) from a
+    /// virtual polynomial and materializes them into fresh MLEs, without new
+    /// commitments. Identical linear combos are deduplicated, so
+    /// `(a+b)*d + (a+b)*e` becomes `c*d + c*e`.
     ///
     /// This only changes how the prover writes the polynomial down: a folded
     /// product has as many factors as each of the terms it replaces, so the
@@ -185,7 +183,6 @@ where
         let mut linear_cache: Vec<(Vec<(TrackerID, B::F)>, Arc<MLE<B::F>>)> = Vec::new();
 
         for (context, signature, entries) in self.linear_groups(poly, nv) {
-            // Reuse or build the linear combo MLE.
             let linear_mle =
                 if let Some((_, mle)) = linear_cache.iter().find(|(sig, _)| *sig == signature) {
                     mle.clone()
@@ -200,12 +197,10 @@ where
                     mle
                 };
 
-            // Mark terms as used.
             for idx in entries {
                 term_used[idx] = true;
             }
 
-            // Build product: linear_mle * context_mles
             let mut mles: Vec<Arc<MLE<B::F>>> = Vec::with_capacity(1 + context.len());
             mles.push(linear_mle);
             for id in &context {
@@ -214,7 +209,6 @@ where
             optimized_terms.push((B::F::one(), mles));
         }
 
-        // Add remaining unused terms as-is.
         for (idx, (coeff, prod)) in poly.iter().enumerate() {
             if !term_used[idx] {
                 other_terms.push((*coeff, prod.clone()));
@@ -245,15 +239,13 @@ where
         for poly in self.state.mv_pcs_substate.materialized_polys.values_mut() {
             let old_nv = poly.num_vars();
             if old_nv < target_nv {
-                // Zero-cost path: bump the virtual nv on the existing
-                // storage (cyclic repetition happens on access), never
-                // materializing compressed polys to a full Vec<F>.
-                //
-                // `Arc::make_mut`, not `get_mut`: lazy inverse backings
-                // hold extra Arc refs to their source, on which
-                // `get_mut` would panic. When shared, the lazy backing keeps
-                // a pre-bump snapshot — fine, since lazy `lift(i)` cycles
-                // modulo inner_len and produces the same values.
+                // Bump the virtual nv on the existing storage: repetition
+                // happens on access, so a compressed poly is never expanded
+                // to a full Vec<F>. `Arc::make_mut`, not `get_mut`: lazy
+                // inverse backings hold extra Arc refs to their source, on
+                // which `get_mut` would panic. A shared lazy backing keeps a
+                // pre-bump snapshot, which is fine: lazy `lift(i)` cycles
+                // modulo inner_len and gives the same values.
                 let inner_poly = Arc::make_mut(poly);
                 inner_poly.set_virtual_nv(target_nv);
             }

@@ -245,24 +245,21 @@ fn standalone_operand<F>(term: Either<TrackerID, F>, nv: usize) -> Operand<F> {
 /// own. The others are grouped by side, column size and multiplicity size,
 /// across all relations, and each group is cut into stacks of `2^s` entries,
 /// one instance per stack. A stack takes the largest power of two of the
-/// entries still to place that keeps it within `budget`, so that no run has
-/// to hold more than that for it; an entry above the budget by itself is a
-/// stack of one. A group of `S` entries that fits whole therefore costs
-/// `popcount(S)` instances instead of `S`, however many relations they
-/// come from, and one that does not is as many stacks of the tallest kind
-/// as it fills, then the rest by its binary digits.
+/// entries still to place that keeps it within `budget`; an entry above the
+/// budget by itself is a stack of one. A group of `S` entries that fits
+/// whole therefore costs `popcount(S)` instances, however many relations
+/// they come from.
 ///
 /// The entries are walked relation by relation, the `f` side of each before
 /// its `g` side. A group holds its entries in that order, and the instances
 /// come out in that order too, a group at the position of its first entry.
 ///
 /// The size of a polynomial the proof commits to is the prover's choice,
-/// that of a lookup's multiplicities above all, and with it which stack an
-/// entry is in. That is harmless: the size is fixed with the commitment,
-/// before any `gamma`; multiplicities of any size state the same lookup,
-/// repeated along their table or the table along them; and an entry keeps
-/// the `gamma` of the relation the statement puts it in, wherever it is
-/// stacked.
+/// and with it which stack an entry is in. That is harmless: the size is
+/// fixed with the commitment, before any `gamma`; multiplicities of any
+/// size state the same lookup, repeated along their table or the table
+/// along them; and an entry keeps the `gamma` of its relation wherever it
+/// is stacked.
 pub(super) fn plan_instances<T: TrackerCore>(
     tracker: &T,
     relations: &[KeyedSumRelation<T::F>],
@@ -387,20 +384,18 @@ fn draw_gammas<T: TrackerCore>(
 
 /// Splits a batch into GKR runs of at most `budget` each, so that the
 /// prover never holds more than one run's layers. Instances are taken in
-/// order and each joins the first run that still has room for it; only when
-/// there is none does it open a run, so no instance is proved alone that a
-/// run before it could have taken. An instance above the budget fits in no
-/// run and leaves no room in its own: it is a run of its own. With the
-/// plan cut for the same budget, that is an entry too large by itself.
+/// order and each joins the first run that still has room for it, or opens
+/// a run when there is none. An instance above the budget is a run of its
+/// own; with the plan cut for the same budget, that is an entry too large
+/// by itself.
 ///
 /// The runs depend on the plan and the shared configuration only, so both
-/// sides arrive at the same ones. Under two different budgets that give one
-/// plan, the first run that differs has other shapes on the two sides,
-/// which the GKR verifier rejects: where its two lists part, one side has
-/// an instance the other had no room for, and whatever that side has there
-/// instead is smaller. Under two that give different plans, one side's
-/// plan is the other's with some stacks cut further: it has more instances,
-/// so the runs do not have the same shapes throughout either.
+/// sides arrive at the same ones. Under two budgets that give one plan and
+/// different runs, the first run that differs has other shapes on the two
+/// sides, which the GKR verifier rejects: one side has an instance the
+/// other had no room for, and something smaller in its place. Under two
+/// that give different plans, one plan is the other with some stacks cut
+/// further and has more instances, so the shapes differ as well.
 fn gkr_runs<F>(plan: &[InstancePlan<F>], budget: usize) -> Vec<Vec<usize>> {
     let budget = budget as u128;
     let mut runs: Vec<(u128, Vec<usize>)> = Vec::new();

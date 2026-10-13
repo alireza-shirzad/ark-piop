@@ -3,9 +3,9 @@ use ark_ff::Field;
 use crate::arithmetic::mat_poly::mle::{MLE, MLEStorage};
 
 /// BLAKE3 digest of an MLE's raw storage bytes (no field materialization).
-/// Intentionally storage-aware: equal lifted evaluations with different
-/// backings hash differently — required for commitment-cache soundness, since
-/// different storage variants also produce different MSMs.
+/// Equal lifted evaluations with different backings hash differently. The
+/// commitment cache needs that for soundness, since different storage
+/// variants also produce different MSMs.
 pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     // Per-variant discriminant tag: rules out cross-variant collisions even
@@ -145,8 +145,6 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
         MLEStorage::PackedDecimal {
             high, low, scale, ..
         } => {
-            // Hash both u64 vectors as raw LE bytes (same fingerprinting as
-            // U32/U64 above) plus the scale byte.
             packed_decimal_bytes.reserve(high.len() * 8 + low.len() * 8 + 1);
             let hi_bs = unsafe {
                 std::slice::from_raw_parts(

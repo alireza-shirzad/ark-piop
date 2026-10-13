@@ -81,7 +81,7 @@ impl<F: PrimeField> TrackerSumcheckClaim<F> {
     }
 }
 
-/// A claim that a polynomial is zero at a certain point.
+/// A claim that a polynomial is zero on the boolean hypercube.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TrackerZerocheckClaim {
     id: TrackerID,
@@ -96,7 +96,8 @@ impl TrackerZerocheckClaim {
     }
 }
 
-/// A claim that a polynomial is not zero at any point.
+/// A claim that a polynomial is not zero at any point of the boolean
+/// hypercube.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TrackerNoZerocheckClaim {
     id: TrackerID,

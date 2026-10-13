@@ -4,12 +4,9 @@ use super::*;
 
 impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
-        // Fast path: this ID may already be tracked (idempotent transfer).
-        // Callers like `TrackedTableOracle::from_tracked_table` that visit
-        // a subset of prover-committed polys can legitimately ask for an
-        // ID whose commitment has already been registered in a prior visit
-        // (or by an earlier caller in the same verify run). Skip the second
-        // registration and hand back the existing entry.
+        // Idempotent: a caller that visits a subset of the prover's
+        // commitments (`TrackedTableOracle::from_tracked_table`) may ask for
+        // an id that is already registered.
         if let Some(comm) = self
             .state
             .mv_pcs_substate
@@ -20,9 +17,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             return Ok((comm.log_size() as usize, id));
         }
 
-        // Check if this ID refers to a constant polynomial (no commitment needed).
+        // A constant polynomial has no commitment.
         if let Some(&cnst) = self.proof_or_err()?.mv_pcs_subproof.constants.get(&id) {
-            // Wire v2+: constants carry their num_vars in the subproof so the
+            // Constants carry their num_vars in the subproof so that the
             // verifier's poly_log_sizes matches the prover's state.num_vars.
             let num_vars = self
                 .proof_or_err()?
@@ -55,19 +52,16 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
         let nv = comm.log_size();
 
-        // Register under the caller-supplied `id` directly, not `gen_id`:
-        // subset-transfer callers (`from_tracked_table`) visit prover ids in
-        // a non-contiguous order, and the old generate-and-assert scheme
-        // silently corrupted `materialized_comms` in release builds.
+        // Register under the caller's `id`, not `gen_id`: subset-transfer
+        // callers (`from_tracked_table`) visit prover ids in a non-contiguous
+        // order.
         self.register_mv_com_at_id(id, comm.clone(), CommitmentBinding::ProofEmitted)?;
         Ok((nv as usize, id))
     }
 
-    /// Register a materialized multivariate commitment under an explicit
-    /// tracker ID, bypassing `gen_id`. Used by `track_mv_com_by_id` and
-    /// `track_mv_constant_by_id` for subset-transfer callers. Advances the
-    /// tracker's counter to `id + 1` if the counter was behind, so future
-    /// `gen_id()` calls never reuse `id`.
+    /// Register a materialized multivariate commitment under `id`, bypassing
+    /// `gen_id`. Advances the tracker's counter to `id + 1` if it was behind,
+    /// so that later `gen_id()` calls never reuse `id`.
     fn register_mv_com_at_id(
         &mut self,
         id: TrackerID,
@@ -113,8 +107,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         if binding == CommitmentBinding::ProofEmitted {
             // Subset-transfer callers append in a different order than the
             // prover, but drop the verifier before its transcript is ever
-            // consumed; a live verify run must use the ordered path in
-            // `track_mat_mv_com_with_binding`.
+            // consumed; a live verify run has to register in prover order.
             self.state
                 .transcript
                 .append_serializable_element(b"comm", &comm)?;
@@ -132,20 +125,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
-    /// Tracks a constant polynomial from the proof. Creates a constant oracle
-    /// and transcript-binds the value to match the prover's transcript.
-    ///
-    /// `num_vars` is the prover-side `num_vars` for the constant, plumbed
-    /// through the proof so `poly_log_sizes[id]` matches the prover's
-    /// `state.num_vars[id]`. See `PROOF_ENCODING_VERSION` v2 note.
+    /// Tracks a constant polynomial from the proof and binds its value to
+    /// the transcript, as the prover does. `num_vars` is the prover's, taken
+    /// from the proof so that `poly_log_sizes[id]` matches the prover's
+    /// `state.num_vars[id]`.
     fn track_mv_constant_by_id(
         &mut self,
         expected_id: TrackerID,
         cnst: B::F,
         num_vars: usize,
     ) -> SnarkResult<(usize, TrackerID)> {
-        // Same subset-transfer rationale as `register_mv_com_at_id` above;
-        // idempotent so a repeat visit doesn't re-append to the transcript.
+        // Idempotent, as `track_mv_com_by_id` is: a repeat visit must not
+        // append to the transcript again.
         if self
             .state
             .poly_kinds
@@ -173,7 +164,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.poly_is_material.insert(id, true);
         self.state.poly_degrees.insert(id, 0);
 
-        // Transcript-bind the constant to match the prover.
         self.state
             .transcript
             .append_serializable_element(b"cnst", &cnst)?;
@@ -203,10 +193,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             }
         }
         let log_degree = comm.log_size();
-        // NOTE: uv path currently keeps the historical gen_id-and-assert
-        // pattern. If a future caller mirrors the mv-side subset-transfer
-        // pattern (see `register_mv_com_at_id`), refactor this the same
-        // way — no known caller today violates the contiguous-ID order.
+        // Unlike the mv path (see `register_mv_com_at_id`), this one draws
+        // the id from `gen_id` and asserts it is the caller's: no caller
+        // visits uv ids out of contiguous order.
         let new_id: TrackerID = self
             .track_mat_uv_com_with_binding(comm, CommitmentBinding::ProofEmitted)
             .unwrap();
@@ -222,8 +211,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok((log_degree as usize, new_id))
     }
 
-    /// Track a materiazlied multivariate commitment.
-    ///
     /// `binding` mirrors prover-side commitment ownership so the verifier uses
     /// the same transcript and proof-payload semantics.
     pub(crate) fn track_mat_mv_com_with_binding(
@@ -231,7 +218,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         comm: <B::MvPCS as PCS<B::F>>::Commitment,
         binding: CommitmentBinding,
     ) -> SnarkResult<TrackerID> {
-        // Create the new TrackerID
         let id = self.gen_id();
 
         match self.proof.as_ref() {
@@ -298,8 +284,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .materialized_comms
             .insert(id, comm);
         self.state.poly_degrees.insert(id, 1);
-
-        // return the new TrackerID
         Ok(id)
     }
 
@@ -333,13 +317,11 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(id)
     }
 
-    // Track a materiazlied univariate commitment.
     pub fn track_mat_uv_com_with_binding(
         &mut self,
         comm: <B::UvPCS as PCS<B::F>>::Commitment,
         binding: CommitmentBinding,
     ) -> SnarkResult<TrackerID> {
-        // Create the new TrackerID
         let id = self.gen_id();
 
         match self.proof.as_ref() {
@@ -404,12 +386,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .materialized_comms
             .insert(id, comm);
         self.state.poly_degrees.insert(id, 1);
-
-        // return the new TrackerID
         Ok(id)
     }
 
-    /// Track an oracle
     pub fn track_base_oracle(&mut self, oracle: Oracle<B::F>) -> TrackerID {
         let id = self.gen_id();
         let log_size = oracle.log_size();

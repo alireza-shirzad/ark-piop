@@ -1,4 +1,4 @@
-//! Implementing Structured Reference Strings for multilinear polynomial KZG
+//! Structured reference string for multilinear KZG.
 use crate::{
     arithmetic::mat_poly::utils::{eq_eval, eq_extension},
     errors::{SnarkError, SnarkResult},
@@ -18,23 +18,18 @@ use std::collections::LinkedList;
 /// Evaluations over {0,1}^n for G1 or G2
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct Evaluations<C: AffineRepr> {
-    /// The evaluations.
     pub evals: Vec<C>,
 }
 
-/// Universal Parameter
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct PST13UniversalParams<E: Pairing> {
-    /// prover parameters
     pub prover_param: PST13ProverParam<E>,
-    /// h^randomness: h^t1, h^t2, ..., **h^{t_nv}**
+    /// h^randomness: h^t1, h^t2, ..., h^{t_nv}
     pub h_mask: Vec<E::G2Affine>,
 }
 
-/// Prover Parameters
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct PST13ProverParam<E: Pairing> {
-    /// number of variables
     pub num_vars: usize,
     /// `pp_{0}`, `pp_{1}`, ...,pp_{nu_vars} defined
     /// by XZZPD19 where pp_{nv-0}=g and
@@ -46,16 +41,14 @@ pub struct PST13ProverParam<E: Pairing> {
     pub h: E::G2Affine,
 }
 
-/// Verifier Parameters
 #[derive(CanonicalSerialize, CanonicalDeserialize, Clone, Debug)]
 pub struct PST13VerifierParam<E: Pairing> {
-    /// number of variables
     pub num_vars: usize,
     /// generator of G1
     pub g: E::G1Affine,
     /// generator of G2
     pub h: E::G2Affine,
-    /// h^randomness: h^t1, h^t2, ..., **h^{t_nv}**
+    /// h^randomness: h^t1, h^t2, ..., h^{t_nv}
     pub h_mask: Vec<E::G2Affine>,
 }
 
@@ -63,7 +56,6 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
     type ProverParam = PST13ProverParam<E>;
     type VerifierParam = PST13VerifierParam<E>;
 
-    /// Extract the prover parameters from the public parameters.
     fn extract_prover_param(&self, supported_num_vars: usize) -> Self::ProverParam {
         let to_reduce = self.prover_param.num_vars - supported_num_vars;
 
@@ -75,7 +67,6 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
         }
     }
 
-    /// Extract the verifier parameters from the public parameters.
     fn extract_verifier_param(&self, supported_num_vars: usize) -> Self::VerifierParam {
         let to_reduce = self.prover_param.num_vars - supported_num_vars;
         Self::VerifierParam {
@@ -115,8 +106,6 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
         Ok((ck, vk))
     }
 
-    /// Build SRS for testing.
-    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
     fn gen_srs_for_testing<R: Rng>(rng: &mut R, num_vars: usize) -> SnarkResult<Self> {
         if num_vars == 0 {
             panic!("num_vars should be positive");

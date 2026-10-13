@@ -984,7 +984,8 @@ fn verifier_held_commitment_is_not_opened_as_one_of_the_proofs() {
 /// An ordinary claim's sum is over the polynomial's own hypercube. The
 /// proof's claim map holds every sum lifted to the widest commitment, and
 /// a verifier that scaled a claim by whether its sum is the map's entry
-/// took an honest proof of the true sum for one of the lifted sum as well.
+/// would take an honest proof of the true sum for one of the lifted sum as
+/// well.
 #[test]
 fn ordinary_claim_is_not_proved_for_the_sum_lifted_to_the_widest_commitment() {
     for (narrow_nv, wide_nv) in [(3, 5), (2, 8), (4, 4)] {

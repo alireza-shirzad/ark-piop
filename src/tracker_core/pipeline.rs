@@ -93,10 +93,10 @@ pub fn batch_s_check_claims<T: TrackerCore>(
 /// Convert every pending zerocheck claim into a sumcheck claim, batching and
 /// converting each `num_vars` group at its own width. Run before bucketing so
 /// the partitioner sees a homogeneous list with the `eq` factor already in
-/// each degree. Costs one `eq` per distinct nv (single digits in practice).
+/// each degree. Costs one `eq` per distinct nv.
 ///
-/// Groups are walked in ascending nv so both sides sample challenges in the
-/// same order — the transcript is what makes their partitions agree.
+/// Groups are walked in ascending nv so that both sides sample challenges in
+/// the same order: the transcript is what makes their partitions agree.
 pub fn convert_zerochecks_by_nv<T: TrackerCore>(tracker: &mut T) -> SnarkResult<()> {
     let claims = tracker.take_zerocheck_claims();
     if claims.is_empty() {
@@ -156,8 +156,6 @@ pub fn z_check_claim_to_s_check_claim<T: TrackerCore>(
 
     let r = tracker.get_and_append_challenge_vectors(b"0check r", max_nv)?;
     let z_check_aggr_id = tracker.last_zerocheck_id();
-    // eq(x, r) is built via the side-specific seam: materialized MLE on the
-    // prover, succinct oracle on the verifier.
     let eq_x_r_id = tracker.track_eq_x_r(&r, max_nv)?;
     let new_sc_claim_poly = tracker.mul_polys(z_check_aggr_id, eq_x_r_id);
     tracker.push_sumcheck_claim(new_sc_claim_poly, T::F::zero());
@@ -169,4 +167,14 @@ pub fn z_check_claim_to_s_check_claim<T: TrackerCore>(
     );
 
     Ok(())
+}
+
+/// Where `needle` first occurs in `haystack` as a contiguous run. Both
+/// sides' degree reductions look for chunks with it, so that they replace
+/// the same factors.
+pub(crate) fn find_subslice(haystack: &[TrackerID], needle: &[TrackerID]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
 }

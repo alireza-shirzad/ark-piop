@@ -18,9 +18,8 @@
 //!
 //! Instances of different sizes share the iterations. With `N = max n_i`,
 //! instance `i` joins at iteration `N - n_i`, so all of them reach their
-//! input layer in the last one, and instance `i`'s point is always a PREFIX
-//! of the shared point. `GkrClaims::inputs` are therefore the input-layer
-//! MLEs at `point[..n_i]`.
+//! input layer in the last one, and instance `i`'s point is always a prefix
+//! of the shared point: `point[..n_i]`.
 //!
 //! # Protocol
 //!
@@ -106,7 +105,6 @@ const RHO_LABEL: &[u8] = b"logup-gkr rho";
 const MASKS_LABEL: &[u8] = b"logup-gkr masks";
 const MU_LABEL: &[u8] = b"logup-gkr mu";
 
-/// Numerators of an instance.
 #[derive(Clone, Debug)]
 pub(crate) enum Numerator<F> {
     /// Every numerator is exactly 1; nothing is stored or sent for them.

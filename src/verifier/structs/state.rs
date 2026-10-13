@@ -52,8 +52,7 @@ where
     pub logup_sums_consumed: usize,
     /// The polynomials whose sum the verifier has read from the proof's
     /// claim map. Only a claim on one of them, with the sum that was read,
-    /// is in the map's frame; what the map holds for any other polynomial
-    /// is nothing the verifier asked for.
+    /// is in the map's frame.
     pub(crate) claimed_sums_read: BTreeSet<TrackerID>,
     /// Keyed sums claimed for later: reduced with the lookup claims, after
     /// them and in this order.
@@ -83,7 +82,6 @@ where
     pub lookup_claims: Vec<TrackerLookupClaim>,
 }
 
-/// The proof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""), Default(bound = ""), Debug(bound = ""))]
 pub struct ProcessedProof<B>
@@ -120,7 +118,6 @@ where
     }
 }
 
-/// The PCS subproof of a SNARK for the ZKSQL protocol.
 #[derive(Derivative)]
 #[derivative(
     Clone(bound = "PC: PCS<F>"),
@@ -135,9 +132,8 @@ where
     pub opening_proof: PCSOpeningProof<F, PC>,
     pub comitments: BTreeMap<TrackerID, <PC as PCS<F>>::Commitment>,
     pub constants: BTreeMap<TrackerID, F>,
-    /// Per-TrackerID `num_vars` for entries in `constants`, mirrored from the
-    /// proof so `track_mv_constant_by_id` can set `poly_log_sizes[id]` to the
-    /// prover's value instead of a hardcoded `0` — see PROOF_ENCODING_VERSION.
+    /// The `num_vars` of each entry of `constants`, from the proof, so that
+    /// `poly_log_sizes[id]` is the prover's value.
     pub constant_num_vars: BTreeMap<TrackerID, usize>,
     pub point_map: Arc<PointMap<F, PC>>,
     /// TrackerID-keyed query map, reconstructed for oracle evaluation closures.
@@ -146,8 +142,8 @@ where
     pub deduped_query_map: Arc<BTreeMap<CommitmentID, BTreeMap<PointID, F>>>,
     /// TrackerID → CommitmentID mapping for PCS verification lookups.
     pub comitment_map: BTreeMap<TrackerID, CommitmentID>,
-    /// CommitmentID → Commitment map for PCS verification (includes only
-    /// proof-owned commitments — one per unique CommitmentID).
+    /// CommitmentID → Commitment map for PCS verification: proof-owned
+    /// commitments only, one per CommitmentID.
     pub unique_comitments: BTreeMap<CommitmentID, <PC as PCS<F>>::Commitment>,
 }
 

@@ -16,24 +16,18 @@ use crate::arithmetic::{errors::ArithErrors, mat_poly::mle::MLE};
 /// TODO: only kept for sumcheck compatibility; merge into our VirtualPoly.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct HPVirtualPolynomial<F: PrimeField> {
-    /// Aux information about the multilinear polynomial
     pub aux_info: VPAuxInfo<F>,
-    /// Product terms: `(coefficient, indices into flattened_ml_extensions)`
     pub products: Vec<(F, Vec<usize>)>,
-    /// The MLEs that product multiplicands refer to
     pub flattened_ml_extensions: Vec<Arc<MLE<F>>>,
     /// Maps each MLE pointer to its index in `flattened_ml_extensions`
     raw_pointers_lookup_table: HashMap<*const MLE<F>, usize>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
-/// Auxiliary information about the multilinear polynomial
 pub(crate) struct VPAuxInfo<F: PrimeField> {
     /// max number of multiplicands in each product
     pub max_degree: usize,
-    /// number of variables of the polynomial
     pub num_variables: usize,
-    /// Associated field
     #[doc(hidden)]
     pub phantom: PhantomData<F>,
 }
@@ -58,7 +52,6 @@ impl<F: PrimeField> Add for &HPVirtualPolynomial<F> {
 
 // TODO: convert this into a trait
 impl<F: PrimeField> HPVirtualPolynomial<F> {
-    /// Creates an empty virtual polynomial with `num_variables`.
     pub(crate) fn new(num_variables: usize) -> Self {
         HPVirtualPolynomial {
             aux_info: VPAuxInfo {
@@ -72,7 +65,6 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
         }
     }
 
-    /// Creates an new virtual polynomial from a MLE and its coefficient.
     pub(crate) fn new_from_mle(mle: &Arc<MLE<F>>, coefficient: F) -> Self {
         let mle_ptr: *const MLE<F> = Arc::as_ptr(mle);
         let mut hm = HashMap::new();
@@ -131,8 +123,7 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
         Ok(())
     }
 
-    /// Evaluate the virtual polynomial at point `point`.
-    /// Returns an error is point.len() does not match `num_variables`.
+    /// Errors if `point.len()` differs from `num_variables`.
     #[allow(dead_code)]
     pub(crate) fn evaluate(&self, point: &[F]) -> Result<F, ArithErrors> {
         if self.aux_info.num_variables != point.len() {

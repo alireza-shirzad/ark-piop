@@ -138,10 +138,9 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         res_id
     }
 
-    /// Adds a scalar to an oracle, returns a new virtual oracle. The scalar
-    /// is a bare-constant term `(scalar, vec![])` (empty product = 1),
-    /// matching the prover's `add_scalar` so both sides build structurally
-    /// identical virtual polys. Degree is unchanged.
+    /// The scalar becomes a bare-constant term `(scalar, vec![])` (empty
+    /// product = 1), as in the prover's `add_scalar`, so that both sides
+    /// build structurally identical virtual polys.
     pub fn add_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
         let o1_terms = self.state.virtual_polys.get(&o1_id).unwrap().clone();
         let o1_degree = self.state.poly_degrees.get(&o1_id).copied().unwrap_or(0);
@@ -151,7 +150,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         let mut res_terms = VirtualOracle::new();
         res_terms.extend(o1_terms);
         if !scalar.is_zero() {
-            // Bare constant term: empty factor list, coefficient is the scalar.
             res_terms.push((scalar, Vec::new()));
         }
         let res_id = self.gen_id();
@@ -161,10 +159,6 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.poly_is_material.insert(res_id, false);
         self.state.poly_degrees.insert(res_id, o1_degree);
         res_id
-    }
-
-    pub fn sub_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
-        self.add_scalar(o1_id, -scalar)
     }
 
     pub fn mul_scalar(&mut self, o1_id: TrackerID, scalar: B::F) -> TrackerID {
@@ -183,11 +177,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.poly_kinds.insert(res_id, o1_kind);
         self.state.poly_is_material.insert(res_id, false);
         self.state.poly_degrees.insert(res_id, o1_degree);
-        // Return the new TrackerID
         res_id
     }
 
-    /// Return the max multiplicative degree of the oracle rooted at `id`.
+    /// The max multiplicative degree of the oracle rooted at `id`.
     pub fn virt_poly_degree(&self, id: TrackerID) -> usize {
         self.state.poly_degrees.get(&id).copied().unwrap_or(0)
     }

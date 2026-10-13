@@ -1,4 +1,4 @@
-//! Soundness tests — the verifier must reject malformed or wrong proofs.
+//! Soundness tests: the verifier must reject malformed or wrong proofs.
 #![cfg(feature = "test-utils")]
 
 use ark_ff::Zero;
@@ -21,7 +21,6 @@ type F = <B as SnarkBackend>::F;
 #[test]
 fn verify_without_proof_returns_proof_not_received() {
     let (_, verifier) = test_prelude::<B>().unwrap();
-    // Note: the public `verify(&self)` clones the verifier internally.
     let err = verifier.verify().expect_err("must fail without proof");
     match err {
         SnarkError::VerifierError(VerifierError::ProofNotReceived) => {}
@@ -29,7 +28,7 @@ fn verify_without_proof_returns_proof_not_received() {
     }
 }
 
-/// Submitting a sumcheck with a *wrong* claimed sum must fail verification.
+/// Submitting a sumcheck with a wrong claimed sum must fail verification.
 #[test]
 fn wrong_sumcheck_claim_is_rejected() {
     let (mut prover, mut verifier) = test_prelude::<B>().unwrap();
@@ -42,8 +41,7 @@ fn wrong_sumcheck_claim_is_rejected() {
     let tracked = prover.track_and_commit_mat_mv_poly(&poly).unwrap();
     let correct_sum: F = evals.iter().copied().fold(F::zero(), |a, b| a + b);
     // The prover must submit the true sum, otherwise build_proof rejects
-    // under `honest-prover`.  Build the proof honestly, then feed the
-    // verifier a different claimed sum.
+    // under `honest-prover`. The verifier is fed a different claimed sum.
     prover
         .add_mv_sumcheck_claim(tracked.id(), correct_sum)
         .unwrap();
@@ -51,7 +49,6 @@ fn wrong_sumcheck_claim_is_rejected() {
 
     verifier.set_proof(proof);
     verifier.track_mv_com_by_id(tracked.id()).unwrap();
-    // Submit a WRONG claim to the verifier (off by one).
     let wrong_sum = correct_sum + F::from(1u64);
     verifier.add_mv_sumcheck_claim(tracked.id(), wrong_sum);
 
@@ -70,14 +67,11 @@ fn nonzero_polynomial_rejected_as_zerocheck() {
 
     let nv = 4usize;
     let size = 1usize << nv;
-    // A non-zero polynomial
     let evals: Vec<F> = (0..size).map(|i| F::from(i as u64 + 1)).collect();
     let poly = MLE::from_evaluations_vec(nv, evals);
     let tracked = prover.track_and_commit_mat_mv_poly(&poly).unwrap();
 
-    // Under honest-prover, add_mv_zerocheck_claim would reject the nonzero
-    // polynomial. Skip this test under that feature since the failure is
-    // caught earlier (at claim time).
+    // Under `honest-prover` the claim is refused when it is added.
     let result = prover.add_mv_zerocheck_claim(tracked.id());
     if cfg!(feature = "honest-prover") {
         assert!(
@@ -121,7 +115,6 @@ fn proof_envelope_version_roundtrip() {
     );
 
     let decoded: SNARKProof<B> = SNARKProof::<B>::from_bytes(&bytes).unwrap();
-    // Re-encode and check stability.
     assert_eq!(decoded.to_bytes().unwrap(), bytes);
 }
 

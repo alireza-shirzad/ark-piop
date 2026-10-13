@@ -16,18 +16,16 @@ mod prover;
 mod tests;
 mod verifier;
 #[derive(Clone, Debug, Default, Copy, PartialEq, Eq)]
-/// The SumCheck PolyIOP over prime field `F`.
 pub struct SumCheck<F: PrimeField> {
     #[doc(hidden)]
     phantom: PhantomData<F>,
 }
 
-/// The claim the verifier emits at the end of a successful verification.
+/// What a successful verification leaves to check: the polynomial evaluates
+/// to `expected_evaluation` at `point`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SumCheckSubClaim<F: PrimeField> {
-    /// The point at which the polynomial is claimed to evaluate.
     pub point: Vec<F>,
-    /// The expected evaluation.
     pub expected_evaluation: F,
 }
 
@@ -49,7 +47,7 @@ impl<F: PrimeField> SumCheck<F> {
             prover_msgs.push(prover_msg);
             challenge = Some(transcript.get_and_append_challenge(b"Internal round")?);
         }
-        // pushing the last challenge point to the state
+        // No round follows the last challenge to push it to the state.
         if let Some(p) = challenge {
             prover_state.challenges.push(p)
         };

@@ -30,11 +30,9 @@ pub(crate) enum StreamPolicy {
 /// Read `TT_SUMCHECK_STREAM_K` (cached per-process): unset/`0`/unrecognized → Eager,
 /// `auto` → Auto, positive `N` → Explicit(N) (capped at `num_variables` later).
 ///
-/// Streaming is OFF by default: the auto heuristic counts compressed factors
-/// but not bytes, so it engaged on ordinary nv-20 TPC-H sumchecks — where it
-/// saves tens of MiB but costs ~30-45% prover time. Until the decision is
-/// byte-budgeted, streaming is opt-in via `TT_SUMCHECK_STREAM_K=auto` (or an
-/// explicit window) for the char-domain workloads it was built for.
+/// Streaming is off by default: the auto heuristic counts compressed factors,
+/// not bytes, so it also engages where it saves little memory and costs
+/// prover time. It is meant for char-domain workloads.
 pub(crate) fn stream_policy() -> StreamPolicy {
     static CACHED: OnceLock<StreamPolicy> = OnceLock::new();
     *CACHED.get_or_init(|| match std::env::var("TT_SUMCHECK_STREAM_K") {
@@ -54,15 +52,6 @@ pub(crate) fn stream_policy() -> StreamPolicy {
             }
         }
     })
-}
-
-/// Wall-clock ms since the UNIX epoch (kept local to avoid a tracker dependency).
-fn wall_clock_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 /// Emit one `sumcheck_stream_decision` JSON event (target `bench_stats`) describing how
@@ -94,7 +83,7 @@ fn emit_sumcheck_stream_decision<F: PrimeField>(
         .map(|(k, v)| ((*k).to_string(), serde_json::json!(*v)))
         .collect();
     let payload = serde_json::json!({
-        "wall_ms": wall_clock_ms(),
+        "wall_ms": crate::wall_clock_ms(),
         "num_variables": n,
         "max_degree": polynomial.aux_info.max_degree,
         "factors_total": factors_total,
@@ -143,7 +132,7 @@ pub(crate) fn factor_breakdown_by_kind<F: PrimeField>(
 /// streaming avoids materializing compressed factors to `2^n` field storage but pays for
 /// one growing `stream_eq_table`, so it's enabled only when enough compressed factors each
 /// save an eq_table's worth. Field-storage factors never benefit; duplicate Arcs count once.
-// Only reached from tests today; `prover_init` uses `decide_auto_stream_k_from_breakdown`
+// Used by tests only: `prover_init` calls `decide_auto_stream_k_from_breakdown`
 // to share one breakdown walk with the emitted event.
 #[allow(dead_code)]
 pub(crate) fn decide_auto_stream_k<F: PrimeField>(polynomial: &HPVirtualPolynomial<F>) -> usize {
@@ -156,7 +145,7 @@ pub(crate) fn decide_auto_stream_k_from_breakdown(
     num_variables: usize,
     breakdown: &BTreeMap<&'static str, usize>,
 ) -> usize {
-    // Small polys never benefit — eq_table + streaming compute dominates.
+    // Small polys never benefit: eq_table and streaming compute dominate.
     if num_variables < 20 {
         return 0;
     }
@@ -165,8 +154,8 @@ pub(crate) fn decide_auto_stream_k_from_breakdown(
         .filter(|(k, _)| **k != "field")
         .map(|(_, v)| *v)
         .sum();
-    // Deliberately conservative: one compressed poly isn't worth the wall-time
-    // overhead of streaming, a handful is.
+    // One compressed poly isn't worth the wall-time overhead of streaming, a
+    // handful is.
     const THRESHOLD_FACTORS: usize = 4;
     if compressed_factor_count >= THRESHOLD_FACTORS {
         num_variables
@@ -176,10 +165,9 @@ pub(crate) fn decide_auto_stream_k_from_breakdown(
 }
 
 impl<F: PrimeField> SumcheckProverState<F> {
-    /// Initialize the prover state to argue for the sum of the input polynomial
-    /// over {0,1}^`num_vars`. Streaming policy comes from `TT_SUMCHECK_STREAM_K`
-    /// (see [`stream_policy`]); tests needing deterministic control should call
-    /// [`Self::prover_init_with_stream_k`] instead.
+    /// Prover state for the sum of `polynomial` over the hypercube, with the
+    /// streaming window from [`stream_policy`]. Tests that need a fixed window
+    /// call [`Self::prover_init_with_stream_k`].
     #[instrument(level = "debug", skip_all)]
     pub(crate) fn prover_init(polynomial: &HPVirtualPolynomial<F>) -> Result<Self, PolyIOPErrors> {
         // One factor walk shared between the auto decision and the diagnostic event.
@@ -205,10 +193,9 @@ impl<F: PrimeField> SumcheckProverState<F> {
         Self::prover_init_with_stream_k(polynomial, k_raw)
     }
 
-    /// Same as [`Self::prover_init`] but with an explicit `stream_k` window,
-    /// bypassing the (per-process-cached) env-var read. The value is only stored
-    /// here; MLE routing into Materialized/Streaming slots happens lazily on the
-    /// first `prove_round_and_update_state` call.
+    /// [`Self::prover_init`] with an explicit `stream_k` window instead of the
+    /// env-var policy. The window is only stored here; the first
+    /// `prove_round_and_update_state` call routes MLEs into slots.
     pub(crate) fn prover_init_with_stream_k(
         polynomial: &HPVirtualPolynomial<F>,
         stream_k_raw: usize,
@@ -313,7 +300,6 @@ impl<F: PrimeField> SumcheckProverState<F> {
                 }
                 self.stream_eq_table = new_table;
             }
-            // Fold Materialized slots in place; Streaming folds live in stream_eq_table.
             cfg_iter_mut!(self.mle_slots).for_each(|slot| {
                 if let MleSlot::Materialized(mle) = slot {
                     mle.fix_one_variable_in_place(&r);
@@ -396,9 +382,8 @@ impl<F: PrimeField> SumcheckProverState<F> {
         let max_nv = slot_num_vars(&mle_slots[0]);
 
         // Step 2: sum the partially evaluated polynomial f(r_1..r_m, x_{m+1}..x_n).
-        // NOTE: the inner cfg_iter closure MUST NOT capture the parent-scope helper
-        // closures — rayon needs its body `Sync` — so the small ops are re-implemented
-        // inline via `mle_slots`, `stream_m`, and `stream_eq_table`.
+        // The inner fold must not capture the helper closures above (rayon needs
+        // its body `Sync`), so it reads slots inline.
 
         let zero = F::zero();
         let sums = cfg_iter!(products_list)
@@ -416,7 +401,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
 
                 // Fold scalar MLEs (inner num_vars == 0) into the coefficient: they're
                 // a constant factor at every position, and removing them cannot change
-                // term_nv since max(0, other_nvs) == max(other_nvs).
+                // term_nv.
                 let mut non_scalar_products: Vec<usize> = Vec::with_capacity(products.len());
                 for &f in products.iter() {
                     if slot_inner_num_vars(&mle_slots[f]) == 0 {
@@ -428,7 +413,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
 
                 let term_size = non_scalar_products.len();
 
-                // All factors were scalar — the product is just a constant.
+                // All factors are scalar: the product is a constant.
                 if term_size == 0 {
                     let scale = F::from(1u64 << (max_nv - term_nv.max(1)));
                     // Half-hypercube sum of a constant round polynomial (step = 0).
@@ -446,7 +431,7 @@ impl<F: PrimeField> SumcheckProverState<F> {
                             let mut any_step_and_eval_simultaneously_zero = false;
                             buf.iter_mut().zip(non_scalar_products.iter()).for_each(
                                 |((eval, step), f)| {
-                                    // Slot-aware read; see the `read_slot` comment above.
+                                    // `read_slot` at `2b` and `2b + 1`, inlined.
                                     let slot = &mle_slots[*f];
                                     let (v0, v1) = match slot {
                                         MleSlot::Materialized(mle) => {
@@ -522,9 +507,8 @@ impl<F: PrimeField> SumcheckProverState<F> {
                 .for_each(|(val, acc)| *acc += val)
         });
 
-        // Deliberately no write-back to `self.poly.flattened_ml_extensions`: nothing
-        // reads it after the sumcheck loop, and skipping the re-wrap avoids per-round
-        // Arc allocation traffic.
+        // `self.poly.flattened_ml_extensions` stays empty: nothing reads it after
+        // the sumcheck loop, and re-wrapping would allocate an Arc per round.
 
         Ok(SumcheckProverMessage {
             evaluations: products_sum,

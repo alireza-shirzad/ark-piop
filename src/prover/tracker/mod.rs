@@ -1,4 +1,4 @@
-//! ProverTracker — central state manager for the proving side of the PIOP.
+//! [`ProverTracker`]: central state manager for the proving side of the PIOP.
 
 mod algebra;
 mod claims;
@@ -92,10 +92,8 @@ struct ClaimStageStats {
 }
 
 impl ClaimStageStats {
-    /// Merge `other` into `self` by summing counts and concatenating degree
-    /// distributions. Used to build aggregate claim stats across buckets so
-    /// the dashboard's Claims tab (single-stage view) shows totals rather
-    /// than only the last bucket's snapshot.
+    /// Sum the counts and concatenate the degree distributions, to
+    /// aggregate claim stats across buckets.
     fn merge(&mut self, other: &ClaimStageStats) {
         self.non_zero_checks_count += other.non_zero_checks_count;
         self.non_zero_checks_degree_distribution
@@ -109,9 +107,7 @@ impl ClaimStageStats {
     }
 }
 
-/// Everything the bucket loop produces, so `compile_piop_subproof` reads as a
-/// sequence of phases instead of threading three parallel accumulators
-/// through a loop body.
+/// Everything the bucket loop of `compile_piop_subproof` produces.
 struct BucketRun<F: PrimeField> {
     proofs: Vec<SumcheckBucketProof<F>>,
     /// Pre-batching claim sums, all rescaled to the run's common
@@ -129,7 +125,7 @@ impl<F: PrimeField> BucketRun<F> {
         }
     }
 
-    /// A run that produced no bucket proofs contributes no subproof — a
+    /// A run that produced no bucket proofs contributes no subproof: a
     /// bucket short-circuits when its claims collapse before any sumcheck
     /// is needed, and every bucket may do so.
     fn into_subproof(self) -> Option<SumcheckSubproof<F>> {
@@ -139,7 +135,7 @@ impl<F: PrimeField> BucketRun<F> {
 
 /// Per-bucket claim shape collected in [`ProverTracker::run_bucket`];
 /// emitted by the caller so multi-bucket compiles don't overwrite each
-/// other in the subscriber's flat field map. No timings — the subscriber
+/// other in the subscriber's flat field map. No timings: the subscriber
 /// splices span durations in by `bucket_index`.
 #[derive(Clone, Debug, Default)]
 struct BucketRunStats {
@@ -158,19 +154,10 @@ struct BucketRunStats {
     after_after_sum_batching: ClaimStageStats,
 }
 
-fn wall_clock_ms() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-/// Central prover-side state manager: records the structure of virtual
-/// polynomials and their products, their commitments, and provides the
-/// algebra for combining them.
+/// Records the structure of virtual polynomials and their products and
+/// their commitments, and provides the algebra for combining them.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
-// #[derivative(Clone(bound = "MvPCS: Clone, UvPCS: Clone"))]
 pub struct ProverTracker<B>
 where
     B: SnarkBackend,
@@ -218,17 +205,97 @@ where
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn emit_claim_pipeline_stats(
-        &self,
-        before_initial: &ClaimStageStats,
-        before_after_nozero_batching: &ClaimStageStats,
-        before_after_zero_batching: &ClaimStageStats,
-        before_after_sum_batching: &ClaimStageStats,
-        after_initial: &ClaimStageStats,
-        after_after_zero_batching: &ClaimStageStats,
-        after_after_sum_batching: &ClaimStageStats,
-    ) {
+    /// Emit a snapshot of live materialized polys (count, byte size, top-K)
+    /// on the `bench_stats` target, streamed so it survives an OOM kill.
+    /// `phase` is a free-form label the dashboard correlates against the
+    /// RSS-over-time curve.
+    fn emit_tracker_snapshot(&self, phase: &str) {
+        // `heap_bytes` is the physical size of a poly's storage variant, not
+        // a field-element upper bound.
+        let materialized = &self.state.mv_pcs_substate.materialized_polys;
+        let mut entries: Vec<(TrackerID, u64, usize, &'static str)> = materialized
+            .iter()
+            .map(|(id, mle)| {
+                let bytes = mle.storage().heap_bytes();
+                let nv = mle.num_vars();
+                let kind = mle.storage().kind_tag();
+                (*id, bytes, nv, kind)
+            })
+            .collect();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
+        let total_bytes: u64 = entries.iter().map(|(_, sz, _, _)| *sz).sum();
+        let top_polys: Vec<_> = entries
+            .iter()
+            .take(10)
+            .map(|(id, sz, nv, kind)| {
+                serde_json::json!({
+                    "id": id.to_int(),
+                    "num_vars": nv,
+                    "bytes": sz,
+                    "kind": kind,
+                })
+            })
+            .collect();
+        // Per-storage-kind roll-up, for the dashboard.
+        let mut by_kind: std::collections::BTreeMap<&'static str, (usize, u64)> =
+            std::collections::BTreeMap::new();
+        for (_, sz, _, kind) in &entries {
+            let entry = by_kind.entry(*kind).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += *sz;
+        }
+        let kind_rollup: Vec<_> = by_kind
+            .into_iter()
+            .map(|(k, (count, bytes))| {
+                serde_json::json!({ "kind": k, "count": count, "bytes": bytes })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "phase": phase,
+            "wall_ms": crate::wall_clock_ms(),
+            "materialized_polys_count": materialized.len(),
+            "materialized_polys_total_bytes": total_bytes,
+            "top_polys": top_polys,
+            "by_kind": kind_rollup,
+        });
+        info!(
+            target: "bench_stats",
+            tracker_snapshot_json = %payload.to_string(),
+            "tracker_snapshot"
+        );
+        // TT_MEMSNAP=1: fallback dump to stderr, bypassing the tracing
+        // subscriber, flushed even if the process is later OOM-killed.
+        if std::env::var("TT_MEMSNAP")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            eprintln!("[TT_MEMSNAP] {}", payload);
+        }
+    }
+
+    /// Emit the `sc_claim_counts` event aggregated across every bucket
+    /// (summed counts, concatenated degree distributions) in the shape the
+    /// dashboard's Claims tab renders.
+    fn emit_aggregate_bucket_stats(&self, buckets: &[BucketRunStats]) {
+        if buckets.is_empty() {
+            return;
+        }
+        let mut before_initial = ClaimStageStats::default();
+        let mut before_after_nozero_batching = ClaimStageStats::default();
+        let mut before_after_zero_batching = ClaimStageStats::default();
+        let mut before_after_sum_batching = ClaimStageStats::default();
+        let mut after_initial = ClaimStageStats::default();
+        let mut after_after_zero_batching = ClaimStageStats::default();
+        let mut after_after_sum_batching = ClaimStageStats::default();
+        for b in buckets {
+            before_initial.merge(&b.before_initial);
+            before_after_nozero_batching.merge(&b.before_after_nozero_batching);
+            before_after_zero_batching.merge(&b.before_after_zero_batching);
+            before_after_sum_batching.merge(&b.before_after_sum_batching);
+            after_initial.merge(&b.after_initial);
+            after_after_zero_batching.merge(&b.after_after_zero_batching);
+            after_after_sum_batching.merge(&b.after_after_sum_batching);
+        }
         info!(
             target: "bench_stats",
             claims_before_degree_reduction_initial_non_zero_checks_count = before_initial.non_zero_checks_count,
@@ -274,112 +341,6 @@ where
             claims_after_degree_reduction_after_sum_batching_sum_checks_count = after_after_sum_batching.sum_checks_count,
             claims_after_degree_reduction_after_sum_batching_sum_checks_degree_distribution = ?after_after_sum_batching.sum_checks_degree_distribution,
             "sc_claim_counts"
-        );
-    }
-
-    /// Emit a snapshot of live materialized polys (count, byte size, top-K)
-    /// on the `bench_stats` target — streamed so it survives an OOM kill.
-    /// `phase` is a free-form label the dashboard correlates against the
-    /// RSS-over-time curve.
-    fn emit_tracker_snapshot(&self, phase: &str) {
-        // Physical heap bytes of each poly's storage backing. The `storage`
-        // enum captures small-scalar variants (`Bit` = 1/8 byte per point,
-        // `U8` = 1 byte, `U32` = 4, `U64` = 8) alongside the traditional
-        // `Field` (32-byte) variant, so this now reflects true memory use
-        // rather than a virtual field-element upper bound.
-        let materialized = &self.state.mv_pcs_substate.materialized_polys;
-        let mut entries: Vec<(TrackerID, u64, usize, &'static str)> = materialized
-            .iter()
-            .map(|(id, mle)| {
-                let bytes = mle.storage().heap_bytes();
-                let nv = mle.num_vars();
-                let kind = mle.storage().kind_tag();
-                (*id, bytes, nv, kind)
-            })
-            .collect();
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1));
-        let total_bytes: u64 = entries.iter().map(|(_, sz, _, _)| *sz).sum();
-        let top_polys: Vec<_> = entries
-            .iter()
-            .take(10)
-            .map(|(id, sz, nv, kind)| {
-                serde_json::json!({
-                    "id": id.to_int(),
-                    "num_vars": nv,
-                    "bytes": sz,
-                    "kind": kind,
-                })
-            })
-            .collect();
-        // Per-storage-kind roll-up so the dashboard can plot compression
-        // effectiveness at a glance.
-        let mut by_kind: std::collections::BTreeMap<&'static str, (usize, u64)> =
-            std::collections::BTreeMap::new();
-        for (_, sz, _, kind) in &entries {
-            let entry = by_kind.entry(*kind).or_insert((0, 0));
-            entry.0 += 1;
-            entry.1 += *sz;
-        }
-        let kind_rollup: Vec<_> = by_kind
-            .into_iter()
-            .map(|(k, (count, bytes))| {
-                serde_json::json!({ "kind": k, "count": count, "bytes": bytes })
-            })
-            .collect();
-        let payload = serde_json::json!({
-            "phase": phase,
-            "wall_ms": wall_clock_ms(),
-            "materialized_polys_count": materialized.len(),
-            "materialized_polys_total_bytes": total_bytes,
-            "top_polys": top_polys,
-            "by_kind": kind_rollup,
-        });
-        info!(
-            target: "bench_stats",
-            tracker_snapshot_json = %payload.to_string(),
-            "tracker_snapshot"
-        );
-        // TT_MEMSNAP=1: fallback dump to stderr, bypassing the tracing
-        // subscriber, flushed even if the process is later OOM-killed.
-        if std::env::var("TT_MEMSNAP")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-        {
-            eprintln!("[TT_MEMSNAP] {}", payload);
-        }
-    }
-
-    /// Emit the `sc_claim_counts` event aggregated across every bucket
-    /// (summed counts, concatenated degree distributions) in the shape the
-    /// dashboard's Claims tab renders.
-    fn emit_aggregate_bucket_stats(&self, buckets: &[BucketRunStats]) {
-        if buckets.is_empty() {
-            return;
-        }
-        let mut before_initial = ClaimStageStats::default();
-        let mut before_after_nozero_batching = ClaimStageStats::default();
-        let mut before_after_zero_batching = ClaimStageStats::default();
-        let mut before_after_sum_batching = ClaimStageStats::default();
-        let mut after_initial = ClaimStageStats::default();
-        let mut after_after_zero_batching = ClaimStageStats::default();
-        let mut after_after_sum_batching = ClaimStageStats::default();
-        for b in buckets {
-            before_initial.merge(&b.before_initial);
-            before_after_nozero_batching.merge(&b.before_after_nozero_batching);
-            before_after_zero_batching.merge(&b.before_after_zero_batching);
-            before_after_sum_batching.merge(&b.before_after_sum_batching);
-            after_initial.merge(&b.after_initial);
-            after_after_zero_batching.merge(&b.after_after_zero_batching);
-            after_after_sum_batching.merge(&b.after_after_sum_batching);
-        }
-        self.emit_claim_pipeline_stats(
-            &before_initial,
-            &before_after_nozero_batching,
-            &before_after_zero_batching,
-            &before_after_sum_batching,
-            &after_initial,
-            &after_after_zero_batching,
-            &after_after_sum_batching,
         );
     }
 
@@ -469,9 +430,8 @@ where
     }
 
     /// [`Self::new_from_pk_with_config`] without the lookup protocol in the
-    /// transcript, which is how a transcript started before proofs named
-    /// their protocol. No verifier accepts what this proves; it is for
-    /// comparing proofs with those of that time.
+    /// transcript. No verifier accepts what this proves; a test pins proof
+    /// bytes with it.
     #[cfg(test)]
     pub(crate) fn new_from_pk_unbound(pk: SNARKPk<B>, config: SharedArgConfig) -> Self {
         let mut tracker = Self::with_fresh_state(&pk, config);
@@ -512,7 +472,6 @@ where
         self.state.indexed_tracked_polys = range_tr_polys;
     }
 
-    /// Get the range tracked polynomial given the data type
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         match self.state.indexed_tracked_polys.get(&label) {
             Some(poly) => Ok(poly.clone()),
@@ -528,23 +487,13 @@ where
         self.state.indexed_tracked_polys.insert(label, poly)
     }
 
-    /// Generates a new `TrackerID`.
-    ///
-    /// This function increments an internal counter and returns a new
-    /// `TrackerID` based on the current value of the counter. It ensures
-    /// that each generated `TrackerID` is unique.
     pub fn gen_id(&mut self) -> TrackerID {
         let id = self.state.num_tracked_polys;
         self.state.num_tracked_polys += 1;
         TrackerID::from_usize(id)
     }
 
-    /// Peek at the next `TrackerID` that will be generated by gen_id.
-    pub fn next_id(&mut self) -> TrackerID {
-        TrackerID::from_usize(self.state.num_tracked_polys)
-    }
-
-    // Peek at the next TrackerID without incrementing the counter
+    /// The `TrackerID` the next `gen_id` will return.
     pub(crate) fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }
@@ -599,13 +548,10 @@ mod tests {
         ProverTracker::new_from_pk(pk)
     }
 
-    // Helper to make a random MLE
     fn random_mle(nv: usize) -> MLE<F> {
         let evals: Vec<F> = (0..(1 << nv)).map(|i| F::from(i as u64 + 1)).collect();
         MLE::from_evaluations_vec(nv, evals)
     }
-
-    // ── Algebra: add / sub / mul ─────────────────────────────────────
 
     #[test]
     fn add_polys_sums_evaluations() {
@@ -749,8 +695,6 @@ mod tests {
         assert_eq!(tracker.evaluations(narrow_scaled), doubled);
     }
 
-    // ── Scalar operations ──────────────────────────────────────────
-
     #[test]
     fn mul_scalar_scales_evaluations() {
         let mut tracker = make_tracker();
@@ -780,10 +724,8 @@ mod tests {
         assert_eq!(eval_shifted, eval + scalar);
     }
 
-    /// `add_scalar` must not materialize a fresh `2^n`-sized `Vec<F>` for
-    /// the scalar — that was the memory bug the empty-product convention
-    /// fixed. This test guards against a regression by asserting the
-    /// tracker's materialized_polys count is unchanged after `add_scalar`.
+    /// `add_scalar` must not materialize a `2^n`-sized `Vec<F>` for the
+    /// scalar: the constant is an empty-product term `(c, vec![])`.
     #[test]
     fn add_scalar_does_not_materialize_scalar_mle() {
         let mut tracker = make_tracker();
@@ -798,24 +740,21 @@ mod tests {
         );
     }
 
-    /// Adding a constant does not change the max multiplicative degree
-    /// of the polynomial. Under the empty-product convention the extra
-    /// term has factor-list length 0 (degree 0), so `max` is unchanged.
+    /// Adding a constant does not change the max multiplicative degree:
+    /// the extra term has an empty factor list (degree 0).
     #[test]
     fn add_scalar_preserves_multiplicative_degree() {
         let mut tracker = make_tracker();
         let a = tracker.track_mat_mv_poly(random_mle(3));
         let b = tracker.track_mat_mv_poly(random_mle(3));
-        // A degree-2 expression: a * b
         let ab = tracker.mul_polys(a, b);
         assert_eq!(tracker.virt_poly_degree(ab), 2);
-        // Adding a scalar should preserve degree 2.
         let ab_shifted = tracker.add_scalar(ab, F::from(99));
         assert_eq!(tracker.virt_poly_degree(ab_shifted), 2);
     }
 
-    /// `add_scalar` must compose correctly with `mul_polys` — the classic
-    /// `(p + c) * q = p*q + c*q` identity when evaluated at a point.
+    /// `add_scalar` composes with `mul_polys`: `(p + c) * q = p*q + c*q` at
+    /// a point.
     #[test]
     fn add_scalar_composes_with_multiplication() {
         let mut tracker = make_tracker();
@@ -833,10 +772,8 @@ mod tests {
         assert_eq!(eval_prod, (eval_p + c) * eval_q);
     }
 
-    /// Chained `add_scalar` calls must accumulate. `add_scalar(add_scalar(p, c1), c2)`
-    /// should equal `p + (c1 + c2)` at every point. Under the empty-product
-    /// convention this materializes as two separate constant terms in the
-    /// virtual poly — the evaluator sums them.
+    /// Chained `add_scalar` calls accumulate: the virtual poly holds two
+    /// separate constant terms and the evaluator sums them.
     #[test]
     fn add_scalar_chained_composes() {
         let mut tracker = make_tracker();
@@ -852,9 +789,9 @@ mod tests {
         assert_eq!(eval_step2, eval_p + c1 + c2);
     }
 
-    /// `add_scalar(p, 0)` must be a semantic no-op — no constant term
-    /// should be appended, otherwise `optimize_linear_terms` at compile
-    /// time would emit a spurious nv=0 MLE for a zero constant.
+    /// `add_scalar(p, 0)` appends no constant term; otherwise
+    /// `optimize_linear_terms` at compile time would emit a spurious nv=0
+    /// MLE for a zero constant.
     #[test]
     fn add_scalar_with_zero_is_semantic_noop() {
         let mut tracker = make_tracker();
@@ -866,8 +803,7 @@ mod tests {
         let eval_shifted = tracker.evaluate_mv(shifted, &pt).unwrap();
         assert_eq!(eval_shifted, eval_p);
 
-        // Structural check: the virt poly should have exactly one term
-        // (the original poly's wrapper), no bare-constant term for 0.
+        // One term, the original poly's wrapper; no bare constant for 0.
         let vp = tracker.virt_poly(shifted).unwrap();
         assert_eq!(vp.len(), 1, "zero scalar must not emit a constant term");
         assert!(
@@ -876,9 +812,9 @@ mod tests {
         );
     }
 
-    /// The virt-poly built by `add_scalar` on a materialized poly must
-    /// have exactly the shape `[(1, [poly_id]), (c, vec![])]` — one wrapper
-    /// term for the input and one bare-constant term.
+    /// The virt-poly built by `add_scalar` on a materialized poly has
+    /// exactly the shape `[(1, [poly_id]), (c, vec![])]`: one wrapper term
+    /// for the input and one bare-constant term.
     #[test]
     fn add_scalar_produces_expected_virt_poly_shape() {
         let mut tracker = make_tracker();
@@ -888,10 +824,8 @@ mod tests {
 
         let vp = tracker.virt_poly(shifted).unwrap();
         assert_eq!(vp.len(), 2, "expected wrapper + constant term");
-        // First term: (1, [p]) — the input wrapped
         assert_eq!(vp[0].0, F::one());
         assert_eq!(vp[0].1, vec![p]);
-        // Second term: (c, []) — the bare constant via empty product
         assert_eq!(vp[1].0, c);
         assert!(
             vp[1].1.is_empty(),
@@ -899,11 +833,9 @@ mod tests {
         );
     }
 
-    // ── Contig-one activator storage ────────────────────────────────
-
     /// The activator MLE from `get_or_build_contig_one_poly` must stay
-    /// RLE-compressed (or Constant), never a full Field `Vec<F>` — at nv 24
-    /// that would be 512 MiB per gadget instance vs ~72 bytes.
+    /// RLE-compressed (or Constant), never a full Field `Vec<F>`: at nv 24
+    /// that would be 512 MiB per gadget instance against about 72 bytes.
     #[test]
     fn contig_one_poly_uses_compact_storage_not_field_vec() {
         use crate::arithmetic::mat_poly::mle::MLEStorage;
@@ -928,7 +860,6 @@ mod tests {
             .mat_mv_poly(id)
             .expect("activator should be materialized");
 
-        // Storage must be compact — an Rle (or Constant for edge cases), never Field.
         let bytes = mle.storage().heap_bytes();
         assert!(
             !matches!(mle.storage(), MLEStorage::Field { .. }),
@@ -941,15 +872,13 @@ mod tests {
             ),
             "activator storage must be Rle or Constant"
         );
-        // 2-run RLE on BN254: ~72 bytes. Compare against the Field-vec
-        // alternative which would be (1 << 20) * 32 = 32 MiB.
+        // A 2-run RLE on BN254 is about 72 bytes; a Field vec would be
+        // (1 << 20) * 32 = 32 MiB.
         assert!(
             bytes < 500,
             "compact activator should be <500 bytes, got {bytes}"
         );
     }
-
-    // ── Degree computation ─────────────────────────────────────────
 
     #[test]
     fn degree_of_single_materialized_poly_is_one() {
@@ -964,7 +893,6 @@ mod tests {
         let a = tracker.track_mat_mv_poly(random_mle(3));
         let b = tracker.track_mat_mv_poly(random_mle(3));
         let sum = tracker.add_polys(a, b);
-        // sum of two degree-1 polys is still degree 1
         assert_eq!(tracker.virt_poly_degree(sum), 1);
     }
 
@@ -1007,8 +935,6 @@ mod tests {
         assert_eq!(tracker.virt_poly_degree(prod), 1);
     }
 
-    // ── Constant tracking ──────────────────────────────────────────
-
     #[test]
     fn constant_poly_detected_at_commit_time() {
         let mut tracker = make_tracker();
@@ -1016,7 +942,6 @@ mod tests {
         let result = tracker
             .track_and_commit_mat_mv_p(&const_mle, false)
             .unwrap();
-        // Constants return Right(id, value)
         assert!(result.is_right(), "constant MLE should be detected");
         let (_id, val) = result.right().unwrap();
         assert_eq!(val, F::from(42));
@@ -1029,8 +954,6 @@ mod tests {
         let result = tracker.track_and_commit_mat_mv_p(&mle, false).unwrap();
         assert!(result.is_left(), "non-constant MLE should be committed");
     }
-
-    // ── Batch evaluate ─────────────────────────────────────────────
 
     #[test]
     fn test_batch_evaluate_mv_single_poly() {
@@ -1050,7 +973,7 @@ mod tests {
     fn test_batch_evaluate_mv_different_nvs() {
         let mut tracker = make_tracker();
 
-        // Three polys with different nv — exercises the eq folding path
+        // Three polys with different nv exercise the eq folding path.
         let id_nv2 = tracker.track_mat_mv_poly(random_mle(2));
         let id_nv3 = tracker.track_mat_mv_poly(random_mle(3));
         let id_nv4 = tracker.track_mat_mv_poly(random_mle(4));
@@ -1074,7 +997,7 @@ mod tests {
     fn test_batch_evaluate_mv_same_nv() {
         let mut tracker = make_tracker();
 
-        // Two polys with same nv — eq is built once and reused
+        // Two polys with the same nv: eq is built once and reused.
         let id_a = tracker.track_mat_mv_poly(random_mle(3));
         let id_b = tracker.track_mat_mv_poly(random_mle(3));
 

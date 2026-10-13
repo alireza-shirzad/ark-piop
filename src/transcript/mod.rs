@@ -9,7 +9,7 @@ use errors::TranscriptError;
 use merlin::Transcript;
 use std::marker::PhantomData;
 /// IOP transcript over field `F`: a Merlin transcript plus an `is_empty` flag.
-/// Challenges are refused on an empty transcript — when the verifier initiates
+/// Challenges are refused on an empty transcript: when the verifier initiates
 /// a protocol, the prover must start from a non-empty one.
 #[derive(Clone)]
 pub struct Tr<F: PrimeField> {
@@ -31,7 +31,6 @@ impl<F: PrimeField> Default for Tr<F> {
 
 // TODO: Make this into a Trait
 impl<F: PrimeField> Tr<F> {
-    /// Create a new IOP transcript.
     pub fn new(label: &'static [u8]) -> Self {
         Self {
             transcript: Transcript::new(label),
@@ -72,7 +71,6 @@ impl<F: PrimeField> Tr<F> {
         &mut self,
         label: &'static [u8],
     ) -> Result<F, TranscriptError> {
-        //  we need to reject when transcript is empty
         if self.is_empty {
             return Err(TranscriptError::InvalidTranscript(
                 "transcript is empty".to_string(),
@@ -93,7 +91,6 @@ impl<F: PrimeField> Tr<F> {
         label: &'static [u8],
         len: usize,
     ) -> Result<Vec<F>, TranscriptError> {
-        //  we need to reject when transcript is empty
         if self.is_empty {
             return Err(TranscriptError::InvalidTranscript(
                 "transcript is empty".to_string(),

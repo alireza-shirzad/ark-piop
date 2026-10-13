@@ -59,7 +59,6 @@ impl<B: SnarkBackend> TrackedPoly<B>
 where
     B: SnarkBackend,
 {
-    /// Create a new tracked polynomial
     pub fn new(
         id_or_const: Either<TrackerID, B::F>,
         log_size: usize,
@@ -73,9 +72,9 @@ where
         }
     }
 
-    /// Create a new tracked polynomial for a committed constant.
-    /// Arithmetic sees `Either::Right(cnst)` for constant-folding,
-    /// while `.id()` returns the committed tracker ID.
+    /// A tracked polynomial for a committed constant. Arithmetic sees
+    /// `Either::Right(cnst)` for constant-folding, while `.id()` returns the
+    /// committed tracker ID.
     pub fn new_committed_constant(
         cnst: B::F,
         committed_id: TrackerID,
@@ -90,7 +89,6 @@ where
         }
     }
 
-    /// Get the id of the tracked polynomial
     pub fn id_or_const(&self) -> Either<TrackerID, B::F> {
         self.id_or_const
     }
@@ -104,7 +102,6 @@ where
         }
     }
 
-    /// `true` if this tracked polynomial is a folded constant.
     pub fn is_constant(&self) -> bool {
         matches!(self.id_or_const, Either::Right(_))
     }
@@ -130,7 +127,7 @@ where
                     }
                     return id;
                 }
-                // Derived constant (from arithmetic on constants) — generate a
+                // Derived constant (from arithmetic on constants): generate a
                 // new ID. The verifier mirrors this call, keeping IDs in sync.
                 let id = self
                     .tracker
@@ -142,7 +139,6 @@ where
         }
     }
 
-    /// Get a reference to the underlying tracker
     pub fn tracker(&self) -> Rc<RefCell<ProverTracker<B>>> {
         self.tracker.clone()
     }
@@ -152,7 +148,7 @@ where
         self.log_size
     }
 
-    /// Return the max multiplicative degree of the tracked polynomial.
+    /// The max multiplicative degree.
     pub fn degree(&self) -> usize {
         match &self.id_or_const {
             Either::Left(id) => self.tracker.borrow().virt_poly_degree(*id),
@@ -160,7 +156,6 @@ where
         }
     }
 
-    /// Checks if two tracked polynomials are from the same tracker
     pub fn same_tracker(&self, other: &TrackedPoly<B>) -> bool {
         Rc::ptr_eq(&self.tracker, &other.tracker)
     }
@@ -327,26 +322,22 @@ impl<B: SnarkBackend> DeepClone<B> for TrackedPoly<B> {
 }
 
 impl<B: SnarkBackend> TrackedPoly<B> {
-    /// Return a new tracked polynomial equal to `self * scalar`.
     pub fn mul_scalar_poly(&self, scalar: B::F) -> Self {
         let (id_or_const, log_size) = self.compute_mul_scalar(scalar);
         TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
     }
 
-    /// Return a new tracked polynomial equal to `self + scalar`.
     pub fn add_scalar_poly(&self, scalar: B::F) -> Self {
         let (id_or_const, log_size) = self.compute_add_scalar(scalar);
         TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
     }
 
-    /// Return a new tracked polynomial equal to `self - scalar`.
     pub fn sub_scalar_poly(&self, scalar: B::F) -> Self {
         let (id_or_const, log_size) = self.compute_sub_scalar(scalar);
         TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
     }
 }
 
-// ====================== Operator Trait Implementations ======================
 impl<'b, B: SnarkBackend> std::ops::Add<&'b TrackedPoly<B>> for &TrackedPoly<B> {
     type Output = TrackedPoly<B>;
 
@@ -382,8 +373,7 @@ impl<B: SnarkBackend> std::ops::Add<B::F> for TrackedPoly<B> {
 
     #[inline]
     fn add(self, rhs: B::F) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_add_scalar(rhs);
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+        self.add_scalar_poly(rhs)
     }
 }
 
@@ -392,8 +382,7 @@ impl<B: SnarkBackend> std::ops::Sub<B::F> for TrackedPoly<B> {
 
     #[inline]
     fn sub(self, rhs: B::F) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_sub_scalar(rhs);
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+        self.sub_scalar_poly(rhs)
     }
 }
 
@@ -402,8 +391,7 @@ impl<B: SnarkBackend> std::ops::Mul<B::F> for TrackedPoly<B> {
 
     #[inline]
     fn mul(self, rhs: B::F) -> Self::Output {
-        let (id_or_const, log_size) = self.compute_mul_scalar(rhs);
-        TrackedPoly::new(id_or_const, log_size, self.tracker.clone())
+        self.mul_scalar_poly(rhs)
     }
 }
 
@@ -455,11 +443,9 @@ where
                 shift % domain_size
             };
 
-            // Build evaluations via `MLE::from_u32s`: compact U32 storage is
-            // 8x smaller than a Field-storage `Vec<F>` (512 MiB per shift poly
-            // at log_size=24) and all downstream paths support it natively.
-            // For log_size >= 32 the u32 counts would overflow, so fall back
-            // to the field path (defensive guard; SRS caps log_size near 30).
+            // Compact U32 storage is 8x smaller than a Field `Vec<F>` (512 MiB
+            // per shift poly at log_size=24). At log_size >= 32 the u32 values
+            // would overflow, so that case takes the field path.
             let poly = if log_size < 32 {
                 let mut evals: Vec<u32> = (0..(domain_size as u32)).collect();
                 if domain_size > 0 {

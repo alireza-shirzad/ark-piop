@@ -1,13 +1,8 @@
 //! Instrumentation attributes for ark-piop's prover pipeline.
 //!
-//! The prover reports two kinds of per-stage telemetry on the `bench_stats`
-//! target: a span whose lifetime is the stage's duration, and a pair of
-//! tracker snapshots bracketing it. Written by hand that is four lines of
-//! bookkeeping wrapped around every stage, and the snapshot half is easy to
-//! get subtly wrong — see [`piop_stage`] on the early-return trap.
-//!
-//! Both live in the attribute instead, so stage bodies contain only the
-//! algorithm.
+//! A prover stage reports, on the `bench_stats` target, a span that lasts as
+//! long as the stage and a pair of tracker snapshots around it.
+//! [`piop_stage`] generates both.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -17,14 +12,12 @@ use syn::{
     parse_macro_input,
 };
 
-/// The tracing target every span and snapshot this macro emits is declared
-/// on. Must stay in sync with `ark_piop::prover::tracker::
-/// SNARK_PROVER_SPAN_TARGET`; a proc-macro crate can't reference a const
-/// from the crate that depends on it, so this is the one duplicated string.
+/// Tracing target of every span this macro emits. Must equal
+/// `ark_piop::prover::tracker::SNARK_PROVER_SPAN_TARGET`, which a proc-macro
+/// crate cannot reference.
 const BENCH_STATS_TARGET: &str = "bench_stats";
 
-/// Parsed `#[piop_stage(...)]` arguments. Every field is optional, so the
-/// attribute can carry a span, a snapshot pair, or any mix.
+/// Parsed `#[piop_stage(...)]` arguments; any subset may be given.
 #[derive(Default)]
 struct StageArgs {
     span: Option<LitStr>,
@@ -68,13 +61,9 @@ impl Parse for StageArgs {
     }
 }
 
-/// Build the `phase` argument for an `emit_tracker_snapshot` call.
-///
-/// A plain literal is passed straight through as a `&'static str`. One
-/// containing `{` is treated as a format string, so a stage can name its
-/// snapshot after one of its own parameters — `"bucket_{bucket_index}_start"`
-/// resolves against the argument in scope via `format!`'s inline captures.
-/// Only that case pays for an allocation.
+/// The `phase` argument of an `emit_tracker_snapshot` call. A literal
+/// containing `{` is a format string over the stage's own parameters
+/// (`"bucket_{bucket_index}_start"`); any other is passed as is.
 fn snapshot_phase(literal: &LitStr) -> proc_macro2::TokenStream {
     if literal.value().contains('{') {
         quote! { &format!(#literal) }
@@ -99,21 +88,12 @@ fn snapshot_phase(literal: &LitStr) -> proc_macro2::TokenStream {
 /// Requires `self` to expose `emit_tracker_snapshot(&self, phase: &str)`
 /// whenever a snapshot argument is given.
 ///
-/// # Why the body moves into a closure
+/// The body runs as a closure, so an early `return` or a `?` leaves the
+/// closure and the end snapshot fires on every exit path.
 ///
-/// The end snapshot has to fire on *every* exit path. Stages return early —
-/// `compile_piop_subproof` has two `return Ok(None)` paths for the claim-free
-/// case, and any `?` is another exit. A hand-written snapshot above the
-/// final `Ok(..)` silently skips all of them, which is exactly the bug this
-/// attribute exists to make unwritable. Running the body as a closure turns
-/// each of those into a return *from the closure*, so the snapshot always
-/// runs and the value flows out unchanged.
-///
-/// # Why the span goes inside
-///
-/// A snapshot walks every materialized poly to sum heap bytes, which is not
-/// free. The span is entered after the start snapshot and dropped before the
-/// end one, so that cost never lands in the stage's reported duration.
+/// A snapshot walks every materialized poly to sum heap bytes. The span is
+/// entered after the start snapshot and dropped before the end one, so that
+/// cost stays out of the stage's reported duration.
 #[proc_macro_attribute]
 pub fn piop_stage(args: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as StageArgs);
@@ -131,20 +111,14 @@ pub fn piop_stage(args: TokenStream, item: TokenStream) -> TokenStream {
     let body = &function.block;
     let target = BENCH_STATS_TARGET;
 
-    // Annotate the closure with the function's return type so `?` and
-    // `return` inside the body keep resolving the way they did before.
-    //
-    // Deliberately not a `move` closure: the body needs `&mut self`, and a
-    // move would hand ownership of the receiver to the closure, leaving
-    // nothing for the end snapshot to call. A reborrow instead ends when the
-    // closure is dropped at the end of the statement, which is exactly when
-    // the snapshot needs the receiver back.
+    // The closure carries the function's return type so `?` and `return` in
+    // the body resolve as they do in the function. It is not a `move`
+    // closure: it reborrows `self`, and the end snapshot needs `self` back.
     let closure = match &function.sig.output {
         ReturnType::Default => quote! { (|| { #body })() },
         ReturnType::Type(_, ty) => quote! { (|| -> #ty { #body })() },
     };
 
-    // The span wraps only the body, never the snapshots.
     let guarded = match &args.span {
         Some(name) => quote! {{
             let __piop_stage_span = ::tracing::info_span!(target: #target, #name);

@@ -1,4 +1,4 @@
-//! Claim registration — adding sumcheck, zerocheck, nozerocheck, lookup, and eval claims.
+//! Claim registration: sumcheck, zerocheck, nozerocheck, lookup and eval claims.
 
 use super::*;
 use crate::piop::{errors::PolyIOPErrors, keyed_sumcheck::reduction::KeyedSumRelation};
@@ -7,8 +7,6 @@ impl<B> ProverTracker<B>
 where
     B: SnarkBackend,
 {
-    /// Generate the challenge from the current transcript
-    /// and append it to the transcript.
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         self.state
             .transcript
@@ -16,10 +14,7 @@ where
             .map_err(SnarkError::from)
     }
 
-    /// Adds a sumcheck claim to the list of the sumcheck claims of the prover
-    /// a sumcheck claim is of the form (poly_id, claimed_sum) which means that
-    /// the prover claims that the sum of the evaluations of the polynomial with
-    /// poly_id is claimed_sum
+    /// Claims that the evaluations of `poly_id` sum to `claimed_sum`.
     // TODO: Remove the claimed_sum
     pub fn add_mv_sumcheck_claim(
         &mut self,
@@ -97,10 +92,7 @@ where
         Ok(())
     }
 
-    /// Adds a zerocheck claim to the list of the zerocheck claims of the prover
-    /// a zerocheck claim is of the form (poly_id) which means that the prover
-    /// claims that the polynomial with poly_id evaluates to zero all over the
-    /// boolean hypercube
+    /// Claims that `poly_id` is zero on the whole boolean hypercube.
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         if let Some(poly) = self.virt_poly(poly_id) {
             trace!(?poly_id, ?poly, "add_mv_zerocheck_claim virtual");
@@ -122,10 +114,7 @@ where
         Ok(())
     }
 
-    /// Adds a nozerocheck claim to the list of the nozerocheck claims of the prover
-    /// a nozerocheck claim is of the form (poly_id) which means that the prover
-    /// claims that the polynomial with poly_id evaluates to zero all over the
-    /// boolean hypercube
+    /// Claims that `poly_id` is nonzero on the whole boolean hypercube.
     pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         if let Some(poly) = self.virt_poly(poly_id) {
             trace!(?poly_id, ?poly, "add_mv_nozerocheck_claim virtual");
@@ -147,7 +136,8 @@ where
         Ok(())
     }
 
-    /// Add a multivariate lookup claim to the proof
+    /// Claims that every evaluation of `sub_id` is an evaluation of
+    /// `super_id`.
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(
         &mut self,
@@ -201,10 +191,6 @@ where
         take(&mut self.state.keyed_sum_claims)
     }
 
-    /// Adds an evaluation claim to the list of the zerocheck claims of the
-    /// prover a zerocheck claim is of the form (poly_id) which means that
-    /// the prover claims that the polynomial with poly_id evaluates to zero
-    /// all over the boolean hypercube
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
         self.state
             .uv_pcs_substate

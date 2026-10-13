@@ -1,9 +1,9 @@
 //! Symbolic representation of virtual (sum-of-products) polynomials.
 //!
-//! A [`VirtualPoly`] records only the *structure* `sum_i c_i * prod_j p_{i,j}`,
-//! each factor identified by its [`TrackerID`]; the actual polynomial data
-//! lives in the prover or verifier tracker. Used on both sides (prover factors
-//! are MLEs, verifier factors are oracle handles).
+//! A [`VirtualPoly`] records only the structure `sum_i c_i * prod_j p_{i,j}`,
+//! each factor identified by its [`TrackerID`]; the polynomial data lives in
+//! the prover or verifier tracker. Used on both sides (prover factors are
+//! MLEs, verifier factors are oracle handles).
 
 use crate::types::TrackerID;
 
@@ -12,9 +12,7 @@ use derivative::Derivative;
 use std::ops::{Deref, DerefMut};
 use std::slice;
 
-/// A symbolic sum-of-products polynomial expression: each entry
-/// `(coefficient, factors)` is one product term, with factors given as
-/// [`TrackerID`]s referencing tracked polynomials or oracles.
+/// Each entry `(coefficient, factors)` is one product term.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "F: Clone"))]
 #[derivative(Default(bound = ""))]

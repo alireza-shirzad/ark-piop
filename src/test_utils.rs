@@ -4,8 +4,9 @@ use crate::{
 use std::sync::Once;
 use tracing::instrument;
 
-/// Logs directory for test tracing: a creatable `target/logs`, falling back
-/// to `<crate>/logs` (gitignored).
+/// Logs directory for test tracing: `logs` under the first creatable of
+/// `CARGO_TARGET_DIR`, `<crate>/target` and `<crate-parent>/target`, falling
+/// back to `<crate>/logs` (gitignored).
 #[allow(dead_code)]
 fn compute_logs_dir() -> std::path::PathBuf {
     use std::path::{Path, PathBuf};
@@ -13,7 +14,6 @@ fn compute_logs_dir() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let mut target_dir: Option<PathBuf> = None;
 
-    // 1) Respect CARGO_TARGET_DIR if set.
     if let Ok(p) = std::env::var("CARGO_TARGET_DIR") {
         let p = PathBuf::from(p);
         if p.exists() || std::fs::create_dir_all(&p).is_ok() {
@@ -21,7 +21,6 @@ fn compute_logs_dir() -> std::path::PathBuf {
         }
     }
 
-    // 2) Prefer `<crate>/target` in the current crate directory
     if target_dir.is_none() {
         let crate_target = Path::new(manifest_dir).join("target");
         if crate_target.exists() || std::fs::create_dir_all(&crate_target).is_ok() {
@@ -29,7 +28,6 @@ fn compute_logs_dir() -> std::path::PathBuf {
         }
     }
 
-    // 3) Fallback to `<crate-parent>/target` (workspace root) if needed
     if target_dir.is_none()
         && let Some(parent) = Path::new(manifest_dir).parent()
     {
@@ -157,9 +155,8 @@ pub fn init_subscriber() {
     });
 }
 
-/// Like [`init_subscriber`] but the caller supplies `setup_fn` (run once) to
-/// install extra layers (e.g. a JSONL stats layer receiving `bench_stats`)
-/// without fighting generic type bounds.
+/// Like [`init_subscriber`], but the caller's `setup_fn` (run once) installs
+/// the subscriber, e.g. with a JSONL stats layer receiving `bench_stats`.
 pub fn init_subscriber_with<F>(setup_fn: F)
 where
     F: FnOnce() + Send + 'static,

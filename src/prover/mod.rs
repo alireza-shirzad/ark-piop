@@ -45,7 +45,6 @@ use std::{cell::RefCell, collections::BTreeMap, rc::Rc, sync::Arc};
 use structs::proof::SNARKProof;
 use tracker::ProverTracker;
 
-/// A prover for the ZKSQL protocol.
 #[derive(Derivative)]
 #[derivative(Clone(bound = "B::MvPCS: Clone, B::UvPCS: Clone"))]
 pub struct ArgProver<B: SnarkBackend> {
@@ -105,13 +104,11 @@ where
 
         Ok(prover)
     }
-    /// Create a prover from the tracker
     #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker(prover_tracker: ProverTracker<B>) -> Self {
         Self::new_from_tracker_rc(Rc::new(RefCell::new(prover_tracker)))
     }
 
-    /// Create a prover from the tracker rc
     #[instrument(level = "debug", skip_all)]
     pub fn new_from_tracker_rc(prover_tracker: Rc<RefCell<ProverTracker<B>>>) -> Self {
         prover_tracker
@@ -123,12 +120,10 @@ where
     }
 
     #[instrument(level = "debug", skip_all)]
-    /// Return a shared handle to the multilinear PCS prover parameters.
     pub fn mv_pcs_prover_param(&self) -> Arc<<B::MvPCS as PCS<B::F>>::ProverParam> {
         Arc::clone(&self.tracker_rc.borrow().pk.mv_pcs_param)
     }
 
-    /// Get the range tracked polynomial given the data type
     #[instrument(level = "debug", skip(self))]
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         RefCell::borrow(&self.tracker_rc).indexed_tracked_poly(label.clone())
@@ -150,8 +145,7 @@ where
         Rc::clone(&self.tracker_rc)
     }
 
-    /// Return the number of tracked materialized commitments currently owned by
-    /// the prover state for the multivariate and univariate PCS substates.
+    /// Numbers of materialized commitments: (multivariate, univariate).
     pub fn commitment_counts(&self) -> (usize, usize) {
         let tracker = self.tracker_rc.borrow();
         (
@@ -160,8 +154,6 @@ where
         )
     }
 
-    /// Track a materialized multivariate polynomial, assigning it a fresh
-    /// `TrackerID`.
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     pub fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> TrackedPoly<B> {
         let num_vars = polynomial.num_vars();
@@ -186,8 +178,6 @@ where
         TrackedPoly::new(Either::Right(cnst), nv, self.tracker_rc.clone())
     }
 
-    /// Track a materialized multivariate polynomial and send its commitment to
-    /// the verifier.
     #[instrument(level = "debug", skip_all, fields(num_vars, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_mv_poly(
         &mut self,
@@ -238,8 +228,6 @@ where
         Ok(tracked_poly)
     }
 
-    /// Track a materialized univariate polynomial, assigning it a fresh
-    /// `TrackerID`.
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     pub fn track_mat_uv_poly(&mut self, polynomial: LDE<B::F>) -> TrackedPoly<B> {
         let degree = polynomial.degree();
@@ -254,8 +242,6 @@ where
         )
     }
 
-    /// Track a materialized univariate polynomial and send its commitment to
-    /// the verifier.
     #[instrument(level = "debug", skip_all, fields(degree, polynomial = tracing::field::Empty))]
     pub fn track_and_commit_mat_uv_poly(
         &mut self,
@@ -301,7 +287,6 @@ where
         Ok(tracked_poly)
     }
 
-    /// Shared handle to the materialized multivariate polynomial for `id`.
     #[instrument(level = "debug", skip(self))]
     pub fn mat_mv_poly(&self, id: TrackerID) -> Arc<MLE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
@@ -310,7 +295,6 @@ where
             .clone()
     }
 
-    /// Shared handle to the materialized univariate polynomial for `id`.
     #[instrument(level = "debug", skip(self))]
     pub fn mat_uv_poly(&self, id: TrackerID) -> Arc<LDE<B::F>> {
         RefCell::borrow(&self.tracker_rc)
@@ -319,7 +303,6 @@ where
             .clone()
     }
 
-    /// Get a virtual polynomial given its TrackerID
     #[instrument(level = "debug", skip(self))]
     pub fn virt_poly(&self, id: TrackerID) -> VirtualPoly<B::F> {
         RefCell::borrow(&self.tracker_rc)
@@ -328,7 +311,6 @@ where
             .clone()
     }
 
-    /// Sample a fiat-shamir challenge and append it to the transcript
     #[instrument(level = "trace", skip(self))]
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
@@ -362,7 +344,6 @@ where
         self.tracker_rc.borrow().miscellaneous_field_vector(key)
     }
 
-    /// Add a claim about the evaluation of a univariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_uv_eval_claim(&mut self, poly_id: TrackerID, point: B::F) -> SnarkResult<()> {
         self.tracker_rc
@@ -370,7 +351,6 @@ where
             .add_uv_eval_claim(poly_id, point)
     }
 
-    /// Add a claim about the evaluation of a multivariate polynomial at a point
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_eval_claim(&mut self, poly_id: TrackerID, point: &[B::F]) -> SnarkResult<()> {
         self.tracker_rc
@@ -378,7 +358,6 @@ where
             .add_mv_eval_claim(poly_id, point)
     }
 
-    /// Add a multivariate sumcheck claim to the proof
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_sumcheck_claim(
         &mut self,
@@ -404,7 +383,6 @@ where
             .add_mv_sumcheck_claim_raw(poly_id, claimed_sum)
     }
 
-    /// Add a multivariate zerocheck claim to the proof
     #[instrument(level = "debug", skip(self), fields(virt_degree = tracing::field::Empty))]
     pub fn add_mv_zerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         let mut tracker = self.tracker_rc.borrow_mut();
@@ -413,7 +391,6 @@ where
         tracker.add_mv_zerocheck_claim(poly_id)
     }
 
-    /// Add a multivariate nozerocheck claim to the proof
     #[instrument(level = "debug", skip(self), fields(virt_degree = tracing::field::Empty))]
     pub fn add_mv_nozerocheck_claim(&mut self, poly_id: TrackerID) -> SnarkResult<()> {
         let mut tracker = self.tracker_rc.borrow_mut();
@@ -422,7 +399,6 @@ where
         tracker.add_mv_nozerocheck_claim(poly_id)
     }
 
-    /// Add a multivariate lookup claim to the proof
     #[instrument(level = "debug", skip(self))]
     pub fn add_mv_lookup_claim(
         &mut self,
@@ -438,21 +414,18 @@ where
         tracker.add_mv_lookup_claim(super_id, sub_id)
     }
 
-    /// Claim the keyed sum `input` states;
+    /// Record the keyed-sum claim `input` states;
     /// [`KeyedSumcheck`](crate::piop::keyed_sumcheck::KeyedSumcheck) has the
-    /// relation.
+    /// relation. [`Self::build_proof`] discharges it in the batch of the
+    /// lookup claims, after them and in the order of these calls, so the
+    /// verifier has to make the same calls in the same order. Under
+    /// LogUp-GKR its columns share the instances of that batch with the
+    /// other columns of their size.
     ///
-    /// The claim is only recorded here. [`Self::build_proof`] discharges it
-    /// in the batch of the lookup claims, after them and in the order of
-    /// these calls. Under LogUp-GKR its columns share the instances of that
-    /// batch with the other columns of their size, where proving the PIOP
-    /// on the spot spends a batch per relation. The verifier has to make
-    /// the same calls in the same order.
-    ///
-    /// All columns and multiplicities must already be tracked by this
-    /// prover: the claim keeps their ids, not the handles, and tracks nothing
-    /// itself. A commitment among them that this proof does not emit has to
-    /// be bound to the statement by the caller.
+    /// The claim keeps the ids of its columns and multiplicities and tracks
+    /// nothing itself, so they must already be tracked by this prover. A
+    /// commitment among them that this proof does not emit has to be bound
+    /// to the statement by the caller.
     ///
     /// A side without columns or without a multiplicity slot per column is
     /// refused, and under `honest-prover` so is a relation that does not
@@ -473,10 +446,9 @@ where
     }
 
     /// [`Self::add_mv_keyed_sum_claim`] without the check that
-    /// `honest-prover` makes of the relation. For a caller that has made
-    /// that check itself, as a PIOP does in `prove` and not in
-    /// `prove_inner`, or that means to hand the verifier a claim that does
-    /// not hold. The shape is checked all the same.
+    /// `honest-prover` makes of the relation, for a caller that has made it
+    /// itself (a PIOP does in `prove`, not in `prove_inner`) or that means
+    /// to hand the verifier a false claim. The shape is still checked.
     #[instrument(level = "debug", skip_all)]
     pub fn add_mv_keyed_sum_claim_unchecked(
         &mut self,
@@ -508,7 +480,7 @@ where
     /// Get the next TrackerID to be used
     #[instrument(level = "debug", skip_all)]
     pub fn next_tracker_id(&mut self) -> TrackerID {
-        self.tracker_rc.borrow_mut().next_id()
+        self.tracker_rc.borrow_mut().peek_next_id()
     }
 
     #[instrument(level = "debug", skip_all)]
@@ -517,11 +489,10 @@ where
     }
 
     /// Reduce the queued lookup and keyed-sum claims to sumcheck claims, in
-    /// one batch. Runs before the subproofs are compiled, outside every
-    /// timed subproof span, so it gets a `bench_stats` span of its own for
-    /// subscribers to time, named by
-    /// [`LOOKUP_REDUCTION_SPAN`](tracker::LOOKUP_REDUCTION_SPAN). The span
-    /// covers the whole function: it opens even with nothing to reduce.
+    /// one batch. It runs outside every timed subproof span, so it has a
+    /// `bench_stats` span of its own, named by
+    /// [`LOOKUP_REDUCTION_SPAN`](tracker::LOOKUP_REDUCTION_SPAN), which opens
+    /// even with nothing to reduce.
     #[instrument(
         target = "bench_stats",
         level = "info",
@@ -653,7 +624,6 @@ where
             .get_or_build_contig_skipped_one_poly(nv, n, s)
     }
 
-    /// Build the zkSQL proof from the claims and comitments
     #[instrument(level = "debug", skip_all)]
     pub fn build_proof(&mut self) -> SnarkResult<SNARKProof<B>> {
         self.reduce_lookup_claims()?;
@@ -684,8 +654,6 @@ mod tests {
         let (prover, _verifier) = test_prelude::<DefaultSnarkBackend>().unwrap();
         prover
     }
-
-    // ── TrackedPoly constant folding ────────────────────────────────
 
     #[test]
     fn constant_plus_constant_folds() {
@@ -770,8 +738,6 @@ mod tests {
         assert_eq!(ab.degree(), 2);
     }
 
-    // ── Committed constant detection via ArgProver ──────────────────
-
     #[test]
     fn committed_constant_detected_and_tracked() {
         let mut prover = setup();
@@ -790,11 +756,9 @@ mod tests {
         assert!(tracked.id_or_const().is_left());
     }
 
-    // ── Shift poly compact storage ─────────────────────────────────
-
-    /// Guards a memory regression: `get_or_insert_shift_poly` must route
-    /// through `MLE::from_u32s` (compact `U32` storage), not build a
-    /// size-`2^log_size` `Vec<F>` (512 MiB per shift poly at log_size=24).
+    /// `get_or_insert_shift_poly` must build compact `U32` storage through
+    /// `MLE::from_u32s`, not a size-`2^log_size` `Vec<F>` (512 MiB per shift
+    /// poly at log_size=24).
     #[test]
     fn shift_poly_uses_u32_storage_not_field_vec() {
         use crate::arithmetic::mat_poly::mle::MLEStorage;

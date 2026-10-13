@@ -42,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `VerifierTracker`'s `config` field is no longer public.
 - Under LogUp, the per-column sums are sent in the proof and bound to the
   transcript, and constant columns are checked in the clear.
+- Comments and docs follow the rules now in `CLAUDE.md`: no history, no
+  restating of names, long comments only for protocols and algorithms.
+  No behaviour changes.
 
 ### Fixed
 
@@ -69,6 +72,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - A lookup whose constant column is wider than every commitment, and one
   whose column and multiplicities differ in size, are now proved.
 - Verification fails after a lookup reduction that failed or never ran.
+
+### Removed
+
+- `ArgVerifier::deep_copy` (use `fork`), `VerifierTracker::sub_scalar` (use
+  `add_scalar` with the negated scalar), `ProverTracker::next_id` and
+  `ProverTracker::evaluate_mat_mv_with_eq_evals`. Each only forwarded to, or
+  duplicated, another function.
 
 ## [0.1.0] - 2026-04-15
 

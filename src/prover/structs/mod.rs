@@ -21,7 +21,7 @@ use ark_ff::PrimeField;
 use ark_poly::Polynomial;
 use ark_std::fmt::Debug;
 use derivative::Derivative;
-/// A claim about the evaluation of a tracked polynomial at a point.
+
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 #[derive(Debug, PartialEq, Eq, PartialOrd)]
@@ -53,10 +53,9 @@ pub struct ProverState<B>
 where
     B: SnarkBackend,
 {
-    /// The transcript for the PIOP
     pub transcript: Tr<B::F>,
 
-    /// number of the tracked polynomials (Univariate and Multivariate)
+    /// Number of tracked polynomials, univariate and multivariate.
     // TODO: See if we should split this into two fields
     pub num_tracked_polys: usize,
 
@@ -100,11 +99,11 @@ where
     // BLAKE3(evaluation bytes) -> commitment, so identical polynomials reuse
     // one (expensive) MSM result.
     pub commitment_cache: BTreeMap<[u8; 32], PC::Commitment>,
-    // Constants detected during track_and_commit: bypass commitment/opening —
-    // only the scalar is sent in the proof and transcript-bound.
+    // Constants detected during track_and_commit: no commitment or opening,
+    // only the scalar is sent in the proof and bound to the transcript.
     pub constants: BTreeMap<TrackerID, F>,
-    // `num_vars` for `constants` entries, emitted so the verifier can mirror
-    // `poly_log_sizes` — see `PROOF_ENCODING_VERSION = 2`.
+    // `num_vars` of the `constants` entries, sent so the verifier can mirror
+    // `poly_log_sizes`.
     pub constants_num_vars: BTreeMap<TrackerID, usize>,
     // Constants that arithmetic folded and a claim then needed an ID for.
     // They are materialized but not sent, and have degree 0 like the

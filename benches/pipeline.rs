@@ -1,9 +1,7 @@
 //! Microbenchmarks for the hot paths that determine end-to-end proving cost.
 //!
-//! Run with `cargo bench --features test-utils`. Criterion stores previous
-//! results in `target/criterion/` and reports deltas on re-run, so a developer
-//! can detect regressions locally before pushing. CI uses the same benches in
-//! --quick mode as a smoke check.
+//! Run with `cargo bench --features test-utils`. CI runs the same benches in
+//! `--quick` mode as a smoke check.
 #![cfg(feature = "test-utils")]
 
 use ark_ff::Zero;

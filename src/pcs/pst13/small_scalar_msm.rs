@@ -1,13 +1,13 @@
 //! Small-scalar MSM entry points (`msm_u1`..`msm_u64`) vendored from arkworks master,
-//! letting the pst13 commit path consume compressed MLE backings directly instead of
-//! materializing 32-byte field elements. Kept next to their only caller since the
-//! arkworks-0.5 `VariableBaseMSM` trait doesn't expose them.
+//! so that the pst13 commit path consumes compressed MLE backings without
+//! materializing field elements. The arkworks-0.5 `VariableBaseMSM` trait
+//! doesn't expose them.
 //!
-//! Adaptation: ark-ec 0.5.0 has no `V::Bucket`, so `V` itself is the bucket type,
-//! matching 0.5.0's own `msm_bigint`; semantics are preserved.
+//! ark-ec 0.5.0 has no `V::Bucket`, so `V` itself is the bucket type, as in
+//! 0.5.0's own `msm_bigint`.
 //!
-//! Correctness anchor: each entry point must match `msm_unchecked` on the same
-//! scalars lifted through `F::from` — tested end-to-end below.
+//! Each entry point must match `msm_unchecked` on the same scalars lifted
+//! through `F::from`.
 
 use ark_ec::scalar_mul::variable_base::VariableBaseMSM;
 use ark_std::{cfg_chunks, vec::Vec};
@@ -42,8 +42,8 @@ fn preamble<A, B>(bases: &mut &[A], scalars: &mut &[B]) -> Option<usize> {
     Some(chunk_size)
 }
 
-/// MSM with boolean scalars: add each base whose scalar is `true`. No bucketing —
-/// `O(set bits)` curve additions, far cheaper than a full Pippenger over field scalars.
+/// MSM with boolean scalars: add each base whose scalar is `true`. No bucketing:
+/// `O(set bits)` curve additions.
 pub(crate) fn msm_u1<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: &[bool]) -> V {
     let chunk_size = match preamble(&mut bases, &mut scalars) {
         Some(cs) => cs,
@@ -61,7 +61,6 @@ pub(crate) fn msm_u1<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: 
         .sum()
 }
 
-/// Multi-scalar multiplication with `u8` scalars.
 pub(crate) fn msm_u8<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: &[u8]) -> V {
     let chunk_size = match preamble(&mut bases, &mut scalars) {
         Some(cs) => cs,
@@ -73,7 +72,6 @@ pub(crate) fn msm_u8<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: 
         .sum()
 }
 
-/// Multi-scalar multiplication with `u16` scalars.
 #[allow(dead_code)] // MLEStorage has no U16 variant today; kept for API completeness.
 pub(crate) fn msm_u16<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: &[u16]) -> V {
     let chunk_size = match preamble(&mut bases, &mut scalars) {
@@ -86,7 +84,6 @@ pub(crate) fn msm_u16<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars:
         .sum()
 }
 
-/// Multi-scalar multiplication with `u32` scalars.
 pub(crate) fn msm_u32<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: &[u32]) -> V {
     let chunk_size = match preamble(&mut bases, &mut scalars) {
         Some(cs) => cs,
@@ -98,7 +95,6 @@ pub(crate) fn msm_u32<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars:
         .sum()
 }
 
-/// Multi-scalar multiplication with `u64` scalars.
 pub(crate) fn msm_u64<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars: &[u64]) -> V {
     let chunk_size = match preamble(&mut bases, &mut scalars) {
         Some(cs) => cs,
@@ -111,9 +107,8 @@ pub(crate) fn msm_u64<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars:
 }
 
 /// Serial Pippenger over small (≤ 64 bit) scalars: arkworks master's `msm_serial`
-/// with `V` as the bucket type (ark-ec 0.5.0 has no `V::Bucket`) and `num_bits`
-/// restricted to 64, so high windows are skipped for free. Window width follows
-/// arkworks' own `ln_without_floats` tuning.
+/// with `num_bits` restricted to 64, so high windows are skipped. Window width
+/// follows arkworks' own `ln_without_floats` tuning.
 fn msm_serial_small<V, S>(bases: &[V::MulBase], scalars: &[S]) -> V
 where
     V: VariableBaseMSM,
@@ -134,7 +129,6 @@ where
         .step_by(c)
         .map(|w_start| {
             let mut res = zero;
-            // `V` as the bucket type — see the fn doc.
             let mut buckets = vec![zero; (two_to_c as usize) - 1];
             scalars
                 .iter()
@@ -192,7 +186,6 @@ mod tests {
     use ark_ff::{UniformRand, Zero};
     use ark_std::{rand::SeedableRng, test_rng};
 
-    /// Random G1 bases — cheap, fine for correctness tests.
     fn rand_bases(count: usize) -> Vec<<G1 as ark_ec::scalar_mul::ScalarMul>::MulBase> {
         use ark_ec::CurveGroup;
         let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(0xB007);
@@ -289,7 +282,6 @@ mod tests {
 
     #[test]
     fn msm_u8_mismatched_lengths_truncates_to_min() {
-        // Longer scalars slice must be truncated to bases.len().
         let bases = rand_bases(50);
         let mut rng = test_rng();
         let long_scalars: Vec<u8> = (0..100).map(|_| u8::rand(&mut rng)).collect();

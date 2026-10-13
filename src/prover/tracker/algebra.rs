@@ -1,4 +1,4 @@
-//! Virtual polynomial algebra — arithmetic composition of tracked polynomials.
+//! Virtual polynomial algebra: arithmetic composition of tracked polynomials.
 
 use super::*;
 
@@ -15,17 +15,12 @@ where
         {
             return BTreeSet::from([id]);
         }
-        // A top-level id that is neither a materialized *commitment* nor a
-        // virtual poly is a materialized-but-uncommitted poly (e.g. a
-        // `track_mat_mv_poly` all-ones / index column, reconstructed by the
-        // verifier via a base oracle). It carries no PCS commitment, so it
-        // contributes no openable ids here — the verifier checks its eval
-        // claim by direct evaluation. Mirror the leaf handling below
-        // ("dangling reference => silently ignore") instead of panicking.
+        // An id that is neither committed nor virtual is a materialized,
+        // uncommitted poly (an all-ones or index column, say). It has nothing
+        // to open: the verifier checks its eval claim by direct evaluation.
         let Some(poly) = self.virt_poly(id) else {
             return BTreeSet::new();
         };
-        // 1)  Initialise the DFS stack with every TrackerID mentioned up-front
         let mut stack: Vec<TrackerID> = poly
             .iter()
             .flat_map(|(_, ids)| ids.iter().copied())
@@ -34,13 +29,11 @@ where
         let mut openable = BTreeSet::new();
         let mut visited = HashSet::new();
 
-        // 2)  Standard iterative DFS
+        // DFS down to the committed leaves.
         while let Some(id) = stack.pop() {
             if !visited.insert(id) {
-                continue; // already explored
+                continue;
             }
-
-            // a) leaf with concrete commitment?
             if self
                 .state
                 .mv_pcs_substate
@@ -48,16 +41,15 @@ where
                 .contains_key(&id)
             {
                 openable.insert(id);
-                continue; // do *not* push children
+                continue;
             }
 
-            // b) otherwise follow the virtual-poly reference if it exists
+            // An id that is neither committed nor virtual is ignored.
             if let Some(vpoly) = self.state.virtual_polys.get(&id) {
                 for (_, child_ids) in vpoly.iter() {
                     stack.extend(child_ids.iter().copied());
                 }
             }
-            // c) dangling reference => silently ignore
         }
 
         openable
@@ -73,7 +65,6 @@ where
             return BTreeSet::from([id]);
         }
         let poly = self.virt_poly(id).unwrap();
-        // 1)  Initialise the DFS stack with every TrackerID mentioned up-front
         let mut stack: Vec<TrackerID> = poly
             .iter()
             .flat_map(|(_, ids)| ids.iter().copied())
@@ -82,13 +73,11 @@ where
         let mut openable = BTreeSet::new();
         let mut visited = HashSet::new();
 
-        // 2)  Standard iterative DFS
+        // DFS down to the committed leaves.
         while let Some(id) = stack.pop() {
             if !visited.insert(id) {
-                continue; // already explored
+                continue;
             }
-
-            // a) leaf with concrete commitment?
             if self
                 .state
                 .uv_pcs_substate
@@ -96,28 +85,27 @@ where
                 .contains_key(&id)
             {
                 openable.insert(id);
-                continue; // do *not* push children
+                continue;
             }
 
-            // b) otherwise follow the virtual-poly reference if it exists
+            // An id that is neither committed nor virtual is ignored.
             if let Some(vpoly) = self.state.virtual_polys.get(&id) {
                 for (_, child_ids) in vpoly.iter() {
                     stack.extend(child_ids.iter().copied());
                 }
             }
-            // c) dangling reference => silently ignore
         }
 
         openable
     }
 
-    /// Get the number of variables of a polynomial, by its TrackerID
     pub fn poly_nv(&self, id: TrackerID) -> usize {
         self.state.num_vars.get(&id).copied().unwrap()
     }
 
-    /// Return the max multiplicative degree (max number of MLEs in any product)
-    /// of the virtual-poly tree rooted at `id`, matching HPVirtualPolynomial::max_degree.
+    /// The max multiplicative degree (max number of MLEs in any product) of
+    /// the virtual-poly tree rooted at `id`, matching
+    /// `HPVirtualPolynomial::max_degree`.
     pub fn virt_poly_degree(&self, id: TrackerID) -> usize {
         let mut memo = BTreeMap::new();
         let mut visiting = BTreeSet::new();
@@ -163,10 +151,8 @@ where
         max_degree
     }
 
-    /// Adds/Subtracts two polynomials together
-    /// The two polynomials are identified by their TrackerIDs, Each one can be
-    /// either materialized or virtual
-    /// The output is a tracker to a new virtual polynomial
+    /// `p1 + p2`, or `p1 - p2` under `do_sub`, as a new virtual polynomial.
+    /// Each operand is materialized or virtual.
     pub fn add_sub_polys(&mut self, p1: TrackerID, p2: TrackerID, do_sub: bool) -> TrackerID {
         let sign_coeff: B::F = if do_sub { -B::F::one() } else { B::F::one() };
 
@@ -209,26 +195,17 @@ where
         self.track_virt_poly(new)
     }
 
-    /// Adds two polynomials together
-    /// The two polynomials are identified by their TrackerIDs, Each one can be
-    /// either materialized or virtual
-    /// The output is a tracker to a new virtual polynomial
     pub fn add_polys(&mut self, p1_id: TrackerID, p2_id: TrackerID) -> TrackerID {
         self.add_sub_polys(p1_id, p2_id, false)
     }
 
-    /// Subtracts p2 from p1
-    /// The two polynomials are identified by their TrackerIDs, Each one can be
-    /// either materialized or virtual
-    /// The output is a tracker to a new virtual polynomial
+    /// `p1 - p2`.
     pub fn sub_polys(&mut self, p1_id: TrackerID, p2_id: TrackerID) -> TrackerID {
         self.add_sub_polys(p1_id, p2_id, true)
     }
 
-    /// Multiplies two polynomials together
-    /// The two polynomials are identified by their TrackerIDs, Each one can be
-    /// either materialized or virtual
-    /// The output is a tracker to a new virtual polynomial
+    /// `p1 * p2` as a new virtual polynomial. Each operand is materialized
+    /// or virtual.
     pub fn mul_polys(&mut self, p1: TrackerID, p2: TrackerID) -> TrackerID {
         let p1_mat = self.mat_mv_poly(p1);
         let p1_virt = self.virt_poly(p1);
@@ -237,9 +214,7 @@ where
 
         let mut new = VirtualPoly::new(); // Invariant: contains only material TrackerIDs
         match (p1_mat, p1_virt, p2_mat, p2_virt) {
-            // Bad Case: p1 not found
             (None, None, ..) => panic!("Unknown p1 TrackerID {p1:?}"),
-            // Bad Case: p2 not found
             (_, _, None, None) => panic!("Unknown p1 TrackerID {p2:?}"),
             // Case 1: both p1 and p2 are materialized
             (Some(_), None, Some(_), None) => new.push((B::F::one(), vec![p1, p2])),
@@ -271,16 +246,12 @@ where
         self.track_virt_poly(new)
     }
 
-    /// Adds a scalar to a polynomial, returns a new virtual polynomial.
-    /// The scalar is a bare-constant term `(c, vec![])` (empty product = 1),
-    /// which costs O(1) memory instead of a size-`2^n` Vec; downstream
-    /// `optimize_linear_terms` folds such terms into one nv=0 MLE. A zero
-    /// `c` appends no term.
+    /// `poly + c` as a new virtual polynomial. The scalar is a bare-constant
+    /// term `(c, vec![])` (empty product = 1), which costs O(1) memory
+    /// instead of a size-`2^n` Vec; `optimize_linear_terms` folds such terms
+    /// into one nv=0 MLE. A zero `c` appends no term.
     pub fn add_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
         let mut new = VirtualPoly::new();
-        // Copy the input's terms verbatim — either the single-factor
-        // wrapper term for a materialized poly, or the whole term list
-        // for a virtual one. Mirrors the shape of `mul_scalar`.
         match (self.mat_mv_poly(poly_id), self.virt_poly(poly_id)) {
             (Some(_), None) => new.push((B::F::one(), vec![poly_id])),
             (None, Some(p)) => new.extend_from_slice(p),
@@ -288,15 +259,11 @@ where
             (Some(_), Some(_)) => unreachable!("id cannot be both material and virtual"),
         }
         if !c.is_zero() {
-            // Bare constant term. The empty product is 1, so this contributes
-            // exactly `c` at every point. See `optimize_linear_terms` for the
-            // consumer that folds these into a compact nv=0 MLE.
             new.push((c, Vec::new()));
         }
         self.track_virt_poly(new)
     }
 
-    /// Multiplies a polynomial by a scalar, returns a new virtual polynomial
     pub fn mul_scalar(&mut self, poly_id: TrackerID, c: B::F) -> TrackerID {
         let mut new = VirtualPoly::new();
         match self.mat_mv_poly(poly_id) {

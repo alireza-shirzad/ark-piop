@@ -67,31 +67,20 @@ pub struct PST13<E: Pairing> {
 }
 
 impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
-    // Parameters
     type ProverParam = PST13ProverParam<E>;
     type VerifierParam = PST13VerifierParam<E>;
     type SRS = PST13UniversalParams<E>;
-    // Polynomial and its associated types
     type Poly = MLE<E::ScalarField>;
-    // comitments and proofs
     type Commitment = PST13Commitment<E>;
     type Proof = PST13Proof<E>;
     type BatchProof = PST13BatchProof<E, Self>;
 
-    /// Build SRS for testing.
-    ///
-    /// - For univariate polynomials, `log_size` is the log of maximum degree.
-    /// - For multilinear polynomials, `log_size` is the number of variables.
-    ///
-    /// WARNING: THIS FUNCTION IS FOR TESTING PURPOSE ONLY.
-    /// THE OUTPUT SRS SHOULD NOT BE USED IN PRODUCTION.
+    /// `log_size` is the number of variables.
     fn gen_srs_for_testing_inner<R: Rng>(rng: &mut R, log_size: usize) -> SnarkResult<Self::SRS> {
         PST13UniversalParams::<E>::gen_srs_for_testing(rng, log_size)
     }
 
-    /// Trim the universal parameters to specialize the public parameters.
-    /// Input both `supported_log_degree` for univariate and
-    /// `supported_num_vars` for multilinear.
+    /// Panics if `supported_degree` is Some or `supported_num_vars` is None.
     fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
         supported_degree: Option<usize>,
@@ -111,17 +100,15 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         Ok((ml_ck, ml_vk))
     }
 
-    /// Generate a commitment for a polynomial (`2^num_vars` G1 scalar muls).
-    ///
-    /// Compressed backings (`Bit`/`U8`/`U32`/`U64`) feed the raw small-scalar slice
-    /// straight to [`small_scalar_msm`], avoiding both the dense `Vec<F>`
-    /// materialization and a full-width Pippenger MSM.
+    /// `2^num_vars` G1 scalar muls for `Field` storage. Compressed backings
+    /// (`Bit`/`U8`/`U32`/`U64`) feed their raw small-scalar slice to
+    /// [`small_scalar_msm`], with no dense `Vec<F>` and no full-width Pippenger MSM.
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment> {
         let prover_param = prover_param.borrow();
-        // Commit over the physically-stored hypercube only — never over virtual
+        // Commit over the physically-stored hypercube only, never over virtual
         // padding, which is a cyclic repetition the SRS must not consume.
         let committed_nv = poly.storage().inner_num_vars();
         if prover_param.num_vars < committed_nv {
@@ -242,7 +229,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             // `value[i] = (high[i] << 64) | low[i]`, so the commit is
             // `msm_u64(bases, low) + 2^64 * msm_u64(bases, high)`. `scale` is
             // fixed-point decoding metadata, not part of the polynomial value,
-            // so it does not participate in the commit (see mle.rs).
+            // so it does not participate in the commit.
             MLEStorage::PackedDecimal { high, low, .. } => {
                 let lo_msm = small_scalar_msm::msm_u64::<E::G1>(bases, low);
                 let hi_msm = small_scalar_msm::msm_u64::<E::G1>(bases, high);
@@ -268,8 +255,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         })
     }
 
-    /// Produce an opening proof for `polynomial` at `point` (the evaluation is
-    /// computed internally). Costs ~`2^{num_var+1}` G1 scalar muls over `num_var` rounds.
+    /// Costs ~`2^{num_var+1}` G1 scalar muls over `num_var` rounds.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -334,7 +320,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             }
             f = r;
 
-            // this is a MSM over G1 and is likely to be the bottleneck
             let msm_span = tracing::span!(
                 tracing::Level::DEBUG,
                 "pst13.open.round.msm",
@@ -348,8 +333,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         Ok((PST13Proof { proofs }, eval))
     }
 
-    /// Input a list of multilinear extensions, and a same number of points, and
-    /// a transcript, compute a multi-opening for all the polynomials.
     fn multi_open_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomials: &[Arc<Self::Poly>],
@@ -360,7 +343,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         #[cfg(feature = "honest-prover")]
         {
             use ark_poly::MultilinearExtension;
-            // Check the claimed evaluations are actually correct.
             for (i, ((poly, point), eval)) in polynomials
                 .iter()
                 .zip(points.iter())
@@ -384,8 +366,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         )
     }
 
-    /// Verifies that `value` is the evaluation at `point` of the polynomial committed
-    /// inside `commitment`. Costs `num_var` pairing products and `num_var` MSMs.
+    /// Costs `num_var` pairing products and `num_var` MSMs.
     fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,
@@ -444,8 +425,6 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         Ok(res)
     }
 
-    /// Verifies that `value_i` is the evaluation at `x_i` of the polynomial
-    /// `poly_i` committed inside `comm`.
     fn batch_verify_inner(
         verifier_param: &Self::VerifierParam,
         comitments: &[Self::Commitment],

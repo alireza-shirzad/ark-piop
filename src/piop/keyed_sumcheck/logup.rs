@@ -350,9 +350,8 @@ impl<F: Field> ProvingParty<F> {
     ) -> SnarkResult<(TrackerID, F)> {
         let nv = tracker.poly_nv(cols[0]);
         // Each column is inverted where it was read, and a second one is
-        // added into the first. The inversion keeps a table of running
-        // products beside the one it inverts: two tables at the peak for
-        // the helper of one column, three for a shared one.
+        // added into the first: with the inversion's running products, two
+        // tables at the peak for one column and three for a shared helper.
         let mut helper: Vec<F> = Vec::new();
         for col in cols {
             let mut inverses = self.take(tracker, *col, nv)?;

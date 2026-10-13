@@ -33,11 +33,9 @@ pub struct KZG10<E: Pairing> {
 }
 
 impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
-    // Parameters
     type ProverParam = KZG10ProverParam<E::G1Affine>;
     type VerifierParam = KZG10VerifierParam<E>;
     type SRS = KZG10UniversalParams<E>;
-    // Polynomial and its associated types
     type Poly = LDE<E::ScalarField>;
     type Commitment = KZG10Commitment<E>;
     type Proof = KZG10Proof<E>;
@@ -45,9 +43,7 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
     // Batch univariate KZG is not implemented; this is a vector of single proofs.
     type BatchProof = KZG10BatchProof<E>;
 
-    /// Build SRS for testing; `supported_size` is the maximum degree.
-    ///
-    /// WARNING: TESTING ONLY — the output SRS must not be used in production.
+    /// `supported_size` is the maximum degree.
     fn gen_srs_for_testing_inner<R: Rng>(
         rng: &mut R,
         supported_size: usize,
@@ -55,7 +51,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Self::SRS::gen_srs_for_testing(rng, supported_size)
     }
 
-    /// Trim the universal parameters to `supported_degree`.
     /// Panics if `supported_num_vars` is Some or `supported_degree` is None.
     fn trim_impl_inner(
         srs: impl Borrow<Self::SRS>,
@@ -76,7 +71,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok((ml_ck, ml_vk))
     }
 
-    /// Generate a commitment for a polynomial. The scheme is not hiding.
     fn commit_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Arc<Self::Poly>,
@@ -101,7 +95,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         })
     }
 
-    /// Produce an opening proof for `polynomial` at `point`.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
@@ -158,8 +151,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok(batch_proof)
     }
 
-    /// Verifies each `value_i` against the corresponding commitment at `point_i`;
-    /// returns the AND of the individual verifications.
     fn batch_verify_inner(
         _verifier_param: &Self::VerifierParam,
         _comitments: &[Self::Commitment],
@@ -186,7 +177,6 @@ impl<E: Pairing> PCS<E::ScalarField> for KZG10<E> {
         Ok(true)
     }
 
-    /// Verifies that `value` is the evaluation at `point` of the committed polynomial.
     fn verify_inner(
         verifier_param: &Self::VerifierParam,
         commitment: &Self::Commitment,

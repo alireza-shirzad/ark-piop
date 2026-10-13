@@ -1,4 +1,4 @@
-//! VerifierTracker — central state manager for the verifying side of the PIOP.
+//! [`VerifierTracker`]: the state of the verifying side of the PIOP.
 
 mod algebra;
 mod claims;
@@ -76,9 +76,8 @@ fn eval_lt_bound<F: PrimeField>(point: &[F], bits_lsb: &[bool], nv: usize) -> F 
     acc
 }
 
-/// Central verifier-side state manager: records the structure of virtual
-/// polynomials (as commitment oracles) and their products, and provides the
-/// algebra for combining them.
+/// Records the structure of virtual polynomials (as commitment oracles) and
+/// their products, and provides the algebra for combining them.
 #[derive(Derivative)]
 #[derivative(Clone(bound = ""))]
 pub struct VerifierTracker<B: SnarkBackend> {
@@ -127,14 +126,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             .unwrap();
     }
 
-    // Set the proof for the tracker
     pub fn set_proof(&mut self, proof: SNARKProof<B>) {
         self.set_proof_ref(&proof);
     }
 
-    // Set the proof for the tracker from a borrowed proof. One made with
-    // another lookup protocol is refused by whatever reads it first
-    // (`proof_or_err`): there is no error to return from here.
+    // A proof made with another lookup protocol is refused by whatever reads
+    // it first (`proof_or_err`): there is no error to return from here.
     pub fn set_proof_ref(&mut self, proof: &SNARKProof<B>) {
         self.proof = Some(ProcessedProof::new_from_proof(proof));
         // The counts belong to the proof they were advanced on.
@@ -203,8 +200,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         self.state.rejected = true;
     }
 
-    /// Return the currently-set proof, or `VerifierError::ProofNotReceived`.
-    /// Prefer this over `self.proof.as_ref().unwrap()` in verify paths.
+    /// The proof, or `VerifierError::ProofNotReceived`.
     ///
     /// A proof made with another lookup protocol than this verifier's is
     /// refused here, from the first read after it is set: read as a proof
@@ -227,21 +223,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(proof)
     }
 
-    // Generate a new TrackerID
     pub(crate) fn gen_id(&mut self) -> TrackerID {
         let id = self.state.num_tracked_polys;
         self.state.num_tracked_polys += 1;
         TrackerID::from_usize(id)
     }
 
-    /// Peek at the next TrackerID without incrementing the counter. `pub`
-    /// so tt-core expr nodes without an `ArgVerifier` reference can mirror
-    /// the prover's commit order.
+    /// `pub` so tt-core expr nodes without an `ArgVerifier` reference can
+    /// mirror the prover's commit order.
     pub fn peek_next_id(&mut self) -> TrackerID {
         TrackerID::from_usize(self.state.num_tracked_polys)
     }
 
-    /// Check if a TrackerID refers to a constant in the proof.
     pub fn proof_mv_constant(&self, id: TrackerID) -> Option<B::F> {
         self.proof
             .as_ref()

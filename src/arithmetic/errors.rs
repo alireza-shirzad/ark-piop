@@ -1,9 +1,6 @@
-//! Arithmetic subsystem errors.
-
 use ark_serialize::SerializationError;
 use thiserror::Error;
 
-/// Data-type-specific arithmetic errors (overflow, underflow, type mismatch).
 #[derive(Error, Debug, Clone)]
 pub enum DataTypeError {
     #[error("unsupported data type: {0}")]
@@ -16,7 +13,6 @@ pub enum DataTypeError {
     Mismatch { expected: String, actual: String },
 }
 
-/// Internal arithmetic errors (serialization failures, invalid parameters).
 #[derive(Error, Debug)]
 pub(crate) enum ArithErrors {
     #[error("arithmetic serialization error: {0}")]
