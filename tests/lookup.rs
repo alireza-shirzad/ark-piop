@@ -1917,16 +1917,17 @@ fn snark_proof_with_lookup_roundtrips_and_verifies() {
     });
 }
 
-/// The version tag is the one of proofs whose claimed sums are bound
-/// before their claims are batched, and a proof tagged with the version
-/// before it is not decoded.
+/// The version tag is the one of proofs whose LogUp helpers carry the
+/// multiplicities no larger than their columns, `m/(col - gamma)`, and
+/// whose sums are those of the helpers, and a proof tagged with the
+/// version before it is not decoded.
 #[test]
 fn snark_proof_tagged_with_the_previous_encoding_version_is_refused() {
     under_each_protocol(|_| {
         let (proof, _, _) = proof_with_lookups();
         let mut bytes = proof.to_bytes().unwrap();
-        assert_eq!(bytes[0], 7);
-        bytes[0] = 6;
+        assert_eq!(bytes[0], 8);
+        bytes[0] = 7;
         assert!(SNARKProof::<B>::from_bytes(&bytes).is_err());
     });
 }

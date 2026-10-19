@@ -13,9 +13,9 @@ pub mod claim;
 /// configured for the other.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LookupProtocol {
-    /// LogUp with a committed helper `1/(column - gamma)` per column, or per
-    /// two adjacent columns of one size. Small proofs; the prover commits to
-    /// every helper.
+    /// LogUp with a committed helper per column, or per two adjacent columns
+    /// of one size without multiplicities. Small proofs; the prover commits
+    /// to every helper.
     LogUp,
     /// LogUp-GKR: the sums of fractions are proved by a GKR protocol without
     /// any helper commitment. A faster prover; the proof carries the GKR
