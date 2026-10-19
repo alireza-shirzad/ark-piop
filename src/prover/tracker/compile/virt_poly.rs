@@ -83,7 +83,7 @@ where
                 mle.num_vars() == nv
                     && !matches!(
                         mle.storage(),
-                        MLEStorage::LazyInverseShifted { .. }
+                        MLEStorage::LazyRatioShifted { .. }
                             | MLEStorage::LazyInverseShiftedSum { .. }
                     )
             })

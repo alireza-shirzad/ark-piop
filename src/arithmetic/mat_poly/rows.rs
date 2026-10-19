@@ -297,7 +297,7 @@ mod tests {
                 MLE::from_packed_decimal(scatter(1 << 30), scatter(u64::MAX), 2, nv),
             ),
             (
-                "lazy_inv",
+                "lazy_ratio",
                 MLE::from_lazy_inverse_shifted(source.clone(), -Fr::from(3u64)),
             ),
             (
