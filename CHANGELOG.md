@@ -24,10 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `SharedArgConfig::logup_gkr_run_budget` bounds the prover memory of one
   GKR run.
 - `examples/bench_lookup.rs`, a lookup benchmark harness.
+- `examples/bench_sparse_mult.rs`, a benchmark of a keyed sum under a 0/1
+  multiplicity of a given density.
+- `MLE::from_lazy_ratio_shifted`, a lazy `numerator/(source - shift)`.
 
 ### Changed
 
-- **Proof encoding version 7.** Earlier proofs do not decode, and proofs
+- **Proof encoding version 8.** Earlier proofs do not decode, and proofs
   differ from earlier ones under either protocol.
 - The multivariate batch opening is over polynomials of mixed sizes, binds
   its claims to the transcript before drawing its challenge, and no longer
@@ -42,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `VerifierTracker`'s `config` field is no longer public.
 - Under LogUp, the per-column sums are sent in the proof and bound to the
   transcript, and constant columns are checked in the clear.
+- Under LogUp, the helper of a column whose multiplicity `m` is a
+  polynomial no larger than the column is `m/(col - gamma)`, and its sum is
+  that of the helper. The helper of a sparse multiplicity is sparse: the
+  prover inverts, stores and commits to its nonzero rows only.
+- `MLEStorage::LazyInverseShifted` is `MLEStorage::LazyRatioShifted`, with
+  an optional numerator, and its kind tag is `lazy_ratio`.
+- `MLEStorage::to_evaluations_vec` expands run-length and sparse storage
+  run by run and exception by exception.
 - Comments and docs follow the rules now in `CLAUDE.md`: no history, no
   restating of names, long comments only for protocols and algorithms.
   No behaviour changes.

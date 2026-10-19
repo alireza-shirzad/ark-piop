@@ -100,23 +100,26 @@ pub enum MLEStorage<F: Field> {
         scale: u8,
         inner_num_vars: usize,
     },
-    /// Lazy inverse-shifted: `1/(source(x) - shift)` at every point, in O(1)
-    /// storage: the helper `1/(p - γ)` of a LogUp argument once it has been
-    /// committed. Keyed sums under the LogUp lookup protocol register one in
-    /// place of every helper table they commit.
+    /// Lazy `numerator(x)/(source(x) - shift)` at every point, the numerator
+    /// 1 when there is none, in O(1) storage: the helper `m/(p - γ)` or
+    /// `1/(p - γ)` of a LogUp argument once it has been committed. Keyed sums
+    /// under the LogUp lookup protocol register one in place of a helper
+    /// table they commit.
     ///
-    /// Contract: `lift(i) = (source.lift(i) - shift).inverse().unwrap_or(0)`,
-    /// with `inner_num_vars` that of `source`.
+    /// Contract: `lift(i) = numerator.lift(i) · (source.lift(i) -
+    /// shift).inverse().unwrap_or(0)`, each source read modulo its own
+    /// inner length.
     /// Callers must ensure `source(x) - shift != 0` where they read. `shift`
     /// is a post-commit transcript challenge, so the zero fallback is only a
     /// safety net over a measure-zero exceptional set.
-    LazyInverseShifted {
+    LazyRatioShifted {
+        numerator: Option<Arc<MLE<F>>>,
         source: Arc<MLE<F>>,
         shift: F,
         inner_num_vars: usize,
     },
     /// Lazy `1/(s1(x) - shift) + 1/(s2(x) - shift)`; same rationale as
-    /// [`Self::LazyInverseShifted`], for a helper shared by two columns.
+    /// [`Self::LazyRatioShifted`], for a helper shared by two columns.
     ///
     /// The sources may hold tables of different sizes. `inner_num_vars` is
     /// the larger of theirs, the period of the sum: a smaller one would
@@ -441,7 +444,7 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
             // Lazy variants are internal-only and never part of a serialized
             // artifact (proofs carry the helper's commitment, not the MLE);
             // reaching this arm means a lazy poly leaked to a boundary.
-            Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => {
+            Self::LazyRatioShifted { .. } | Self::LazyInverseShiftedSum { .. } => {
                 return Err(ark_serialize::SerializationError::NotEnoughSpace);
             }
         }
@@ -552,7 +555,7 @@ impl<F: Field> CanonicalSerialize for MLEStorage<F> {
             }
             // Lazy variants are non-serializable; report 0 so size estimates
             // don't over-allocate (serialize itself errors before writing).
-            Self::LazyInverseShifted { .. } | Self::LazyInverseShiftedSum { .. } => 0,
+            Self::LazyRatioShifted { .. } | Self::LazyInverseShiftedSum { .. } => 0,
         };
         1u8.serialized_size(compress) + payload
     }
@@ -593,7 +596,15 @@ impl<F: Field> Valid for MLEStorage<F> {
                 }
                 Ok(())
             }
-            Self::LazyInverseShifted { source, shift, .. } => {
+            Self::LazyRatioShifted {
+                numerator,
+                source,
+                shift,
+                ..
+            } => {
+                if let Some(numerator) = numerator {
+                    numerator.storage().check()?;
+                }
                 source.storage().check()?;
                 shift.check()
             }
@@ -769,7 +780,7 @@ impl<F: Field> MLEStorage<F> {
             Self::SparseU32 { .. } => "sparseU32",
             Self::SparseU64 { .. } => "sparseU64",
             Self::PackedDecimal { .. } => "dec128",
-            Self::LazyInverseShifted { .. } => "lazy_inv",
+            Self::LazyRatioShifted { .. } => "lazy_ratio",
             Self::LazyInverseShiftedSum { .. } => "lazy_inv_sum",
         }
     }
@@ -790,7 +801,7 @@ impl<F: Field> MLEStorage<F> {
             | Self::SparseU32 { inner_num_vars, .. }
             | Self::SparseU64 { inner_num_vars, .. }
             | Self::PackedDecimal { inner_num_vars, .. }
-            | Self::LazyInverseShifted { inner_num_vars, .. }
+            | Self::LazyRatioShifted { inner_num_vars, .. }
             | Self::LazyInverseShiftedSum { inner_num_vars, .. } => *inner_num_vars,
         }
     }
@@ -893,11 +904,23 @@ impl<F: Field> MLEStorage<F> {
             // event for a downstream check to signal, not a crash. `i` cycles
             // modulo the source's inner_len so reads stay consistent with
             // virtual padding after the outer nv is bumped.
-            Self::LazyInverseShifted { source, shift, .. } => {
+            Self::LazyRatioShifted {
+                numerator,
+                source,
+                shift,
+                ..
+            } => {
                 let src_storage = source.storage();
                 let idx = i % src_storage.inner_len();
                 let v = src_storage.lift(idx) - *shift;
-                v.inverse().unwrap_or_else(F::zero)
+                let inverse = v.inverse().unwrap_or_else(F::zero);
+                match numerator {
+                    Some(numerator) => {
+                        let numerator = numerator.storage();
+                        numerator.lift(i % numerator.inner_len()) * inverse
+                    }
+                    None => inverse,
+                }
             }
             // Same shape, two inversions, same modulo-cycling per source.
             Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
@@ -928,8 +951,9 @@ impl<F: Field> MLEStorage<F> {
             Self::Constant { .. } => std::mem::size_of::<F>() as u64,
             // Lazy variants report only what the backing itself adds; the
             // source MLE's heap is accounted at its own tracker entry.
-            Self::LazyInverseShifted { .. } => {
-                (std::mem::size_of::<Arc<MLE<F>>>() as u64)
+            Self::LazyRatioShifted { .. } => {
+                (std::mem::size_of::<Option<Arc<MLE<F>>>>() as u64)
+                    + (std::mem::size_of::<Arc<MLE<F>>>() as u64)
                     + (std::mem::size_of::<F>() as u64)
                     + (std::mem::size_of::<usize>() as u64)
             }
@@ -980,7 +1004,7 @@ impl<F: Field> MLEStorage<F> {
                 | Self::SparseU64 { .. }
                 // PackedDecimal is already tight at 16 B/row.
                 | Self::PackedDecimal { .. }
-                | Self::LazyInverseShifted { .. }
+                | Self::LazyRatioShifted { .. }
                 | Self::LazyInverseShiftedSum { .. }
         ) {
             return self;
@@ -1089,7 +1113,7 @@ impl<F: Field> MLEStorage<F> {
             | Self::SparseU32 { .. }
             | Self::SparseU64 { .. }
             | Self::PackedDecimal { .. }
-            | Self::LazyInverseShifted { .. }
+            | Self::LazyRatioShifted { .. }
             | Self::LazyInverseShiftedSum { .. } => return self,
         };
         let Some(runs) = runs else {
@@ -1232,13 +1256,40 @@ impl<F: Field> MLEStorage<F> {
             // per slot, the dominant cost of PCS-opening a lazy helper.
             // `batch_inversion` leaves zeros at zero, matching `lift`'s
             // `.inverse().unwrap_or(zero)` fallback.
-            Self::LazyInverseShifted { source, shift, .. } => {
+            Self::LazyRatioShifted {
+                numerator,
+                source,
+                shift,
+                ..
+            } => {
                 let src = source.storage();
                 let src_len = src.inner_len();
                 let mut v: Vec<F> = cfg_into_iter!(0..self.inner_len())
                     .map(|i| src.lift(i % src_len) - *shift)
                     .collect();
                 ark_ff::fields::batch_inversion(&mut v);
+                if let Some(numerator) = numerator {
+                    let numerator = numerator.storage();
+                    let len = numerator.inner_len();
+                    match numerator {
+                        Self::Field(_)
+                        | Self::Bit { .. }
+                        | Self::U8 { .. }
+                        | Self::U32 { .. }
+                        | Self::U64 { .. }
+                        | Self::Constant { .. } => cfg_iter_mut!(v)
+                            .enumerate()
+                            .for_each(|(i, value)| *value *= numerator.lift(i % len)),
+                        // Expanded once: `lift` would scan the runs or search
+                        // the exceptions for every slot.
+                        _ => {
+                            let numerator = numerator.to_evaluations_vec();
+                            cfg_iter_mut!(v)
+                                .enumerate()
+                                .for_each(|(i, value)| *value *= numerator[i % len]);
+                        }
+                    }
+                }
                 v
             }
             Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
@@ -1256,6 +1307,40 @@ impl<F: Field> MLEStorage<F> {
                 cfg_iter_mut!(a).zip(b).for_each(|(x, y)| *x += y);
                 a
             }
+            // Run by run, and the sparse kinds written into a table of the
+            // default: `lift` would scan the runs or search the exceptions
+            // for every slot.
+            Self::Rle { runs, .. } => {
+                let mut v = Vec::with_capacity(self.inner_len());
+                for (value, count) in runs {
+                    v.extend(std::iter::repeat_n(*value, *count as usize));
+                }
+                v
+            }
+            Self::Sparse {
+                default,
+                exceptions,
+                ..
+            } => scatter(*default, exceptions, self.inner_len(), |value| value),
+            Self::SparseU8 {
+                default,
+                exceptions,
+                ..
+            } => scatter(*default, exceptions, self.inner_len(), |value| {
+                F::from(value as u64)
+            }),
+            Self::SparseU32 {
+                default,
+                exceptions,
+                ..
+            } => scatter(*default, exceptions, self.inner_len(), |value| {
+                F::from(value as u64)
+            }),
+            Self::SparseU64 {
+                default,
+                exceptions,
+                ..
+            } => scatter(*default, exceptions, self.inner_len(), F::from),
             // In parallel: large compressed columns are expanded this way in
             // the virtual-polynomial build before each big sumcheck.
             _ => cfg_into_iter!(0..self.inner_len())
@@ -1263,6 +1348,20 @@ impl<F: Field> MLEStorage<F> {
                 .collect(),
         }
     }
+}
+
+/// The `len` values of a sparse table: `default` but at its exceptions.
+fn scatter<F: Field, T: Copy>(
+    default: T,
+    exceptions: &[(u32, T)],
+    len: usize,
+    lift: impl Fn(T) -> F,
+) -> Vec<F> {
+    let mut v = vec![lift(default); len];
+    for (idx, value) in exceptions {
+        v[*idx as usize] = lift(*value);
+    }
+    v
 }
 
 /// A multilinear extension with (a) an optional virtual `nv`: when set, the
@@ -1309,12 +1408,31 @@ impl<F: Field> MLE<F> {
         let inner_num_vars = source.inner_num_vars();
         let outer_num_vars = source.num_vars();
         Self {
-            storage: MLEStorage::LazyInverseShifted {
+            storage: MLEStorage::LazyRatioShifted {
+                numerator: None,
                 source,
                 shift,
                 inner_num_vars,
             },
             nv: (outer_num_vars > inner_num_vars).then_some(outer_num_vars),
+        }
+    }
+
+    /// Lazy `numerator/(source - shift)` over the larger of the two
+    /// hypercubes, the smaller source repeating: a LogUp helper with a
+    /// multiplicity, re-registered after it has been committed. Its table is
+    /// the whole hypercube, the size the helper was committed at, whatever
+    /// the sources hold.
+    pub fn from_lazy_ratio_shifted(numerator: Arc<MLE<F>>, source: Arc<MLE<F>>, shift: F) -> Self {
+        let inner_num_vars = numerator.num_vars().max(source.num_vars());
+        Self {
+            storage: MLEStorage::LazyRatioShifted {
+                numerator: Some(numerator),
+                source,
+                shift,
+                inner_num_vars,
+            },
+            nv: None,
         }
     }
 
@@ -1928,9 +2046,16 @@ impl<F: Field> MLE<F> {
         match &self.storage {
             MLEStorage::Constant { .. } => return true,
             MLEStorage::Rle { runs, .. } => return runs.len() == 1,
-            MLEStorage::LazyInverseShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
+            MLEStorage::LazyRatioShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
                 return false;
             }
+            // Every exception differs from the default, so a single slot
+            // left at the default makes two values.
+            MLEStorage::Sparse {
+                exceptions,
+                inner_num_vars,
+                ..
+            } if exceptions.len() < 1 << inner_num_vars => return exceptions.is_empty(),
             _ => {}
         }
         let inner_len = self.storage.inner_len();
@@ -3425,6 +3550,54 @@ mod tests {
             assert_reads_as(&lazy, &dense_helper(&[&source], shift));
             assert_eq!(lazy.inner_num_vars(), source.inner_num_vars());
         }
+    }
+
+    /// A helper with a numerator is `numerator/(source - shift)` over the
+    /// larger of the two hypercubes, the smaller one repeating, and its
+    /// table is that whole hypercube however little its sources hold.
+    #[test]
+    fn lazy_ratio_shifted_reads_as_its_numerator_over_its_source() {
+        let shift = fr(1000);
+        let mut sources = sources_of_eight_rows();
+        sources.push(MLE::from_evaluations_vec(
+            4,
+            (0..16).map(|i| fr(i % 3)).collect(),
+        ));
+        sources.push(MLE::from_sparse(fr(0), vec![(2, fr(5)), (6, fr(9))], 3).unwrap());
+        sources.push(MLE::from_sparse_u8(1, vec![(3, 4)], 3).unwrap());
+        let runs = MLE::from_evaluations_vec(4, (0..16).map(|i| fr(i / 4 + 1)).collect());
+        sources.push(runs.detect_redundancy());
+        assert_eq!(sources.last().unwrap().storage().kind_tag(), "rle");
+        for numerator in &sources {
+            for source in &sources {
+                let lazy = MLE::from_lazy_ratio_shifted(
+                    Arc::new(numerator.clone()),
+                    Arc::new(source.clone()),
+                    shift,
+                );
+                let (numerators, values) = (numerator.evaluations(), source.evaluations());
+                let rows = numerators.len().max(values.len());
+                let expected: Vec<Fr> = (0..rows)
+                    .map(|row| {
+                        numerators[row % numerators.len()]
+                            * (values[row % values.len()] - shift).inverse().unwrap()
+                    })
+                    .collect();
+                assert_reads_as(&lazy, &expected);
+                assert_eq!(lazy.inner_num_vars(), lazy.num_vars());
+            }
+        }
+    }
+
+    /// A sparse table is constant when it has no exception, or nothing but
+    /// exceptions of one value.
+    #[test]
+    fn sparse_is_constant_without_exceptions_or_without_the_default() {
+        let sparse = |exceptions: Vec<(u32, Fr)>| MLE::from_sparse(fr(0), exceptions, 2).unwrap();
+        assert!(sparse(Vec::new()).is_constant());
+        assert!(!sparse(vec![(1, fr(4))]).is_constant());
+        assert!(sparse((0..4).map(|row| (row, fr(4))).collect()).is_constant());
+        assert!(!sparse((0..4).map(|row| (row, fr(4 + row as u64))).collect()).is_constant());
     }
 
     /// The table of a shared helper is as large as the larger of its
