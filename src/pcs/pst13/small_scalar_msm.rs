@@ -107,22 +107,29 @@ pub(crate) fn msm_u64<V: VariableBaseMSM>(mut bases: &[V::MulBase], mut scalars:
 }
 
 /// Serial Pippenger over small (≤ 64 bit) scalars: arkworks master's `msm_serial`
-/// with `num_bits` restricted to 64, so high windows are skipped. Window width
-/// follows arkworks' own `ln_without_floats` tuning.
+/// with `num_bits` cut to the bit length of the largest scalar, so windows
+/// above it are skipped, and `c` capped at it, so no bucket is out of reach.
+/// Each window costs `2^(c+1)` additions however few scalars reach it.
+/// Window width otherwise follows arkworks' own `ln_without_floats` tuning.
 fn msm_serial_small<V, S>(bases: &[V::MulBase], scalars: &[S]) -> V
 where
     V: VariableBaseMSM,
     S: Into<u64> + Copy + Send + Sync,
 {
+    let max = scalars.iter().map(|&s| s.into()).max().unwrap_or(0);
+    let num_bits = (u64::BITS - max.leading_zeros()) as usize;
+    if num_bits == 0 {
+        return V::zero();
+    }
     let c = if bases.len() < 32 {
         3
     } else {
         ln_without_floats(bases.len()) + 2
-    };
+    }
+    .min(num_bits);
 
     let zero = V::zero();
     let two_to_c = 1u64 << c;
-    let num_bits = core::mem::size_of::<u64>() * 8;
 
     // Each window is of size `c`.
     let window_sums: Vec<_> = (0..num_bits)
@@ -270,6 +277,20 @@ mod tests {
         let ours: G1 = msm_u16(&bases, &scalars);
         let baseline = <G1 as VariableBaseMSM>::msm_unchecked(&bases, &as_field(&scalars));
         assert_eq!(ours, baseline);
+    }
+
+    #[test]
+    fn msm_u64_small_values_match_field_msm() {
+        // Fewer bits than one default window (c = 3 here), exactly one, and
+        // a partial top window.
+        let bases = rand_bases(200);
+        let mut rng = test_rng();
+        for max in [0u64, 1, 2, 3, 7, 8, 1 << 20] {
+            let scalars: Vec<u64> = (0..200).map(|_| u64::rand(&mut rng) % (max + 1)).collect();
+            let ours: G1 = msm_u64(&bases, &scalars);
+            let baseline = <G1 as VariableBaseMSM>::msm_unchecked(&bases, &as_field(&scalars));
+            assert_eq!(ours, baseline, "max {max}");
+        }
     }
 
     #[test]

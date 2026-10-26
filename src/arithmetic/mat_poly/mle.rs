@@ -1750,27 +1750,67 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Rebuild a `Field`-backed MLE holding only small-integer values as the
-    /// tightest compressed variant; no-op for non-`Field` storage. Preserves
-    /// any outer virtual `nv`.
+    /// Rebuild a `Field`-, `U32`- or `U64`-backed MLE holding only values
+    /// that fit a smaller variant as the tightest one; no-op otherwise.
+    /// Preserves any outer virtual `nv`.
     pub fn compressed(self) -> Self
     where
         F: ark_ff::PrimeField,
     {
-        match self.storage {
-            MLEStorage::Field(inner) => {
-                let nv = self.nv;
-                let mut out =
-                    Self::from_evaluations_vec_compressed(inner.num_vars, inner.evaluations);
-                if let Some(target_nv) = nv
-                    && target_nv > out.inner_num_vars()
-                {
-                    out.set_virtual_nv(target_nv);
-                }
-                out
+        /// The tightest of bit, `u8` and `u32` storage for `words`, if it is
+        /// tighter than storage whose largest value is `storage_max`.
+        fn narrowed<F: Field, T: Copy + Into<u64> + Sync>(
+            words: &[T],
+            inner_nv: usize,
+            storage_max: u64,
+        ) -> Option<MLE<F>> {
+            if words.len() != 1 << inner_nv {
+                return None;
             }
-            _ => self,
+            let max = cfg_iter!(words).map(|&w| w.into()).max().unwrap_or(0);
+            if max <= 1 {
+                Some(MLE::from_bits(
+                    words.iter().map(|&w| w.into() == 1),
+                    inner_nv,
+                ))
+            } else if max <= u8::MAX as u64 {
+                let bytes = cfg_iter!(words).map(|&w| w.into() as u8).collect();
+                Some(MLE::from_u8s(bytes, inner_nv))
+            } else if max <= u32::MAX as u64 && storage_max > u32::MAX as u64 {
+                let words = cfg_iter!(words).map(|&w| w.into() as u32).collect();
+                Some(MLE::from_u32s(words, inner_nv))
+            } else {
+                None
+            }
         }
+
+        let nv = self.nv;
+        let mut out = match self.storage {
+            MLEStorage::Field(inner) => {
+                Self::from_evaluations_vec_compressed(inner.num_vars, inner.evaluations)
+            }
+            MLEStorage::U32 {
+                ref words,
+                inner_num_vars,
+            } => match narrowed(words, inner_num_vars, u32::MAX as u64) {
+                Some(out) => out,
+                None => return self,
+            },
+            MLEStorage::U64 {
+                ref words,
+                inner_num_vars,
+            } => match narrowed(words, inner_num_vars, u64::MAX) {
+                Some(out) => out,
+                None => return self,
+            },
+            _ => return self,
+        };
+        if let Some(target_nv) = nv
+            && target_nv > out.inner_num_vars()
+        {
+            out.set_virtual_nv(target_nv);
+        }
+        out
     }
 
     /// Linear-scan run/sparse detection on top of [`Self::compressed`].
@@ -2591,6 +2631,43 @@ mod tests {
         let field: MLE<Fr> =
             MLE::from_evaluations_vec(2, words.iter().map(|&v| Fr::from(v)).collect());
         assert_eq!(compressed.evaluations(), field.evaluations());
+    }
+
+    #[test]
+    fn compressed_narrows_integer_storage() {
+        let field = |values: &[u64]| -> Vec<Fr> { values.iter().map(|&v| Fr::from(v)).collect() };
+        let cases: [(MLE<Fr>, Vec<u64>, &str); 5] = [
+            (MLE::from_u32s(vec![0, 1, 1, 0], 2), vec![0, 1, 1, 0], "bit"),
+            (
+                MLE::from_u32s(vec![3, 255, 0, 9], 2),
+                vec![3, 255, 0, 9],
+                "u8",
+            ),
+            (
+                MLE::from_u64s(vec![1 << 20, 0, 7, 1], 2),
+                vec![1 << 20, 0, 7, 1],
+                "u32",
+            ),
+            (
+                MLE::from_u32s(vec![1 << 20, 0, 7, 1], 2),
+                vec![1 << 20, 0, 7, 1],
+                "u32",
+            ),
+            (
+                MLE::from_u64s(vec![1 << 40, 0, 7, 1], 2),
+                vec![1 << 40, 0, 7, 1],
+                "u64",
+            ),
+        ];
+        for (mle, values, kind) in cases {
+            let out = mle.compressed();
+            assert_eq!(out.storage().kind_tag(), kind);
+            assert_eq!(out.evaluations(), field(&values));
+        }
+        let mut padded = MLE::<Fr>::from_u32s(vec![0, 1, 1, 0], 2);
+        padded.set_virtual_nv(4);
+        let out = padded.compressed();
+        assert_eq!((out.storage().kind_tag(), out.num_vars()), ("bit", 4));
     }
 
     #[test]
