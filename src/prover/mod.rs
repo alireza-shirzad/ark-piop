@@ -756,17 +756,15 @@ mod tests {
         assert!(tracked.id_or_const().is_left());
     }
 
-    /// `get_or_insert_shift_poly` must build compact `U32` storage through
-    /// `MLE::from_u32s`, not a size-`2^log_size` `Vec<F>` (512 MiB per shift
-    /// poly at log_size=24).
+    /// `get_or_insert_shift_poly` must build compact integer storage, not a
+    /// size-`2^log_size` `Vec<F>` (512 MiB per shift poly at log_size=24).
     #[test]
-    fn shift_poly_uses_u32_storage_not_field_vec() {
+    fn shift_poly_uses_integer_storage_not_field_vec() {
         use crate::arithmetic::mat_poly::mle::MLEStorage;
         use crate::prover::structs::polynomial::get_or_insert_shift_poly;
         use either::Either;
 
         let mut prover = setup();
-        // Storage-variant choice is independent of log_size (as long as < 32).
         let log_size = 4;
         let shift = 1;
         let is_right = true;
@@ -781,8 +779,11 @@ mod tests {
             .expect("shift poly should be materialized in the tracker");
 
         assert!(
-            matches!(mle.storage(), MLEStorage::U32 { .. }),
-            "shift poly storage must be U32 (compact), not Field (would be \
+            matches!(
+                mle.storage(),
+                MLEStorage::U8 { .. } | MLEStorage::U32 { .. }
+            ),
+            "shift poly storage must be an integer variant, not Field (would be \
              8× larger and route to the slow Field-vec MSM path)"
         );
 
