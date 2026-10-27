@@ -322,6 +322,25 @@ fn missing_gkr_subproof_is_an_error_not_a_panic() {
     assert_check_failed(case.mirror(&proof, 1));
 }
 
+#[test]
+fn exhausting_the_tracker_ids_is_an_error_not_a_panic() {
+    let case = GkrCase::new();
+    let mut verifier = case.mirror(&case.proof, 0).unwrap();
+    let base = verifier.peek_next_id().to_int();
+    for _ in base..=usize::from(u16::MAX) {
+        verifier.gen_id();
+    }
+    verifier.get_and_append_challenge(b"within").unwrap();
+
+    let a = verifier.track_mat_mv_cnst_oracle(0, F::one());
+    let b = verifier.track_mat_mv_cnst_oracle(0, F::one());
+    let _ = &a + &b;
+    assert_eq!(verifier.peek_next_id(), TrackerID(u16::MAX));
+    assert_check_failed(verifier.get_and_append_challenge(b"past"));
+    assert_check_failed(verifier.track_next_mv_com());
+    assert_check_failed(verifier.verify());
+}
+
 /// Every subproof has to be verified by somebody: a statement that runs
 /// fewer batches than the proof carries does not verify.
 #[test]
