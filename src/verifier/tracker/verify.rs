@@ -1007,6 +1007,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     /// multivariate and the univariate evaluation claims with their PCS.
     #[instrument(level = "debug", skip_all)]
     pub fn verify(&mut self) -> SnarkResult<()> {
+        self.check_tracker_ids()?;
         let proof = self.proof_or_err()?;
         if self.state.rejected {
             return Err(SnarkError::VerifierError(

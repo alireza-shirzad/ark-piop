@@ -223,16 +223,31 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(proof)
     }
 
+    /// A proof can make the verifier allocate more ids than a `TrackerID`
+    /// holds. Past the last one the ids saturate and collide instead of
+    /// panicking, and `check_tracker_ids` rejects the proof at the next
+    /// fallible call.
     pub(crate) fn gen_id(&mut self) -> TrackerID {
-        let id = self.state.num_tracked_polys;
+        let id = self.peek_next_id();
         self.state.num_tracked_polys += 1;
-        TrackerID::from_usize(id)
+        id
     }
 
     /// `pub` so tt-core expr nodes without an `ArgVerifier` reference can
     /// mirror the prover's commit order.
-    pub fn peek_next_id(&mut self) -> TrackerID {
-        TrackerID::from_usize(self.state.num_tracked_polys)
+    pub fn peek_next_id(&self) -> TrackerID {
+        TrackerID(u16::try_from(self.state.num_tracked_polys).unwrap_or(u16::MAX))
+    }
+
+    pub(crate) fn check_tracker_ids(&self) -> SnarkResult<()> {
+        if self.state.num_tracked_polys > usize::from(u16::MAX) + 1 {
+            return Err(SnarkError::VerifierError(
+                VerifierError::VerifierCheckFailed(
+                    "the proof makes the verifier exhaust its tracker ids".to_string(),
+                ),
+            ));
+        }
+        Ok(())
     }
 
     pub fn proof_mv_constant(&self, id: TrackerID) -> Option<B::F> {

@@ -5,6 +5,7 @@ use crate::piop::keyed_sumcheck::reduction::KeyedSumRelation;
 
 impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
+        self.check_tracker_ids()?;
         self.state
             .transcript
             .get_and_append_challenge(label)

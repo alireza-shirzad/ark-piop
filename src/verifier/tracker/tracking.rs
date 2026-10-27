@@ -4,6 +4,7 @@ use super::*;
 
 impl<B: SnarkBackend> VerifierTracker<B> {
     pub fn track_mv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
+        self.check_tracker_ids()?;
         // Idempotent: a caller that visits a subset of the prover's
         // commitments (`TrackedTableOracle::from_tracked_table`) may ask for
         // an id that is already registered.
@@ -172,6 +173,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
     }
 
     pub fn track_uv_com_by_id(&mut self, id: TrackerID) -> SnarkResult<(usize, TrackerID)> {
+        self.check_tracker_ids()?;
         let comm: <B::UvPCS as PCS<B::F>>::Commitment;
         {
             // Scope the immutable borrow
@@ -219,6 +221,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         binding: CommitmentBinding,
     ) -> SnarkResult<TrackerID> {
         let id = self.gen_id();
+        self.check_tracker_ids()?;
 
         match self.proof.as_ref() {
             Some(proof) => {
@@ -289,6 +292,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
 
     pub(crate) fn track_mat_mv_poly(&mut self, polynomial: MLE<B::F>) -> SnarkResult<TrackerID> {
         let id = self.gen_id();
+        self.check_tracker_ids()?;
         let nv = polynomial.num_vars();
         let polynomial = std::sync::Arc::new(polynomial);
         let oracle_poly = polynomial.clone();
@@ -323,6 +327,7 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         binding: CommitmentBinding,
     ) -> SnarkResult<TrackerID> {
         let id = self.gen_id();
+        self.check_tracker_ids()?;
 
         match self.proof.as_ref() {
             Some(proof) => {

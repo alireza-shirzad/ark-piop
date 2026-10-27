@@ -159,7 +159,7 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
     }
 
     fn peek_next_id(&self) -> TrackerID {
-        TrackerID::from_usize(self.state.num_tracked_polys)
+        VerifierTracker::peek_next_id(self)
     }
 
     fn track_eq_x_r(&mut self, r: &[Self::F], max_nv: usize) -> SnarkResult<TrackerID> {
