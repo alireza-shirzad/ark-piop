@@ -13,7 +13,7 @@ use crate::{
 /// of a [`LogupGkrProof`] are part of the format, and so is what the
 /// transcript binds and when: that changes the bytes of a proof without
 /// changing its layout.
-pub const PROOF_ENCODING_VERSION: u8 = 7;
+pub const PROOF_ENCODING_VERSION: u8 = 8;
 use crate::{
     pcs::PCS,
     piop::logup_gkr::LogupGkrProof,

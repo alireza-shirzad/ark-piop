@@ -24,7 +24,7 @@ use super::{
 };
 use crate::{
     DefaultSnarkBackend, SnarkBackend,
-    arithmetic::mat_poly::mle::MLE,
+    arithmetic::mat_poly::mle::{MLE, MLEStorage},
     errors::{SnarkError, SnarkResult},
     pcs::PCS,
     piop::{
@@ -410,7 +410,7 @@ impl Session {
                 &mut self,
                 tracker: &mut ProverTracker<B>,
                 cols: &[TrackerID],
-                mult: Option<TrackerID>,
+                mult: Option<logup::Mult>,
                 gamma: F,
             ) -> SnarkResult<(TrackerID, F)> {
                 let (helper, sum) = self.honest.commit_helper(tracker, cols, mult, gamma)?;
@@ -438,11 +438,11 @@ impl Session {
         logup::reduce_keyed_sums(&mut *tracker, &mut party, &self.relations).map(drop)
     }
 
-    /// A LogUp prover whose helpers are those of the columns in `fakes`
-    /// where the statement has others, and who keeps the tables it
-    /// committed to. Its sums are the sums of those tables: every sum it
-    /// sends and claims is true, and all that is false is that a helper is
-    /// the helper of the statement's column.
+    /// A LogUp prover whose helpers are those of the columns and
+    /// multiplicities in `fakes` where the statement has others, and who
+    /// keeps the tables it committed to. Its sums are those of the tables:
+    /// every sum it sends and claims is true, and all that is false is that
+    /// a helper is the helper of the statement's column.
     fn prove_with_fake_helpers(&mut self, fakes: ColumnEvals<F>) -> SnarkResult<()> {
         struct FakeHelpers {
             honest: logup::ProvingParty<F>,
@@ -453,27 +453,36 @@ impl Session {
                 &mut self,
                 tracker: &mut ProverTracker<B>,
                 cols: &[TrackerID],
-                mult: Option<TrackerID>,
+                mult: Option<logup::Mult>,
                 gamma: F,
             ) -> SnarkResult<(TrackerID, F)> {
-                let mut helper = vec![F::zero(); 1 << TrackerCore::poly_nv(tracker, cols[0])];
+                let rows = 1 << TrackerCore::poly_nv(tracker, cols[0]);
+                let fakes = &self.fakes;
+                let mut read = |id: TrackerID| match fakes.get(&id) {
+                    Some(fake) => fake.clone(),
+                    None => tracker.evaluations(id),
+                };
+                let numerator = match mult {
+                    Some(logup::Mult::Numerator(mult)) => read(mult),
+                    _ => vec![F::one()],
+                };
+                let mut helper = vec![F::zero(); rows];
                 for col in cols {
-                    let col = match self.fakes.get(col) {
-                        Some(fake) => fake.clone(),
-                        None => tracker.evaluations(*col),
-                    };
-                    for (sum, value) in helper.iter_mut().zip(col) {
-                        *sum += (value - gamma).inverse().unwrap();
+                    let col = read(*col);
+                    for (row, sum) in helper.iter_mut().enumerate() {
+                        let value = col[row % col.len()];
+                        *sum +=
+                            numerator[row % numerator.len()] * (value - gamma).inverse().unwrap();
                     }
                 }
                 let helper_sum = match mult {
-                    None => sum(&helper),
-                    Some(mult) => {
-                        let mult = tracker.evaluations(mult);
-                        (0..helper.len().max(mult.len()))
-                            .map(|row| helper[row % helper.len()] * mult[row % mult.len()])
+                    Some(logup::Mult::Factor(mult)) => {
+                        let factor = read(mult);
+                        (0..factor.len().max(helper.len()))
+                            .map(|row| factor[row % factor.len()] * helper[row % helper.len()])
                             .sum()
                     }
+                    _ => sum(&helper),
                 };
                 let helper = tracker
                     .track_and_commit_mat_mv_p(&mle(&helper), false)?
@@ -3492,7 +3501,7 @@ fn logup_sums_are_in_the_transcript_from_where_they_are_read() {
             &mut self,
             tracker: &mut VerifierTracker<B>,
             cols: &[TrackerID],
-            mult: Option<TrackerID>,
+            mult: Option<logup::Mult>,
             gamma: F,
         ) -> SnarkResult<(TrackerID, F)> {
             self.0.push(gamma);
@@ -4078,6 +4087,418 @@ fn logup_pairs_adjacent_unit_columns_of_one_size() {
     session.verify(&proof).unwrap();
 }
 
+/// `2^nv` distinct values.
+fn distinct(nv: usize) -> Vec<F> {
+    fv((0..1u64 << nv).map(|i| 7 * i + 3))
+}
+
+/// A 0/1 mask of `2^nv` rows that keeps `kept`.
+fn mask(nv: usize, kept: &[usize]) -> Vec<F> {
+    let mut mask = vec![F::zero(); 1 << nv];
+    for row in kept {
+        mask[*row] = F::one();
+    }
+    mask
+}
+
+/// The rows of `data` that `mask` keeps, in order, each of the two
+/// repeating up to the larger hypercube.
+fn kept_rows(data: &[F], mask: &[F]) -> Vec<F> {
+    let rows = data.len().max(mask.len());
+    (0..rows)
+        .filter(|row| !mask[row % mask.len()].is_zero())
+        .map(|row| data[row % data.len()])
+        .collect()
+}
+
+/// A compaction as a session: `data` weighed by `mask` against `kept`.
+fn compaction_session(data: &[F], mask: &[F], kept: &[F]) -> Session {
+    let columns = [data.to_vec(), mask.to_vec(), kept.to_vec()];
+    Session::new(&columns, &[], &[(vec![(0, Some(1))], vec![(2, None)])])
+}
+
+/// Compactions through a mask that keeps a few rows, of the data's size,
+/// larger and smaller, and through one that keeps most, into an output
+/// with an activator. Each is proved, and so is not one whose output has
+/// a row the mask drops in place of one it keeps.
+#[test]
+fn sparse_and_dense_masks_of_any_size_prove_their_compactions() {
+    under_each_protocol(|_| {
+        let few = [5, 77, 140, 201];
+        let cases = [
+            (distinct(8), mask(8, &few)),
+            (distinct(6), mask(8, &few)),
+            (distinct(8), mask(6, &[5, 40])),
+            (
+                distinct(8),
+                mask(8, &(0..16).map(|i| 16 * i + 3).collect::<Vec<_>>()),
+            ),
+        ];
+        for (data, mask) in &cases {
+            let kept = kept_rows(data, mask);
+            assert!(kept.len().is_power_of_two() && kept.len() * 16 <= data.len().max(mask.len()));
+            keyed_e2e(
+                &[(data.clone(), Some(mask.clone()))],
+                &[(kept.clone(), None)],
+            )
+            .unwrap();
+
+            let dropped = data.iter().find(|value| !kept.contains(value)).unwrap();
+            let mut wrong = kept.clone();
+            wrong[1] = *dropped;
+            assert_false_statement_rejected(keyed_e2e(
+                &[(data.clone(), Some(mask.clone()))],
+                &[(wrong, None)],
+            ));
+        }
+
+        let data = distinct(8);
+        let most = mask(8, &(0..200).map(|i| (i * 9) % 256).collect::<Vec<_>>());
+        let mut output = kept_rows(&data, &most);
+        output.resize(256, F::zero());
+        let activator = mask(8, &(0..200).collect::<Vec<_>>());
+        keyed_e2e(
+            &[(data.clone(), Some(most.clone()))],
+            &[(output.clone(), Some(activator.clone()))],
+        )
+        .unwrap();
+        let dropped = (0..256).find(|row| most[*row].is_zero()).unwrap();
+        output[3] = data[dropped];
+        assert_false_statement_rejected(keyed_e2e(
+            &[(data, Some(most))],
+            &[(output, Some(activator))],
+        ));
+    });
+}
+
+/// A multiplicity that is a polynomial and zero on every row, on either
+/// side: its term has nothing to add, and the rest of the relation must
+/// balance by itself. The multiplicity is a product of two masks, which no
+/// one commits to and so no one takes for a constant.
+#[test]
+fn tracked_multiplicity_zero_on_every_row_adds_nothing_to_its_side() {
+    under_each_protocol(|_| {
+        let odd = mask(3, &[1, 3, 5, 7]);
+        let even = mask(3, &[0, 2, 4, 6]);
+        let values = in_table(3, 16, 1);
+        let reversed: Vec<F> = values.iter().rev().copied().collect();
+        for (zero_side, permuted) in [(0, true), (1, true), (0, false), (1, false)] {
+            let other = match permuted {
+                true => reversed.clone(),
+                false => {
+                    let mut other = reversed.clone();
+                    other[2] += F::one();
+                    other
+                }
+            };
+            let columns = [
+                distinct(3),
+                odd.clone(),
+                even.clone(),
+                values.clone(),
+                other,
+            ];
+            let zero_term = vec![(0, None), (3, None)];
+            let relation = match zero_side {
+                0 => (zero_term, vec![(4, None)]),
+                _ => (vec![(4, None)], zero_term),
+            };
+            let mut session = Session::new(&columns, &[&[1, 2]], &[relation]);
+            assert_eq!(session.summed[0].1, F::zero());
+            let product = session.prover.tracker().borrow().sumcheck_claims_snapshot()[0].0;
+            let side = match zero_side {
+                0 => &mut session.relations[0].mfxs,
+                _ => &mut session.relations[0].mgxs,
+            };
+            side[0] = Some(KeyedTerm::Poly(product));
+            match permuted {
+                true => session.prove_and_verify().unwrap(),
+                false => assert_rejected_in_the_reduction(session.prove_and_verify()),
+            }
+        }
+    });
+}
+
+/// The helper of a term with a multiplicity no larger than its column is
+/// `m/(col - gamma)` on the column's hypercube. It is kept as the prover
+/// committed to it when it is zero on 7/8 of its rows or more, and
+/// otherwise read off the column and the multiplicity: the tracker's table
+/// of it, or a compact one of a multiplicity no one committed to. A
+/// multiplicity larger than its column is left to the sum, and the helper
+/// is `1/(col - gamma)`. One that is zero everywhere gives a constant
+/// helper.
+#[test]
+fn logup_helper_of_a_multiplicity_is_stored_by_its_density() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let few = [5, 77, 140, 201];
+    let most: Vec<usize> = (0..200).map(|i| (i * 9) % 256).collect();
+    let columns = [
+        distinct(8),
+        distinct(6),
+        mask(8, &few),
+        mask(6, &[5, 40]),
+        mask(8, &most),
+        mask(8, &(0..256).filter(|row| row % 64 != 0).collect::<Vec<_>>()),
+        mask(3, &[1, 3, 5, 7]),
+        mask(3, &[0, 2, 4, 6]),
+        mask(8, &(0..100).map(|i| (i * 7) % 256).collect::<Vec<_>>()),
+    ];
+    let session = Session::new(&columns, &[&[4, 5], &[6, 7]], &[]);
+    let ids = &session.ids;
+    let claims = session.prover.tracker().borrow().sumcheck_claims_snapshot();
+    let (dense_product, zero_product) = (claims[0].0, claims[1].0);
+    let gamma = F::from(1_000_003u64);
+    let term = |col: usize, mult: TrackerID| {
+        let tracker = session.prover.tracker();
+        let tracker = tracker.borrow();
+        logup::Term::Single {
+            col: (
+                Either::Left(ids[col]),
+                TrackerCore::poly_nv(&*tracker, ids[col]),
+            ),
+            mult: Some((Either::Left(mult), TrackerCore::poly_nv(&*tracker, mult))),
+        }
+    };
+    let product: Vec<F> = columns[4]
+        .iter()
+        .zip(&columns[5])
+        .map(|(a, b)| *a * b)
+        .collect();
+    // `(column, multiplicity, its rows, kind of storage)`, `unit` for the
+    // helper `1/(col - gamma)`.
+    let cases = [
+        (0, ids[2], &columns[2], "sparse"),
+        (1, ids[2], &columns[2], "unit"),
+        (0, ids[3], &columns[3], "sparse"),
+        (0, ids[8], &columns[8], "lazy_ratio"),
+        (0, ids[4], &columns[4], "lazy_ratio"),
+        (0, dense_product, &product, "lazy_ratio"),
+    ];
+    for (col, mult, mult_rows, kind) in cases {
+        let mut tracker = session.prover.tracker().borrow().clone();
+        let helper = TrackerCore::peek_next_id(&tracker);
+        let mut party = logup::ProvingParty {
+            evals: ColumnEvals::new(),
+        };
+        let sum = logup::reduce_term(&mut tracker, &mut party, &term(col, mult), gamma).unwrap();
+        let data = &columns[col];
+        let term_sum: F = (0..data.len().max(mult_rows.len()))
+            .map(|row| mult_rows[row % mult_rows.len()] / (data[row % data.len()] - gamma))
+            .sum();
+        let numerator = match kind {
+            "unit" => &vec![F::one()],
+            _ => mult_rows,
+        };
+        let rows = data.len();
+        let expected: Vec<F> = (0..rows)
+            .map(|row| numerator[row % numerator.len()] / (data[row] - gamma))
+            .collect();
+        let nonzero = expected.iter().filter(|h| !h.is_zero()).count();
+        let stored = tracker.mat_mv_poly(helper).unwrap();
+        assert_eq!(stored.num_vars(), rows.trailing_zeros() as usize);
+        assert_eq!(stored.evaluations(), expected);
+        assert_eq!(sum, term_sum);
+        match (stored.storage(), kind) {
+            (MLEStorage::Sparse { exceptions, .. }, "sparse") => {
+                assert!(8 * nonzero <= rows);
+                assert_eq!(exceptions.len(), nonzero);
+            }
+            (MLEStorage::LazyRatioShifted { numerator, .. }, "lazy_ratio") => {
+                assert!(8 * nonzero > rows);
+                assert!(numerator.as_ref().is_some_and(|n| !n.storage().is_field()));
+            }
+            (
+                MLEStorage::LazyRatioShifted {
+                    numerator: None, ..
+                },
+                "unit",
+            ) => {}
+            (storage, _) => panic!("expected {kind}, got {}", storage.kind_tag()),
+        }
+    }
+
+    let mut tracker = session.prover.tracker().borrow().clone();
+    let helper = TrackerCore::peek_next_id(&tracker);
+    let mut party = logup::ProvingParty {
+        evals: ColumnEvals::new(),
+    };
+    let zero_term = logup::Term::Single {
+        col: (Either::Left(ids[0]), 8),
+        mult: Some((Either::Left(zero_product), 3)),
+    };
+    let sum = logup::reduce_term(&mut tracker, &mut party, &zero_term, gamma).unwrap();
+    assert!(sum.is_zero());
+    let stored = tracker.mat_mv_poly(helper).unwrap();
+    assert!(stored.is_constant());
+    assert_eq!(stored.num_vars(), 8);
+}
+
+/// A compaction of 4 rows out of 256 whose output is false in three ways:
+/// a row the mask drops in place of one it keeps, every kept row twice,
+/// and 4 dropped rows besides the kept ones. In each the prover commits to
+/// the helper of the mask that would make the output true, which is zero
+/// where that mask is and nonzero somewhere the statement's mask is zero,
+/// or twice the statement's helper. Every sum it sends is the sum of its
+/// helper, and the two sides balance: the zerocheck of the helper against
+/// the statement's mask is what is left to stop it.
+#[test]
+fn logup_helper_of_another_multiplicity_than_the_statements_is_rejected() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let data = distinct(8);
+    let kept = [5, 77, 140, 201];
+    let honest = mask(8, &kept);
+    let take = |rows: &[usize]| -> Vec<F> { rows.iter().map(|row| data[*row]).collect() };
+    let twice: Vec<F> = honest.iter().map(|m| *m + m).collect();
+    let cases = [
+        (take(&[5, 77, 140, 9]), mask(8, &[5, 77, 140, 9])),
+        ([take(&kept), take(&kept)].concat(), twice),
+        (
+            take(&[5, 77, 140, 201, 0, 1, 2, 3]),
+            mask(8, &[5, 77, 140, 201, 0, 1, 2, 3]),
+        ),
+    ];
+
+    let mut session = compaction_session(&data, &honest, &take(&kept));
+    session.prove_with_fake_helpers(ColumnEvals::new()).unwrap();
+    let proof = session.prover.build_proof().unwrap();
+    session.verify(&proof).unwrap();
+
+    for (output, fake) in cases {
+        let session = compaction_session(&data, &honest, &output);
+        let mask_id = session.ids[1];
+        let fakes = BTreeMap::from([(mask_id, fake)]);
+        assert_stopped_by_the_input_claims(session, |session| {
+            session.prove_with_fake_helpers(fakes)
+        });
+    }
+}
+
+/// A prover that adds the same to the sum of a masked column and to that
+/// of the output: the sides balance, and the sumcheck of the helper of the
+/// masked column is what fails. Added to one of them only, the comparison
+/// fails first.
+#[test]
+fn logup_sum_of_a_ratio_helper_that_is_not_its_sum_is_rejected() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let (data, honest) = (distinct(8), mask(8, &[5, 77, 140, 201]));
+    let kept = kept_rows(&data, &honest);
+    let d = F::from(5u64);
+    let session = || compaction_session(&data, &honest, &kept);
+    assert_stopped_by_the_input_claims(session(), |session| session.prove_shifting_sums(&[d, d]));
+    if !cfg!(feature = "honest-prover") {
+        let mut session = session();
+        session.prove_shifting_sums(&[d]).unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        assert_rejected_in_the_reduction(session.verify(&proof));
+    }
+}
+
+/// A prover with a compaction whose output has only part of the rows: a
+/// mask of 8 rows over data of 16 that repeats its first 8, so that each
+/// of 2 data rows is kept twice, and an output with each once; or the same
+/// mask over 16 distinct rows, and an output with each kept row twice. It
+/// commits to the honest helper on 8 rows, or to it written twice on 32.
+/// The zerocheck holds on every row, for the column and the multiplicity
+/// repeat as the helper does, and the helper sums to what the output does.
+/// The verifier takes a helper of its column's size and no other.
+#[test]
+fn logup_ratio_helper_of_another_size_than_its_column_is_refused() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let cases = [([distinct(3), distinct(3)].concat(), 3), (distinct(4), 5)];
+    for (data, helper_nv) in cases {
+        let data_nv = data.len().trailing_zeros() as usize;
+        let mask = mask(3, &[1, 6]);
+        let honest_output = kept_rows(&data, &mask);
+        let output = match helper_nv < data_nv {
+            true => honest_output[..honest_output.len() / 2].to_vec(),
+            false => [&honest_output[..], &honest_output[..]].concat(),
+        };
+        compaction_session(&data, &mask, &honest_output)
+            .prove_and_verify()
+            .unwrap();
+        let mut session = compaction_session(&data, &mask, &output);
+        let ids = session.ids.clone();
+        {
+            // The reduction by hand: the prover's own schedule would refuse
+            // the helper as the verifier's does.
+            let tracker = session.prover.tracker();
+            let mut tracker = tracker.borrow_mut();
+            let tracker = &mut *tracker;
+            let gamma = tracker.get_and_append_challenge(b"gamma").unwrap();
+            let table: Vec<F> = (0..1usize << helper_nv)
+                .map(|row| mask[row % mask.len()] / (data[row % data.len()] - gamma))
+                .collect();
+            let helper = tracker
+                .track_and_commit_mat_mv_p(&mle(&table), false)
+                .unwrap()
+                .left()
+                .unwrap();
+            let helper_sum = sum(&table);
+            tracker.send_logup_sum(helper_sum);
+            TrackerCore::append_field_element(tracker, b"keyed term sum", &helper_sum).unwrap();
+            tracker.push_raw_sumcheck_claim(helper, helper_sum).unwrap();
+            let product = tracker.mul_polys(ids[0], helper);
+            let shifted = tracker.mul_scalar(helper, gamma);
+            let rest = tracker.sub_polys(product, shifted);
+            let rest = tracker.sub_polys(rest, ids[1]);
+            tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
+
+            let mut party = logup::ProvingParty {
+                evals: ColumnEvals::new(),
+            };
+            let output_term = logup::Term::Single {
+                col: (Either::Left(ids[2]), output.len().trailing_zeros() as usize),
+                mult: None,
+            };
+            let output_sum = logup::reduce_term(tracker, &mut party, &output_term, gamma).unwrap();
+            assert_eq!(helper_sum, output_sum);
+        }
+        let proof = session.prover.build_proof().unwrap();
+        assert_rejected_in_the_reduction(session.verify(&proof));
+    }
+}
+
+/// A row equal to `gamma` has no helper where its multiplicity is not zero,
+/// in any of the rows the multiplicity repeats into, and the prover is told
+/// so. Where the multiplicity is zero the helper is zero, whatever the row.
+#[test]
+fn logup_gamma_on_a_row_without_multiplicity_is_no_prover_error() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let data = distinct(4);
+    // Over 16 rows: rows 1 and 2 kept, and rows 9 and 10 that repeat them
+    // in the mask; row 4 in neither.
+    let columns = [data.clone(), mask(3, &[1, 2])];
+    let session = Session::new(&columns, &[], &[]);
+    let term = logup::Term::Single {
+        col: (Either::Left(session.ids[0]), 4),
+        mult: Some((Either::Left(session.ids[1]), 3)),
+    };
+    for (row, refused) in [(1, true), (10, true), (4, false)] {
+        let mut tracker = session.prover.tracker().borrow().clone();
+        let mut party = logup::ProvingParty {
+            evals: ColumnEvals::new(),
+        };
+        let reduced = logup::reduce_term(&mut tracker, &mut party, &term, data[row]);
+        match (reduced, refused) {
+            (Err(SnarkError::PolyIOPErrors(PolyIOPErrors::InvalidParameters(reason))), true) => {
+                let column = session.ids[0];
+                assert!(
+                    reason.contains("gamma") && reason.ends_with(&format!("polynomial {column}")),
+                    "{reason}"
+                );
+            }
+            (Ok(sum), false) => {
+                let expected: F = [1, 2, 9, 10]
+                    .map(|kept| (data[kept] - data[row]).inverse().unwrap())
+                    .into_iter()
+                    .sum();
+                assert_eq!(sum, expected);
+            }
+            (other, _) => panic!("row {row}: got {other:?}"),
+        }
+    }
+}
+
 /// What `prover` proves about [`fast_path_columns`] when its statement
 /// reaches the reduction by every route: a keyed sum proved on the spot,
 /// the lookups of [`fast_path_lookups`], a keyed sum claimed for later, and
@@ -4146,7 +4567,7 @@ fn logup_gkr_proof_bytes_are_pinned() {
         .unwrap();
     let (version, rest) = bytes.split_first().unwrap();
     let (tag, before) = rest.split_last().unwrap();
-    assert_eq!(*version, 7);
+    assert_eq!(*version, 8);
     assert_eq!(*tag, LookupProtocol::LogUpGkr.tag());
     assert_eq!(before.len() + 1, PINNED_LEN);
     assert_eq!(blake3::hash(before).to_hex().as_str(), PINNED);

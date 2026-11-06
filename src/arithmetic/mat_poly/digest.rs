@@ -129,8 +129,16 @@ pub fn mle_digest<F: Field>(mle: &MLE<F>) -> [u8; 32] {
         }
         // Lazy variants only appear on the tracker AFTER commit, so this arm
         // is unreachable in the honest-prover flow. If reached anyway, fold
-        // the source digest + shift + tag: slow but still a sound cache key.
-        MLEStorage::LazyInverseShifted { source, shift, .. } => {
+        // the source digests + shift + tag: slow but still a sound cache key.
+        MLEStorage::LazyRatioShifted {
+            numerator,
+            source,
+            shift,
+            ..
+        } => {
+            if let Some(numerator) = numerator {
+                rle_bytes.extend_from_slice(&mle_digest(numerator.as_ref()));
+            }
             let src_digest = mle_digest(source.as_ref());
             rle_bytes.extend_from_slice(&src_digest);
             let shift_bs = unsafe {

@@ -27,9 +27,10 @@ use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 
 /// Shared commit path for all `Sparse*` storage variants: rewrites `MSM(bases, values)` as
-/// `default * Σ bases[..inner_len] + Σ bases[idx] * (val - default)` over the exceptions.
-/// With `default == 0` only `|exceptions|` scalar-muls are paid; otherwise the baseline sum
-/// costs `Ω(inner_len)` group additions but still avoids materializing a `Vec<F>`.
+/// `default * Σ bases[..inner_len] + Σ bases[idx] * (val - default)` over the exceptions,
+/// the latter one MSM over the exceptions' bases. With `default == 0` that MSM is all that
+/// is paid; otherwise the baseline sum costs `Ω(inner_len)` group additions but still avoids
+/// materializing a `Vec<F>`.
 /// Callers pass F-lifted values so `F::from` is paid once per exception, not per element.
 fn sparse_commit<E: Pairing>(
     bases: &[E::G1Affine],
@@ -51,12 +52,13 @@ fn sparse_commit<E: Pairing>(
             sum_bases.mul(default)
         }
     };
-    for (idx, val) in exceptions {
-        let delta = val - default;
-        if !delta.is_zero() {
-            acc += bases[idx as usize].mul(delta);
-        }
-    }
+    let (points, deltas): (Vec<E::G1Affine>, Vec<E::ScalarField>) = exceptions
+        .filter_map(|(idx, val)| {
+            let delta = val - default;
+            (!delta.is_zero()).then(|| (bases[idx as usize], delta))
+        })
+        .unzip();
+    acc += E::G1::msm_unchecked(&points, &deltas);
     acc.into_affine()
 }
 
@@ -239,9 +241,9 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             // Lazy variants are registered only after their dense form was committed
             // and dropped; committing one directly is a caller bug, and materializing
             // here (O(2^nv) inversions) would defeat the memory optimization.
-            MLEStorage::LazyInverseShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
+            MLEStorage::LazyRatioShifted { .. } | MLEStorage::LazyInverseShiftedSum { .. } => {
                 panic!(
-                    "PST13::commit: cannot commit an MLE with lazy inverse-shifted storage. \
+                    "PST13::commit: cannot commit an MLE with lazy helper storage. \
                      Lazy backings are for post-commit re-registration only; commit the dense \
                      source-based MLE first, then swap in the lazy backing via \
                      `register_mat_mv_poly`."
@@ -560,6 +562,32 @@ mod tests {
         assert_eq!(wrapped_commit, inner_commit);
         assert_eq!(wrapped_commit.nv, inner.num_vars() as u8);
 
+        Ok(())
+    }
+
+    /// A sparse polynomial commits to what its table does, with a default
+    /// of zero or not, and with no exception at all.
+    #[test]
+    fn sparse_commit_matches_the_commit_of_its_table() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 8)?;
+        let (ck, _) = PST13::trim(&params, None, Some(8))?;
+        let nv = 7;
+        let exceptions: Vec<(u32, Fr)> = [3u32, 17, 64, 100, 127]
+            .iter()
+            .map(|row| (*row, Fr::rand(&mut rng)))
+            .collect();
+        for default in [Fr::zero(), Fr::from(5u64)] {
+            for exceptions in [exceptions.clone(), Vec::new()] {
+                let sparse = MLE::from_sparse(default, exceptions.clone(), nv).unwrap();
+                assert!(matches!(sparse.storage(), MLEStorage::Sparse { .. }));
+                let table = Arc::new(MLE::from_evaluations_vec(nv, sparse.evaluations()));
+                assert_eq!(
+                    PST13::commit(&ck, &Arc::new(sparse))?,
+                    PST13::commit(&ck, &table)?
+                );
+            }
+        }
         Ok(())
     }
 }
