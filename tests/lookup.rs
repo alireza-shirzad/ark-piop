@@ -2538,7 +2538,7 @@ fn lookup_protocol_is_named_logup_or_gkr_in_any_case() {
         let err = name.parse::<LookupProtocol>().unwrap_err();
         assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
     }
-    assert_eq!(LookupProtocol::default(), LookupProtocol::LogUpGkr);
+    assert_eq!(LookupProtocol::default(), LookupProtocol::LogUp);
 }
 
 /// What this process's environment makes of a default configuration and of
@@ -2555,12 +2555,12 @@ fn default_configuration_follows_the_environment() {
             .unwrap()
     };
     let explicit = SharedArgConfig {
-        lookup_protocol: LookupProtocol::LogUp,
+        lookup_protocol: LookupProtocol::LogUpGkr,
         ..SharedArgConfig::default()
     };
     let named = std::env::var(LOOKUP_PROTOCOL_ENV).ok();
     let expected = match named.as_deref().map(str::to_ascii_lowercase).as_deref() {
-        None => Some(LookupProtocol::LogUpGkr),
+        None => Some(LookupProtocol::LogUp),
         Some("logup") => Some(LookupProtocol::LogUp),
         Some("gkr") => Some(LookupProtocol::LogUpGkr),
         Some(_) => None,
@@ -2569,7 +2569,7 @@ fn default_configuration_follows_the_environment() {
         // The default cannot say so; everything that builds on it does.
         assert_eq!(
             SharedArgConfig::default().lookup_protocol,
-            LookupProtocol::LogUpGkr
+            LookupProtocol::LogUp
         );
         let err = LookupProtocol::from_env().unwrap_err();
         assert!(matches!(err, SnarkError::SetupError(_)), "got {err:?}");
@@ -2597,7 +2597,7 @@ fn default_configuration_follows_the_environment() {
     let mut prover = ArgProver::<B>::new_from_pk_with_config(pk.clone(), explicit).unwrap();
     assert_eq!(
         prover.build_proof().unwrap().lookup_messages.protocol(),
-        LookupProtocol::LogUp
+        LookupProtocol::LogUpGkr
     );
     // The default constructors are those of a default configuration.
     let mut prover = ArgProver::<B>::new_from_pk(pk);
@@ -2637,7 +2637,7 @@ fn environment_names_the_default_lookup_protocol() {
             .unwrap_or_else(|| panic!("under {value:?} the probe did not run: {stdout}"))
             .to_string()
     };
-    assert_eq!(probe(None), "LogUp-GKR");
+    assert_eq!(probe(None), "LogUp");
     for value in ["logup", "LogUp", "LOGUP"] {
         assert_eq!(probe(Some(value)), "LogUp");
     }

@@ -16,11 +16,11 @@ pub enum LookupProtocol {
     /// LogUp with a committed helper `1/(column - gamma)` per column, or per
     /// two adjacent columns of one size. Small proofs; the prover commits to
     /// every helper.
+    #[default]
     LogUp,
     /// LogUp-GKR: the sums of fractions are proved by a GKR protocol without
     /// any helper commitment. A faster prover; the proof carries the GKR
     /// messages.
-    #[default]
     LogUpGkr,
 }
 
@@ -225,7 +225,7 @@ pub struct SharedArgConfig {
 
 impl Default for SharedArgConfig {
     /// The lookup protocol is the one [`LOOKUP_PROTOCOL_ENV`] names, and
-    /// LogUp-GKR when the variable is unset or names no protocol; see
+    /// LogUp when the variable is unset or names no protocol; see
     /// [`LookupProtocol::from_env`].
     fn default() -> Self {
         Self {
