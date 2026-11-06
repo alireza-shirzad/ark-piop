@@ -10,7 +10,10 @@ use std::{
     fmt::{self, Formatter},
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
     slice::IterMut,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
 };
 
 /// The evaluation-table backing for an [`MLE`]. `Field` holds every hypercube
@@ -1790,15 +1793,25 @@ impl<F: Field> MLE<F> {
         }
     }
 
-    /// Classify `evals` into the tightest small-scalar [`MLEStorage`] kind
-    /// (bit → u8 → u32 → u64 → Field) via one `into_bigint()` pass, build
-    /// that backing, and drop `evals`. Falls back to
+    /// Builds the tightest small-scalar [`MLEStorage`] kind (bit → u8 → u32
+    /// → u64 → Field) for `evals`, falling back to
     /// [`MLE::from_evaluations_vec`] when nothing smaller fits.
     pub fn from_evaluations_vec_compressed(num_vars: usize, evals: Vec<F>) -> Self
     where
         F: ark_ff::PrimeField,
     {
-        #[derive(Copy, Clone, PartialEq, Eq)]
+        Self::narrowed_field(num_vars, &evals)
+            .unwrap_or_else(|| Self::from_evaluations_vec(num_vars, evals))
+    }
+
+    /// The tightest of bit, `u8`, `u32` and `u64` storage for `evals`, or
+    /// `None` if some value needs the full field.
+    fn narrowed_field(num_vars: usize, evals: &[F]) -> Option<Self>
+    where
+        F: ark_ff::PrimeField,
+    {
+        // Ordered so that a table's kind is the max over its values.
+        #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
         enum Kind {
             Bit,
             U8,
@@ -1806,65 +1819,95 @@ impl<F: Field> MLE<F> {
             U64,
             Field,
         }
-        let mut kind = Kind::Bit;
-        for x in evals.iter() {
-            if kind == Kind::Field {
-                break;
-            }
-            let bigint = x.into_bigint();
-            let limbs = bigint.as_ref(); // &[u64]
-            let this_kind = if limbs.iter().skip(1).all(|&l| l == 0) {
-                let low = limbs.first().copied().unwrap_or(0);
-                if low <= 1 {
-                    Kind::Bit
-                } else if low <= u8::MAX as u64 {
-                    Kind::U8
-                } else if low <= u32::MAX as u64 {
-                    Kind::U32
+        fn kind_until_field<F: ark_ff::PrimeField>(evals: &[F]) -> Kind {
+            let mut kind = Kind::Bit;
+            for x in evals {
+                let bigint = x.into_bigint();
+                let limbs = bigint.as_ref();
+                let this_kind = if limbs.iter().skip(1).all(|&l| l == 0) {
+                    let low = limbs.first().copied().unwrap_or(0);
+                    if low <= 1 {
+                        Kind::Bit
+                    } else if low <= u8::MAX as u64 {
+                        Kind::U8
+                    } else if low <= u32::MAX as u64 {
+                        Kind::U32
+                    } else {
+                        Kind::U64
+                    }
                 } else {
-                    Kind::U64
+                    Kind::Field
+                };
+                kind = kind.max(this_kind);
+                if kind == Kind::Field {
+                    break;
                 }
-            } else {
-                Kind::Field
-            };
-            kind = match (kind, this_kind) {
-                (Kind::Bit, k) => k,
-                (Kind::U8, Kind::Bit) => Kind::U8,
-                (Kind::U8, k) => k,
-                (Kind::U32, Kind::Bit | Kind::U8) => Kind::U32,
-                (Kind::U32, k) => k,
-                (Kind::U64, Kind::Bit | Kind::U8 | Kind::U32) => Kind::U64,
-                (Kind::U64, k) => k,
-                (Kind::Field, _) => Kind::Field,
-            };
+            }
+            kind
         }
-        match kind {
-            Kind::Bit => Self::from_bits(
-                evals.iter().map(|x| {
-                    let low = x.into_bigint().as_ref().first().copied().unwrap_or(0);
-                    low == 1
-                }),
-                num_vars,
-            ),
-            Kind::U8 => {
-                let bytes: Vec<u8> = evals
-                    .iter()
-                    .map(|x| x.into_bigint().as_ref()[0] as u8)
-                    .collect();
-                Self::from_u8s(bytes, num_vars)
-            }
+
+        // Most Field tables show a large value at once, so a short serial
+        // probe settles them; the rest is classified in parallel blocks,
+        // which all stop once one of them has seen a Field value.
+        const PROBE: usize = 1 << 12;
+        const BLOCK: usize = 1 << 14;
+        let (probe, rest) = evals.split_at(evals.len().min(PROBE));
+        let mut kind = kind_until_field(probe);
+        if kind != Kind::Field && !rest.is_empty() {
+            let field_seen = AtomicBool::new(false);
+            let rest_kind = cfg_chunks!(rest, BLOCK)
+                .map(|block| {
+                    if field_seen.load(AtomicOrdering::Relaxed) {
+                        return Kind::Field;
+                    }
+                    let kind = kind_until_field(block);
+                    if kind == Kind::Field {
+                        field_seen.store(true, AtomicOrdering::Relaxed);
+                    }
+                    kind
+                })
+                .max()
+                .unwrap_or(Kind::Bit);
+            kind = kind.max(rest_kind);
+        }
+        let low = |x: &F| x.into_bigint().as_ref()[0];
+        Some(match kind {
+            Kind::Bit => Self::from_bit_slice(evals, num_vars, |x| x.is_one()),
+            Kind::U8 => Self::from_u8s(cfg_iter!(evals).map(|x| low(x) as u8).collect(), num_vars),
             Kind::U32 => {
-                let words: Vec<u32> = evals
-                    .iter()
-                    .map(|x| x.into_bigint().as_ref()[0] as u32)
-                    .collect();
-                Self::from_u32s(words, num_vars)
+                Self::from_u32s(cfg_iter!(evals).map(|x| low(x) as u32).collect(), num_vars)
             }
-            Kind::U64 => {
-                let words: Vec<u64> = evals.iter().map(|x| x.into_bigint().as_ref()[0]).collect();
-                Self::from_u64s(words, num_vars)
-            }
-            Kind::Field => Self::from_evaluations_vec(num_vars, evals),
+            Kind::U64 => Self::from_u64s(cfg_iter!(evals).map(low).collect(), num_vars),
+            Kind::Field => return None,
+        })
+    }
+
+    /// Bit-packed `MLE` of `values`, which must number `1 << num_vars`.
+    fn from_bit_slice<T: Sync>(
+        values: &[T],
+        num_vars: usize,
+        is_one: impl Fn(&T) -> bool + Sync,
+    ) -> Self {
+        assert_eq!(
+            values.len(),
+            1 << num_vars,
+            "from_bit_slice: {} values, expected 2^{}",
+            values.len(),
+            num_vars
+        );
+        let bits = cfg_chunks!(values, 8)
+            .map(|byte| {
+                byte.iter()
+                    .enumerate()
+                    .fold(0u8, |acc, (i, v)| acc | ((is_one(v) as u8) << i))
+            })
+            .collect();
+        Self {
+            storage: MLEStorage::Bit {
+                bits,
+                inner_num_vars: num_vars,
+            },
+            nv: None,
         }
     }
 
@@ -1872,6 +1915,23 @@ impl<F: Field> MLE<F> {
     /// that fit a smaller variant as the tightest one; no-op otherwise.
     /// Preserves any outer virtual `nv`.
     pub fn compressed(self) -> Self
+    where
+        F: ark_ff::PrimeField,
+    {
+        self.tighter().unwrap_or(self)
+    }
+
+    /// [`Self::compressed`] of a borrowed MLE, copying the backing only when
+    /// it does not narrow.
+    pub(crate) fn to_compressed(&self) -> Self
+    where
+        F: ark_ff::PrimeField,
+    {
+        self.tighter().unwrap_or_else(|| self.clone())
+    }
+
+    /// The result of [`Self::compressed`], or `None` when it is `self`.
+    fn tighter(&self) -> Option<Self>
     where
         F: ark_ff::PrimeField,
     {
@@ -1887,10 +1947,7 @@ impl<F: Field> MLE<F> {
             }
             let max = cfg_iter!(words).map(|&w| w.into()).max().unwrap_or(0);
             if max <= 1 {
-                Some(MLE::from_bits(
-                    words.iter().map(|&w| w.into() == 1),
-                    inner_nv,
-                ))
+                Some(MLE::from_bit_slice(words, inner_nv, |&w| w.into() == 1))
             } else if max <= u8::MAX as u64 {
                 let bytes = cfg_iter!(words).map(|&w| w.into() as u8).collect();
                 Some(MLE::from_u8s(bytes, inner_nv))
@@ -1902,33 +1959,24 @@ impl<F: Field> MLE<F> {
             }
         }
 
-        let nv = self.nv;
-        let mut out = match self.storage {
-            MLEStorage::Field(inner) => {
-                Self::from_evaluations_vec_compressed(inner.num_vars, inner.evaluations)
-            }
+        let mut out = match &self.storage {
+            MLEStorage::Field(inner) => Self::narrowed_field(inner.num_vars, &inner.evaluations)?,
             MLEStorage::U32 {
-                ref words,
+                words,
                 inner_num_vars,
-            } => match narrowed(words, inner_num_vars, u32::MAX as u64) {
-                Some(out) => out,
-                None => return self,
-            },
+            } => narrowed(words, *inner_num_vars, u32::MAX as u64)?,
             MLEStorage::U64 {
-                ref words,
+                words,
                 inner_num_vars,
-            } => match narrowed(words, inner_num_vars, u64::MAX) {
-                Some(out) => out,
-                None => return self,
-            },
-            _ => return self,
+            } => narrowed(words, *inner_num_vars, u64::MAX)?,
+            _ => return None,
         };
-        if let Some(target_nv) = nv
+        if let Some(target_nv) = self.nv
             && target_nv > out.inner_num_vars()
         {
             out.set_virtual_nv(target_nv);
         }
-        out
+        Some(out)
     }
 
     /// Linear-scan run/sparse detection on top of [`Self::compressed`].
@@ -2483,6 +2531,78 @@ mod tests {
 
     fn fr(value: u64) -> Fr {
         Fr::from(value)
+    }
+
+    /// The serial classifier and builders that the parallel ones must match.
+    fn serial_compressed(num_vars: usize, evals: Vec<Fr>) -> MLE<Fr> {
+        use ark_ff::PrimeField;
+        let low = |x: &Fr| x.into_bigint().as_ref()[0];
+        let wide = |x: &Fr| x.into_bigint().as_ref()[1..].iter().any(|&l| l != 0);
+        if evals.iter().any(wide) {
+            return MLE::from_evaluations_vec(num_vars, evals);
+        }
+        match evals.iter().map(low).max().unwrap_or(0) {
+            0..=1 => MLE::from_bits(evals.iter().map(|x| low(x) == 1), num_vars),
+            2..=0xff => MLE::from_u8s(evals.iter().map(|x| low(x) as u8).collect(), num_vars),
+            0x100..=0xffff_ffff => {
+                MLE::from_u32s(evals.iter().map(|x| low(x) as u32).collect(), num_vars)
+            }
+            _ => MLE::from_u64s(evals.iter().map(low).collect(), num_vars),
+        }
+    }
+
+    #[test]
+    fn compression_matches_the_serial_classifier() {
+        use ark_std::{UniformRand, rand::Rng, test_rng};
+        let mut rng = test_rng();
+        // Up to 2^16 rows, so the parallel blocks past the probe are reached.
+        for nv in [0, 1, 2, 3, 4, 7, 12, 13, 15, 16] {
+            let len = 1usize << nv;
+            for bound in [2u64, 1 << 8, 1 << 32, u64::MAX] {
+                let small: Vec<Fr> = (0..len).map(|_| fr(rng.gen_range(0..bound))).collect();
+                let mut cases = vec![small.clone()];
+                // One wide value early, in the middle and last.
+                for at in [0, len / 2, len - 1] {
+                    let mut mixed = small.clone();
+                    mixed[at] = Fr::rand(&mut rng);
+                    cases.push(mixed);
+                }
+                // A value of the next kind up, past the probe.
+                let mut bumped = small.clone();
+                bumped[len - 1] = fr(bound.saturating_mul(2).max(2));
+                cases.push(bumped);
+                for evals in cases {
+                    let expected = serial_compressed(nv, evals.clone());
+                    let field = MLE::from_evaluations_vec(nv, evals.clone());
+                    assert!(MLE::from_evaluations_vec_compressed(nv, evals) == expected);
+                    assert!(field.to_compressed() == expected);
+                    assert!(field.compressed() == expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn integer_storage_compresses_as_its_field_table_does() {
+        use ark_std::{rand::Rng, test_rng};
+        let mut rng = test_rng();
+        for nv in [0, 2, 3, 13] {
+            for bound in [2u64, 1 << 8, 1 << 32, u64::MAX] {
+                let words: Vec<u64> = (0..1 << nv).map(|_| rng.gen_range(0..bound)).collect();
+                let mut expected = serial_compressed(nv, words.iter().map(|&w| fr(w)).collect());
+                expected.set_virtual_nv(nv + 2);
+                let mut sources = vec![MLE::<Fr>::from_u64s(words.clone(), nv)];
+                if bound <= 1 << 32 {
+                    let narrow = words.iter().map(|&w| w as u32).collect();
+                    sources.push(MLE::from_u32s(narrow, nv));
+                }
+                for mut source in sources {
+                    source.set_virtual_nv(nv + 2);
+                    assert!(source.to_compressed() == expected);
+                    assert!(source.compressed() == expected);
+                }
+            }
+        }
     }
 
     #[test]

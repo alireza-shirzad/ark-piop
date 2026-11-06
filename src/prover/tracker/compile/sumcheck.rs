@@ -324,12 +324,14 @@ where
                             .for_each(|(i, a)| *a *= v[i % v_len]);
                     }
                 }
-                // `evals` is moved, not cloned: it can be 8 GiB.
-                let mle = Arc::new(MLE::from_evaluations_vec(nv, evals));
+                // `evals` is moved, not cloned: it can be 8 GiB. Compressed
+                // before the commit, so a product of masks pays the small
+                // scalar MSM.
+                let mle = Arc::new(MLE::from_evaluations_vec_compressed(nv, evals));
                 let prover_param = tracker.pk.mv_pcs_param.clone();
                 let com = B::MvPCS::commit(prover_param.as_ref(), &mle)?;
-                let committed_id = tracker.track_mat_mv_p_with_commitment(
-                    &mle,
+                let committed_id = tracker.track_compressed_mat_mv_p_with_commitment(
+                    mle,
                     com,
                     CommitmentBinding::ProofEmitted,
                     false,

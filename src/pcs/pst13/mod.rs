@@ -22,35 +22,52 @@ use ark_ec::{
 };
 use ark_ff::{One, Zero};
 use ark_poly::Polynomial;
-use ark_std::rand::Rng;
-use srs::{PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
+use ark_std::{cfg_into_iter, rand::Rng};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+use srs::{Evaluations, PST13ProverParam, PST13UniversalParams, PST13VerifierParam};
 use std::{borrow::Borrow, marker::PhantomData, ops::Mul, sync::Arc};
 
+/// `Σ levels[0][start..end]` (clamped to the level) in at most `2·nv` additions. In the
+/// PST13 SRS `levels[l][c] = g^{eq(t[l..], c)}` with the low bit of `c` on `t_l`, so an
+/// aligned pair sums to one point of the next level (`eq(t_l, 0) + eq(t_l, 1) = 1`):
+/// `levels[l][2c] + levels[l][2c+1] = levels[l+1][c]`.
+fn range_sum<E: Pairing>(levels: &[Evaluations<E::G1Affine>], start: usize, end: usize) -> E::G1 {
+    let mut hi = end.min(levels[0].evals.len());
+    let mut lo = start.min(hi);
+    let mut acc = E::G1::zero();
+    for level in levels {
+        if lo >= hi {
+            break;
+        }
+        if lo & 1 == 1 {
+            acc += level.evals[lo];
+            lo += 1;
+        }
+        if hi & 1 == 1 {
+            hi -= 1;
+            acc += level.evals[hi];
+        }
+        lo >>= 1;
+        hi >>= 1;
+    }
+    acc
+}
+
 /// Shared commit path for all `Sparse*` storage variants: rewrites `MSM(bases, values)` as
-/// `default * Σ bases[..inner_len] + Σ bases[idx] * (val - default)` over the exceptions,
-/// the latter one MSM over the exceptions' bases. With `default == 0` that MSM is all that
-/// is paid; otherwise the baseline sum costs `Ω(inner_len)` group additions but still avoids
-/// materializing a `Vec<F>`.
+/// `default * Σ bases + Σ bases[idx] * (val - default)` over the exceptions, the latter
+/// one MSM over the exceptions' bases. `levels` is the SRS from the committed level up.
 /// Callers pass F-lifted values so `F::from` is paid once per exception, not per element.
 fn sparse_commit<E: Pairing>(
-    bases: &[E::G1Affine],
-    committed_nv: usize,
+    levels: &[Evaluations<E::G1Affine>],
     default: E::ScalarField,
     exceptions: impl Iterator<Item = (u32, E::ScalarField)>,
 ) -> E::G1Affine {
-    let inner_len = 1usize << committed_nv;
+    let bases = &levels[0].evals;
     let mut acc: E::G1 = if default.is_zero() {
         E::G1::zero()
     } else {
-        let mut sum_bases: E::G1 = E::G1::zero();
-        for base in bases.iter().take(inner_len) {
-            sum_bases += base;
-        }
-        if default.is_one() {
-            sum_bases
-        } else {
-            sum_bases.mul(default)
-        }
+        range_sum::<E>(levels, 0, bases.len()).mul(default)
     };
     let (points, deltas): (Vec<E::G1Affine>, Vec<E::ScalarField>) = exceptions
         .filter_map(|(idx, val)| {
@@ -120,7 +137,8 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             )));
         }
         let ignored = prover_param.num_vars - committed_nv;
-        let bases = &prover_param.powers_of_g[ignored].evals;
+        let levels = &prover_param.powers_of_g[ignored..];
+        let bases = &levels[0].evals;
 
         let com = match poly.storage() {
             MLEStorage::Field(m) => E::G1::msm_unchecked(bases, &m.evaluations).into_affine(),
@@ -128,7 +146,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 // Unpack on the fly (little-endian per byte, per `MLEStorage::Bit`'s
                 // contract); the tail beyond `inner_len` is cut by `msm_u1`'s length-min.
                 let inner_len = 1usize << committed_nv;
-                let scalars: Vec<bool> = (0..inner_len)
+                let scalars: Vec<bool> = cfg_into_iter!(0..inner_len)
                     .map(|i| (bits[i >> 3] >> (i & 7)) & 1 == 1)
                     .collect();
                 small_scalar_msm::msm_u1::<E::G1>(bases, &scalars).into_affine()
@@ -143,40 +161,21 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 small_scalar_msm::msm_u64::<E::G1>(bases, words).into_affine()
             }
             MLEStorage::Constant { value, .. } => {
-                // `value * Σ bases[..2^committed_nv]`, summed on the fly (no Vec<F>);
-                // short-circuits for value 0 and skips the scalar mul for value 1.
                 if value.is_zero() {
-                    E::G1::zero().into_affine()
+                    E::G1Affine::zero()
                 } else {
-                    let inner_len = 1usize << committed_nv;
-                    let mut sum: E::G1 = E::G1::zero();
-                    for base in bases.iter().take(inner_len) {
-                        sum += base;
-                    }
-                    if value.is_one() {
-                        sum.into_affine()
-                    } else {
-                        sum.mul(*value).into_affine()
-                    }
+                    range_sum::<E>(levels, 0, bases.len())
+                        .mul(*value)
+                        .into_affine()
                 }
             }
             MLEStorage::Rle { runs, .. } => {
-                // Each run `(v, count)` contributes `v * Σ bases[cursor..cursor+count]`;
-                // zero-value runs are skipped.
                 let mut acc: E::G1 = E::G1::zero();
                 let mut cursor: usize = 0;
                 for (value, count) in runs.iter() {
                     let count = *count as usize;
                     if !value.is_zero() {
-                        let mut run_sum: E::G1 = E::G1::zero();
-                        for base in bases.iter().skip(cursor).take(count) {
-                            run_sum += base;
-                        }
-                        if value.is_one() {
-                            acc += run_sum;
-                        } else {
-                            acc += run_sum.mul(*value);
-                        }
+                        acc += range_sum::<E>(levels, cursor, cursor + count).mul(*value);
                     }
                     cursor += count;
                 }
@@ -186,19 +185,13 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 default,
                 exceptions,
                 ..
-            } => sparse_commit::<E>(
-                bases,
-                committed_nv,
-                *default,
-                exceptions.iter().map(|(i, v)| (*i, *v)),
-            ),
+            } => sparse_commit::<E>(levels, *default, exceptions.iter().map(|(i, v)| (*i, *v))),
             MLEStorage::SparseU8 {
                 default,
                 exceptions,
                 ..
             } => sparse_commit::<E>(
-                bases,
-                committed_nv,
+                levels,
                 E::ScalarField::from(*default as u64),
                 exceptions
                     .iter()
@@ -209,8 +202,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 exceptions,
                 ..
             } => sparse_commit::<E>(
-                bases,
-                committed_nv,
+                levels,
                 E::ScalarField::from(*default as u64),
                 exceptions
                     .iter()
@@ -221,8 +213,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
                 exceptions,
                 ..
             } => sparse_commit::<E>(
-                bases,
-                committed_nv,
+                levels,
                 E::ScalarField::from(*default),
                 exceptions
                     .iter()
@@ -577,13 +568,108 @@ mod tests {
             .iter()
             .map(|row| (*row, Fr::rand(&mut rng)))
             .collect();
-        for default in [Fr::zero(), Fr::from(5u64)] {
+        for default in [Fr::zero(), Fr::one(), Fr::from(5u64), Fr::rand(&mut rng)] {
             for exceptions in [exceptions.clone(), Vec::new()] {
                 let sparse = MLE::from_sparse(default, exceptions.clone(), nv).unwrap();
                 assert!(matches!(sparse.storage(), MLEStorage::Sparse { .. }));
                 let table = Arc::new(MLE::from_evaluations_vec(nv, sparse.evaluations()));
                 assert_eq!(
                     PST13::commit(&ck, &Arc::new(sparse))?,
+                    PST13::commit(&ck, &table)?
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Every range of every SRS level sums to the serial sum of its points.
+    #[test]
+    fn range_sum_is_the_sum_of_the_range() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 5)?;
+        let powers = &params.prover_param.powers_of_g;
+        for ignored in 0..powers.len() {
+            let levels = &powers[ignored..];
+            let bases = &levels[0].evals;
+            for start in 0..=bases.len() {
+                for end in start..=bases.len() + 2 {
+                    let serial: <E as Pairing>::G1 =
+                        bases[start..end.min(bases.len())].iter().sum();
+                    assert_eq!(range_sum::<E>(levels, start, end), serial);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Constant and run-length storage commit to what their table does, on
+    /// a key trimmed below the SRS and at fewer variables than the key.
+    #[test]
+    fn constant_and_rle_commit_match_the_commit_of_their_table() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let (ck, _) = PST13::trim(&params, None, Some(8))?;
+        let (a, b) = (Fr::rand(&mut rng), Fr::rand(&mut rng));
+        let commit_both = |nv: usize, evals: Vec<Fr>| -> SnarkResult<()> {
+            let table = MLE::from_evaluations_vec(nv, evals);
+            let compact = table.clone().detect_redundancy();
+            assert!(matches!(
+                compact.storage(),
+                MLEStorage::Constant { .. } | MLEStorage::Rle { .. }
+            ));
+            assert_eq!(
+                PST13::commit(&ck, &Arc::new(compact))?,
+                PST13::commit(&ck, &Arc::new(table))?
+            );
+            Ok(())
+        };
+        for nv in [0, 1, 3, 7, 8] {
+            for value in [Fr::zero(), Fr::one(), a] {
+                commit_both(nv, vec![value; 1 << nv])?;
+            }
+        }
+        let runs: [&[(Fr, usize)]; 4] = [
+            &[(a, 4), (b, 4), (Fr::one(), 8), (a, 16), (b, 96)],
+            &[(a, 3), (Fr::zero(), 5), (Fr::one(), 1), (b, 7), (a, 112)],
+            &[(Fr::zero(), 37), (a, 90), (Fr::zero(), 1)],
+            &[(b, 1), (Fr::one(), 126), (a, 1)],
+        ];
+        for runs in runs {
+            let evals = runs
+                .iter()
+                .flat_map(|(v, n)| std::iter::repeat_n(*v, *n))
+                .collect();
+            commit_both(7, evals)?;
+        }
+        for (skip, active_len) in [(0, 1), (0, 77), (5, 64), (64, 64), (127, 1)] {
+            let window = MLE::from_window_activator(skip, active_len, 7);
+            let table = MLE::from_evaluations_vec(7, window.evaluations());
+            assert_eq!(
+                PST13::commit(&ck, &Arc::new(window))?,
+                PST13::commit(&ck, &Arc::new(table))?
+            );
+        }
+        Ok(())
+    }
+
+    /// The small-scalar MSMs of compressed storage give the dense MSM's
+    /// commitment.
+    #[test]
+    fn compressed_commit_matches_the_commit_of_its_table() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 8)?;
+        let (ck, _) = PST13::trim(&params, None, Some(8))?;
+        let bounds = [2u64, 1 << 8, 1 << 32, u64::MAX];
+        for nv in [0, 2, 3, 8] {
+            for bound in bounds {
+                let evals: Vec<Fr> = (0..1 << nv)
+                    .map(|_| Fr::from(rng.gen_range(0..bound)))
+                    .collect();
+                let table = Arc::new(MLE::from_evaluations_vec(nv, evals.clone()));
+                let compressed = MLE::from_evaluations_vec_compressed(nv, evals);
+                assert!(!compressed.storage().is_field());
+                assert_eq!(
+                    PST13::commit(&ck, &Arc::new(compressed))?,
                     PST13::commit(&ck, &table)?
                 );
             }
