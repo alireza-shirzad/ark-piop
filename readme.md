@@ -117,8 +117,8 @@ proof in `SharedArgConfig::lookup_protocol`:
 
 | `LookupProtocol` | Prover                                      | Proof                              |
 | ---------------- | ------------------------------------------- | ---------------------------------- |
-| `LogUpGkr` (default) | no helper commitments; one batched GKR per proof | carries the GKR messages, so it is larger |
-| `LogUp`          | commits to a helper `1/(column - γ)` per column | smaller                            |
+| `LogUp` (default) | commits to a helper `1/(column - γ)` per column | smaller                            |
+| `LogUpGkr`       | no helper commitments; one batched GKR per proof | carries the GKR messages, so it is larger |
 
 ```rust
 use ark_piop::{
@@ -128,7 +128,7 @@ use ark_piop::{
 };
 
 let config = SharedArgConfig {
-    lookup_protocol: LookupProtocol::LogUp,
+    lookup_protocol: LookupProtocol::LogUpGkr,
     ..SharedArgConfig::default()
 };
 let mut prover = ArgProver::<B>::new_from_pk_with_config(pk, config.clone())?;

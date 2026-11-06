@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   commitments (`piop::logup_gkr`).
 - `LookupProtocol` and `SharedArgConfig::lookup_protocol` choose between
   LogUp and LogUp-GKR per proof. `ARK_PIOP_LOOKUP_PROTOCOL=logup|gkr` sets
-  the protocol of `SharedArgConfig::default()`. LogUp-GKR is the default.
+  the protocol of `SharedArgConfig::default()`. LogUp is the default.
 - `ArgProver::new_from_pk_with_config` and
   `ArgVerifier::new_from_vk_with_config`.
 - `add_mv_keyed_sum_claim` on the prover and the verifier, to have a keyed

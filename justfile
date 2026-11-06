@@ -1,7 +1,9 @@
-# Run all tests (with and without honest-prover feature)
+# Run all tests (with and without honest-prover feature), then once more
+# under LogUp-GKR, which tests on a default configuration do not reach
 test:
     cargo test --features test-utils
     cargo test --features test-utils,honest-prover
+    ARK_PIOP_LOOKUP_PROTOCOL=gkr cargo test --features test-utils
 
 # Check formatting
 fmt:
