@@ -9,10 +9,11 @@ use ark_ff::{PrimeField, UniformRand};
 use ark_poly::DenseMultilinearExtension;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::Zero;
+use ark_std::cfg_into_iter;
 use ark_std::rand::Rng;
 use core::{iter::FromIterator, panic};
-use rayon::iter::ParallelIterator;
-use rayon::iter::{IndexedParallelIterator, IntoParallelIterator};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 use std::collections::LinkedList;
 /// Evaluations over {0,1}^n for G1 or G2
@@ -128,8 +129,7 @@ impl<E: Pairing> StructuredReferenceString<E> for PST13UniversalParams<E> {
             eq_arr.push_front(remove_dummy_variable(&base, i)?);
             if i != 0 {
                 let mul = eq.pop_back().unwrap();
-                base = base
-                    .into_par_iter()
+                base = cfg_into_iter!(base)
                     .zip(&mul.evaluations)
                     .map(|(a, b)| a * b)
                     .collect();

@@ -21,7 +21,8 @@ pub(crate) fn evaluate_with_eq<F: PrimeField>(poly: &MLE<F>, eq: &MLE<F>) -> F {
     assert_eq!(poly_field.num_vars, eq.num_vars());
     ark_std::cfg_iter!(eq_field.evaluations)
         .zip(&poly_field.evaluations)
-        .filter_map(|(e, p)| (!p.is_zero()).then(|| if p.is_one() { *e } else { *e * p }))
+        .filter(|(_, p)| !p.is_zero())
+        .map(|(e, p)| if p.is_one() { *e } else { *e * p })
         .sum::<F>()
 }
 
