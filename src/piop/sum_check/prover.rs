@@ -423,59 +423,60 @@ impl<F: PrimeField> SumcheckProverState<F> {
                 }
 
                 let summation_size = 1 << (term_nv.saturating_sub(1));
-                let mut sum = cfg_into_iter!(0..summation_size)
-                    .fold(
-                        || (vec![(zero, zero); term_size], vec![zero; term_size + 1]),
-                        |(mut buf, mut acc), b| {
-                            let mut any_eval_is_zero = false;
-                            let mut any_step_and_eval_simultaneously_zero = false;
-                            buf.iter_mut().zip(non_scalar_products.iter()).for_each(
-                                |((eval, step), f)| {
-                                    // `read_slot` at `2b` and `2b + 1`, inlined.
-                                    let slot = &mle_slots[*f];
-                                    let (v0, v1) = match slot {
-                                        MleSlot::Materialized(mle) => {
-                                            (mle[b << 1], mle[(b << 1) + 1])
-                                        }
-                                        MleSlot::Streaming(arc) => {
-                                            let inner_nv = arc.storage().inner_num_vars();
-                                            let inner_mask = (1usize << inner_nv).wrapping_sub(1);
-                                            let base0 = (b << 1) << stream_m;
-                                            let base1 = ((b << 1) + 1) << stream_m;
-                                            let mut a0 = F::zero();
-                                            let mut a1 = F::zero();
-                                            for (i, eq_val) in stream_eq_table.iter().enumerate() {
-                                                let m0 = (i | base0) & inner_mask;
-                                                let m1 = (i | base1) & inner_mask;
-                                                a0 += *eq_val * arc.storage().lift(m0);
-                                                a1 += *eq_val * arc.storage().lift(m1);
-                                            }
-                                            (a0, a1)
-                                        }
-                                    };
-                                    *eval = v0;
-                                    let cur_eval_is_zero = eval.is_zero();
-                                    any_eval_is_zero |= cur_eval_is_zero;
-                                    *step = v1 - *eval;
-                                    any_step_and_eval_simultaneously_zero |=
-                                        cur_eval_is_zero & step.is_zero();
-                                },
-                            );
+                let init = || (vec![(zero, zero); term_size], vec![zero; term_size + 1]);
+                let accumulate = |(mut buf, mut acc): (Vec<(F, F)>, Vec<F>), b: usize| {
+                    let mut any_eval_is_zero = false;
+                    let mut any_step_and_eval_simultaneously_zero = false;
+                    buf.iter_mut()
+                        .zip(non_scalar_products.iter())
+                        .for_each(|((eval, step), f)| {
+                            // `read_slot` at `2b` and `2b + 1`, inlined.
+                            let slot = &mle_slots[*f];
+                            let (v0, v1) = match slot {
+                                MleSlot::Materialized(mle) => (mle[b << 1], mle[(b << 1) + 1]),
+                                MleSlot::Streaming(arc) => {
+                                    let inner_nv = arc.storage().inner_num_vars();
+                                    let inner_mask = (1usize << inner_nv).wrapping_sub(1);
+                                    let base0 = (b << 1) << stream_m;
+                                    let base1 = ((b << 1) + 1) << stream_m;
+                                    let mut a0 = F::zero();
+                                    let mut a1 = F::zero();
+                                    for (i, eq_val) in stream_eq_table.iter().enumerate() {
+                                        let m0 = (i | base0) & inner_mask;
+                                        let m1 = (i | base1) & inner_mask;
+                                        a0 += *eq_val * arc.storage().lift(m0);
+                                        a1 += *eq_val * arc.storage().lift(m1);
+                                    }
+                                    (a0, a1)
+                                }
+                            };
+                            *eval = v0;
+                            let cur_eval_is_zero = eval.is_zero();
+                            any_eval_is_zero |= cur_eval_is_zero;
+                            *step = v1 - *eval;
+                            any_step_and_eval_simultaneously_zero |=
+                                cur_eval_is_zero & step.is_zero();
+                        });
 
-                            if !any_eval_is_zero {
-                                acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
-                            }
+                    if !any_eval_is_zero {
+                        acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
+                    }
 
-                            if !any_step_and_eval_simultaneously_zero {
-                                acc[1..].iter_mut().for_each(|acc| {
-                                    buf.iter_mut().for_each(|(eval, step)| *eval += step);
-                                    *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
-                                });
-                            }
+                    if !any_step_and_eval_simultaneously_zero {
+                        acc[1..].iter_mut().for_each(|acc| {
+                            buf.iter_mut().for_each(|(eval, step)| *eval += step);
+                            *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
+                        });
+                    }
 
-                            (buf, acc)
-                        },
-                    )
+                    (buf, acc)
+                };
+                #[cfg(not(feature = "parallel"))]
+                let mut sum = (0..summation_size).fold(init(), accumulate).1;
+                #[cfg(feature = "parallel")]
+                let mut sum = (0..summation_size)
+                    .into_par_iter()
+                    .fold(init, accumulate)
                     .map(|(_, partial)| partial)
                     .reduce(
                         || vec![F::zero(); term_size + 1],

@@ -85,10 +85,9 @@ where
             let id = self.track_and_commit_mv_constant(cnst, polynomial.num_vars())?;
             return Ok(Either::Right((id, cnst)));
         }
-        // Auto-compress Field-backed polys whose elements fit a small
-        // integer type into the tightest storage variant (8×-256× smaller);
-        // no-op for non-Field storage.
-        let polynomial = Arc::new(polynomial.clone().compressed());
+        // Field-backed polys whose elements fit a small integer type take
+        // the tightest storage variant (8×-256× smaller) and its cheap MSM.
+        let polynomial = Arc::new(polynomial.to_compressed());
         let commitment = if use_cache {
             let digest = crate::arithmetic::mat_poly::digest::mle_digest(polynomial.as_ref());
             if let Some(cached) = self.state.mv_pcs_substate.commitment_cache.get(&digest) {
@@ -104,12 +103,14 @@ where
         } else {
             B::MvPCS::commit(self.pk.mv_pcs_param.as_ref(), &polynomial)?
         };
-        Ok(Either::Left(self.track_mat_mv_p_with_commitment(
-            &polynomial,
-            commitment,
-            CommitmentBinding::ProofEmitted,
-            use_cache,
-        )?))
+        Ok(Either::Left(
+            self.track_compressed_mat_mv_p_with_commitment(
+                polynomial,
+                commitment,
+                CommitmentBinding::ProofEmitted,
+                use_cache,
+            )?,
+        ))
     }
 
     /// Tracks a constant polynomial: allocates an ID, stores the constant in
@@ -117,7 +118,7 @@ where
     /// MLE is created: the constant propagates as `Either::Right(cnst)`
     /// through `TrackedPoly` arithmetic, and is materialized lazily if
     /// `.id()` is called on the `TrackedPoly`.
-    fn track_and_commit_mv_constant(
+    pub(crate) fn track_and_commit_mv_constant(
         &mut self,
         cnst: B::F,
         num_vars: usize,
@@ -149,8 +150,23 @@ where
         use_cache: bool,
     ) -> SnarkResult<TrackerID> {
         // Compressed as in `track_and_commit_mat_mv_p`.
-        let polynomial = Arc::new(polynomial.clone().compressed());
+        self.track_compressed_mat_mv_p_with_commitment(
+            Arc::new(polynomial.to_compressed()),
+            commitment,
+            binding,
+            use_cache,
+        )
+    }
 
+    /// [`Self::track_mat_mv_p_with_commitment`] for a polynomial that is
+    /// already [`MLE::compressed`].
+    pub(crate) fn track_compressed_mat_mv_p_with_commitment(
+        &mut self,
+        polynomial: Arc<MLE<B::F>>,
+        commitment: <B::MvPCS as PCS<B::F>>::Commitment,
+        binding: CommitmentBinding,
+        use_cache: bool,
+    ) -> SnarkResult<TrackerID> {
         if use_cache {
             // Populate the commitment cache so future commits to the same
             // polynomial can skip the expensive MSM.
@@ -249,6 +265,10 @@ where
         self.state.num_vars.insert(poly_id, nv);
         self.state.virtual_polys.insert(poly_id, p);
         poly_id
+    }
+
+    pub(crate) fn mv_pcs_prover_param(&self) -> Arc<<B::MvPCS as PCS<B::F>>::ProverParam> {
+        Arc::clone(&self.pk.mv_pcs_param)
     }
 
     pub fn mat_mv_poly(&self, id: TrackerID) -> Option<&Arc<MLE<B::F>>> {
