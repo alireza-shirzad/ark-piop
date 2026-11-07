@@ -54,7 +54,7 @@ use ark_std::{cfg_chunks_mut, cfg_into_iter, cfg_iter, cfg_iter_mut};
 use either::Either;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use super::reduction::{
     ColumnEvals, KeyedSumRelation, KeyedTerm, check_failed, invalid_parameters, resolve,
@@ -63,9 +63,10 @@ use crate::{
     SnarkBackend,
     arithmetic::mat_poly::mle::{MLE, MLEStorage},
     errors::{SnarkError, SnarkResult},
+    pcs::PCS,
     prover::tracker::ProverTracker,
     tracker_core::TrackerCore,
-    types::TrackerID,
+    types::{CommitmentBinding, TrackerID},
     verifier::tracker::VerifierTracker,
 };
 
@@ -121,6 +122,10 @@ pub(super) trait Party<T: TrackerCore> {
     /// proof's next sum for the verifier.
     fn sum(&mut self, tracker: &mut T, poly: TrackerID) -> SnarkResult<T::F>;
 
+    /// The terms of a relation, once its `gamma` is drawn and before any of
+    /// them is reduced, for the prover to build helpers ahead.
+    fn start_relation(&mut self, _sides: &RelationPlan<T::F>, _gamma: T::F) {}
+
     /// The error this party reports when the shared schedule cannot go on.
     fn reject(&self, reason: String) -> SnarkError;
 }
@@ -129,6 +134,22 @@ pub(super) trait Party<T: TrackerCore> {
 /// which no machine word has to hold a power of.
 fn two_to_the<F: Field>(exponent: usize) -> F {
     F::from(2u64).pow([exponent as u64])
+}
+
+/// Where the multiplicity of a tracked column of `nv` variables goes, and
+/// the factor a constant one leaves on the term's sum: it is taken out of
+/// the sum, and the rows it has beyond the column's repeat the column.
+fn single_mult<F: Field>(mult: Option<Sized<F>>, nv: usize) -> (Option<Mult>, F) {
+    match mult {
+        None => (None, F::one()),
+        Some((Either::Left(mult), mult_nv)) if mult_nv <= nv => {
+            (Some(Mult::Numerator(mult)), F::one())
+        }
+        Some((Either::Left(mult), _)) => (Some(Mult::Factor(mult)), F::one()),
+        Some((Either::Right(constant), mult_nv)) => {
+            (None, constant * two_to_the::<F>(mult_nv.saturating_sub(nv)))
+        }
+    }
 }
 
 /// The terms of one side. Which columns share a helper follows from the
@@ -250,19 +271,7 @@ pub(super) fn reduce_term<T: TrackerCore, P: Party<T>>(
             col: (Either::Left(col), nv),
             mult,
         } => {
-            // A constant multiplicity is taken out of the sum, and the
-            // rows it has beyond the column's repeat the column.
-            let (mult, scale) = match mult {
-                None => (None, T::F::one()),
-                Some((Either::Left(mult), mult_nv)) if mult_nv <= nv => {
-                    (Some(Mult::Numerator(mult)), T::F::one())
-                }
-                Some((Either::Left(mult), _)) => (Some(Mult::Factor(mult)), T::F::one()),
-                Some((Either::Right(constant), mult_nv)) => (
-                    None,
-                    constant * two_to_the::<T::F>(mult_nv.saturating_sub(nv)),
-                ),
-            };
+            let (mult, scale) = single_mult(mult, nv);
             let (helper, sum) = claim_helper(tracker, party, &[col], nv, mult, gamma)?;
             // h·col - gamma·h - m = 0, with m = 1 unless it is the helper's
             let product = tracker.mul_polys(col, helper);
@@ -321,6 +330,7 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
         let mut relation_sums = [T::F::zero(); 2];
         if sides.iter().any(|side| !side.is_empty()) {
             let gamma = tracker.get_and_append_challenge(b"gamma")?;
+            party.start_relation(sides, gamma);
             for (side, sum) in sides.iter().zip(&mut relation_sums) {
                 for term in side {
                     *sum += reduce_term(tracker, party, term, gamma)?;
@@ -344,81 +354,402 @@ pub(super) fn check_relation_sums<F: Field>(sums: &[[F; 2]]) -> Result<(), Strin
     }
 }
 
-/// The prover's side of a reduction: it reads the columns, commits to their
-/// helpers and sends the sums.
-pub(super) struct ProvingParty<F> {
-    pub evals: ColumnEvals<F>,
+/// Rows of the helpers built and committed at once: the tables and MSM
+/// buffers of three helpers of 2^23 rows.
+const RUN_ROWS: usize = 3 << 23;
+
+/// A helper as [`Party::helper`] asks for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HelperJob<F> {
+    cols: Vec<TrackerID>,
+    mult: Option<Mult>,
+    gamma: F,
 }
 
-impl<F: PrimeField> ProvingParty<F> {
-    /// The `2^nv` evaluations of `id`. One the caller holds is handed over
-    /// rather than copied: a column is read by one term as a rule, and the
-    /// tracker has it for any other.
-    fn take<B: SnarkBackend<F = F>>(
-        &mut self,
-        tracker: &mut ProverTracker<B>,
-        id: TrackerID,
-        nv: usize,
-    ) -> SnarkResult<Vec<F>> {
-        let evals = self
-            .evals
-            .remove(&id)
-            .unwrap_or_else(|| tracker.evaluations(id));
-        if u32::try_from(nv).ok().and_then(|nv| 1usize.checked_shl(nv)) != Some(evals.len()) {
+/// The `2^nv` evaluations of `id`: handed over by the caller, or the
+/// tracker's table, read when the helper is built.
+struct Source<F: Field> {
+    id: TrackerID,
+    nv: usize,
+    evals: Either<Vec<F>, Arc<MLE<F>>>,
+}
+
+impl<F: PrimeField> Source<F> {
+    fn read(self) -> SnarkResult<Vec<F>> {
+        let evals = self.evals.left_or_else(|table| table.evaluations());
+        if u32::try_from(self.nv)
+            .ok()
+            .and_then(|nv| 1usize.checked_shl(nv))
+            != Some(evals.len())
+        {
             return Err(invalid_parameters(format!(
-                "polynomial {id} has {} evaluations, expected 2^{nv}",
-                evals.len()
+                "polynomial {} has {} evaluations, expected 2^{}",
+                self.id,
+                evals.len(),
+                self.nv
             )));
         }
         Ok(evals)
     }
+}
+
+/// What a helper is built from.
+enum HelperInputs<F: Field> {
+    /// `sum_c 1/(c - gamma)`, summed times `factor` if there is one.
+    Unit {
+        cols: Vec<Source<F>>,
+        factor: Option<Source<F>>,
+    },
+    /// `mult/(col - gamma)`; `table` is the tracker's table of `mult`.
+    Ratio {
+        col: Source<F>,
+        mult: Source<F>,
+        table: Option<Arc<MLE<F>>>,
+    },
+}
+
+/// A helper built and committed, or its value if it is constant, with the
+/// sum and the numerator [`HelperInputs::Ratio`] leaves for a lazy helper.
+#[allow(clippy::type_complexity)]
+struct BuiltHelper<B: SnarkBackend> {
+    committed: Either<(Arc<MLE<B::F>>, <B::MvPCS as PCS<B::F>>::Commitment), B::F>,
+    nv: usize,
+    sum: B::F,
+    numerator: Option<Option<Arc<MLE<B::F>>>>,
+    /// Whether the committed table stays the helper's table.
+    kept: bool,
+}
+
+/// Builds the helper of `inputs` and commits to it as
+/// [`ProverTracker::track_and_commit_mat_mv_p`] does, off the tracker.
+fn build_helper<B: SnarkBackend>(
+    inputs: HelperInputs<B::F>,
+    gamma: B::F,
+    param: &<B::MvPCS as PCS<B::F>>::ProverParam,
+) -> SnarkResult<BuiltHelper<B>> {
+    let (helper, sum, numerator) = match inputs {
+        HelperInputs::Ratio { col, mult, table } => {
+            let (helper, sum, numerator) = ratio_helper(col, mult, table, gamma)?;
+            (helper, sum, Some(numerator))
+        }
+        HelperInputs::Unit { cols, factor } => {
+            let (helper, sum) = unit_helper(cols, factor, gamma)?;
+            (helper, sum, None)
+        }
+    };
+    let nv = helper.num_vars();
+    // The committed table is not needed again as a table: the sumcheck can
+    // read the helper off the columns the tracker holds anyway and the
+    // numerator, at the price of an inversion per row every time. A sparse
+    // helper of few rows is cheaper to keep.
+    let kept = match helper.storage() {
+        MLEStorage::Field(_) => false,
+        MLEStorage::Sparse { exceptions, .. } => 8 * exceptions.len() <= 1 << nv,
+        _ => true,
+    };
+    let committed = if helper.is_constant() {
+        Either::Right(helper.storage().lift(0))
+    } else {
+        let helper = Arc::new(helper.compressed());
+        let commitment = B::MvPCS::commit(param, &helper)?;
+        Either::Left((helper, commitment))
+    };
+    Ok(BuiltHelper {
+        committed,
+        nv,
+        sum,
+        numerator,
+        kept,
+    })
+}
+
+/// `sum_c 1/(c - gamma)` of `cols` on their hypercube, and its sum, or
+/// that of `factor` times it over the larger of the two hypercubes.
+fn unit_helper<F: PrimeField>(
+    cols: Vec<Source<F>>,
+    factor: Option<Source<F>>,
+    gamma: F,
+) -> SnarkResult<(MLE<F>, F)> {
+    let nv = cols[0].nv;
+    // Each column is inverted where it was read, and a second one is added
+    // into the first: with the inversion's running products, two tables at
+    // the peak for one column and three for a shared helper.
+    let mut helper: Vec<F> = Vec::new();
+    for col in cols {
+        let id = col.id;
+        let mut inverses = col.read()?;
+        // A row equal to `gamma` has no inverse. The inversion would leave
+        // a zero there, and the prover a helper that fails its zerocheck in
+        // a proof that says nothing of it.
+        let at_gamma: usize = cfg_iter_mut!(inverses)
+            .map(|value| {
+                *value -= gamma;
+                usize::from(value.is_zero())
+            })
+            .sum();
+        if at_gamma != 0 {
+            return Err(invalid_parameters(format!(
+                "gamma is the value of {at_gamma} rows of polynomial {id}"
+            )));
+        }
+        batch_inversion(&mut inverses);
+        if helper.is_empty() {
+            helper = inverses;
+        } else {
+            cfg_iter_mut!(helper)
+                .zip(inverses)
+                .for_each(|(sum, inverse)| *sum += inverse);
+        }
+    }
+    let sum = match factor {
+        None => cfg_iter!(helper).sum(),
+        Some(factor) => {
+            let factor = factor.read()?;
+            let (helper_mask, factor_mask) = (helper.len() - 1, factor.len() - 1);
+            cfg_into_iter!(0..helper.len().max(factor.len()))
+                .map(|row| helper[row & helper_mask] * factor[row & factor_mask])
+                .sum()
+        }
+    };
+    Ok((MLE::from_evaluations_vec(nv, helper), sum))
+}
+
+/// `mult/(col - gamma)` on the column's hypercube, its sum, and the
+/// numerator a lazy helper would read: `table`, or one built here if that
+/// is smaller than a field table. Only the rows where `mult` is not zero
+/// are inverted, and a helper that is zero on half its rows or more is
+/// stored sparse, which its commitment pays for by its nonzero rows.
+#[allow(clippy::type_complexity)]
+fn ratio_helper<F: PrimeField>(
+    col: Source<F>,
+    mult: Source<F>,
+    table: Option<Arc<MLE<F>>>,
+    gamma: F,
+) -> SnarkResult<(MLE<F>, F, Option<Arc<MLE<F>>>)> {
+    let (col_id, nv, mult_nv) = (col.id, col.nv, mult.nv);
+    let column = col.read()?;
+    let mult = mult.read()?;
+    let rows = 1usize << nv;
+    let mult_mask = mult.len() - 1;
+    let counted = |row: usize| !mult[row & mult_mask].is_zero();
+    // A row with a multiplicity has no helper if it is `gamma`. One without
+    // has the helper zero whatever its value.
+    let at_gamma = cfg_iter!(column)
+        .enumerate()
+        .filter(|(row, value)| counted(*row) && **value == gamma)
+        .count();
+    if at_gamma != 0 {
+        return Err(invalid_parameters(format!(
+            "gamma is the value of {at_gamma} rows of polynomial {col_id}"
+        )));
+    }
+    let nonzero = cfg_iter!(mult).filter(|m| !m.is_zero()).count() << (nv - mult_nv);
+    // Sparse rows are numbered by `u32`.
+    let rows_of: Option<Vec<u32>> = (2 * nonzero <= rows && nv <= 32).then(|| {
+        cfg_into_iter!(0..rows)
+            .filter(|row| counted(*row))
+            .map(|row| row as u32)
+            .collect()
+    });
+    // The rows without a multiplicity are zero here, which the inversion
+    // leaves as they are. A dense helper is written over the column, so that
+    // the column, the multiplicity and the helper are never three tables at
+    // once.
+    let mut helper: Vec<F> = match &rows_of {
+        Some(rows_of) => {
+            let helper = cfg_iter!(rows_of)
+                .map(|row| column[*row as usize] - gamma)
+                .collect();
+            drop(column);
+            helper
+        }
+        None => {
+            let mut helper = column;
+            cfg_iter_mut!(helper)
+                .enumerate()
+                .for_each(|(row, value)| match counted(row) {
+                    true => *value -= gamma,
+                    false => *value = F::zero(),
+                });
+            helper
+        }
+    };
+    // Inverted a block at a time, which keeps the running products to a
+    // block rather than a table, and multiplied by the multiplicity.
+    const BLOCK: usize = 1 << 16;
+    let row_of = |at: usize| rows_of.as_ref().map_or(at, |rows_of| rows_of[at] as usize);
+    cfg_chunks_mut!(helper, BLOCK)
+        .enumerate()
+        .for_each(|(block, values)| {
+            batch_inversion(values);
+            for (at, value) in values.iter_mut().enumerate() {
+                *value *= mult[row_of(block * BLOCK + at) & mult_mask];
+            }
+        });
+    let sum = cfg_iter!(helper).sum();
+    let helper = match rows_of {
+        Some(rows_of) => MLE::from_sparse(F::zero(), rows_of.into_iter().zip(helper).collect(), nv)
+            .expect("the rows are ascending and on the hypercube"),
+        None => MLE::from_evaluations_vec(nv, helper),
+    };
+    let numerator = match table {
+        Some(table) => Some(table),
+        None => Some(MLE::from_evaluations_vec(mult_nv, mult).compressed())
+            .filter(|numerator| !numerator.storage().is_field())
+            .map(Arc::new),
+    };
+    Ok((helper, sum, numerator))
+}
+
+/// The prover's side of a reduction: it reads the columns, commits to their
+/// helpers and sends the sums.
+///
+/// The helpers of a run of a relation's terms are built and committed
+/// together once its `gamma` is drawn, and tracked one by one in the order
+/// of the terms. A run ends at a term without a helper, which may read a
+/// column for its sum, so that each column the caller holds goes to the
+/// term that reads it first.
+#[allow(clippy::type_complexity)]
+pub(super) struct ProvingParty<B: SnarkBackend> {
+    pub evals: ColumnEvals<B::F>,
+    /// The terms of the relation not built yet, `None` for one without a
+    /// helper.
+    ahead: VecDeque<Option<HelperJob<B::F>>>,
+    built: VecDeque<(HelperJob<B::F>, SnarkResult<BuiltHelper<B>>)>,
+}
+
+impl<B: SnarkBackend> ProvingParty<B> {
+    pub(super) fn new(evals: ColumnEvals<B::F>) -> Self {
+        Self {
+            evals,
+            ahead: VecDeque::new(),
+            built: VecDeque::new(),
+        }
+    }
+
+    /// The evaluations of `id`, as `nv` variables. One the caller holds is
+    /// handed over rather than copied: a column is read by one term as a
+    /// rule, and the tracker has it for any other.
+    fn source(&mut self, tracker: &mut ProverTracker<B>, id: TrackerID, nv: usize) -> Source<B::F> {
+        let evals = match self.evals.remove(&id) {
+            Some(evals) => Either::Left(evals),
+            None => match tracker.mat_mv_poly(id) {
+                Some(table) => Either::Right(table.clone()),
+                None => Either::Left(tracker.evaluations(id)),
+            },
+        };
+        Source { id, nv, evals }
+    }
+
+    /// Builds the helpers of the run ahead that starts with `job`, or of
+    /// `job` alone when it is not the next term ahead.
+    fn build_run(&mut self, tracker: &mut ProverTracker<B>, job: HelperJob<B::F>) {
+        while let Some(None) = self.ahead.front() {
+            self.ahead.pop_front();
+        }
+        if self.ahead.front().and_then(Option::as_ref) != Some(&job) {
+            self.ahead = VecDeque::from([Some(job)]);
+        }
+        let mut run = Vec::new();
+        let mut rows = 0;
+        while let Some(Some(next)) = self.ahead.front() {
+            rows += 1usize << tracker.poly_nv(next.cols[0]);
+            if !run.is_empty() && rows > RUN_ROWS {
+                break;
+            }
+            run.extend(self.ahead.pop_front().flatten());
+        }
+        let run: Vec<_> = run
+            .into_iter()
+            .map(|job| {
+                let nv = tracker.poly_nv(job.cols[0]);
+                let inputs = match job.mult {
+                    Some(Mult::Numerator(mult)) => {
+                        let (col, mult_nv) = (job.cols[0], tracker.poly_nv(mult));
+                        if mult_nv > nv {
+                            Err(invalid_parameters(format!(
+                                "multiplicity {mult} has more variables than its column {col}"
+                            )))
+                        } else {
+                            Ok(HelperInputs::Ratio {
+                                col: self.source(tracker, col, nv),
+                                mult: self.source(tracker, mult, mult_nv),
+                                table: tracker.mat_mv_poly(mult).cloned(),
+                            })
+                        }
+                    }
+                    factor => Ok(HelperInputs::Unit {
+                        cols: job
+                            .cols
+                            .iter()
+                            .map(|col| self.source(tracker, *col, nv))
+                            .collect(),
+                        factor: match factor {
+                            Some(Mult::Factor(factor)) => {
+                                let factor_nv = tracker.poly_nv(factor);
+                                Some(self.source(tracker, factor, factor_nv))
+                            }
+                            _ => None,
+                        },
+                    }),
+                };
+                (job, inputs)
+            })
+            .collect();
+        let param = tracker.mv_pcs_prover_param();
+        let built: Vec<_> = cfg_into_iter!(run)
+            .map(|(job, inputs)| {
+                let gamma = job.gamma;
+                let built = inputs.and_then(|inputs| build_helper(inputs, gamma, param.as_ref()));
+                (job, built)
+            })
+            .collect();
+        self.built = built.into();
+    }
 
     /// Commits to the helper of `cols` and returns it with the sum
     /// [`Party::helper`] asks for, which is left for the caller to send.
-    pub(super) fn commit_helper<B: SnarkBackend<F = F>>(
+    pub(super) fn commit_helper(
         &mut self,
         tracker: &mut ProverTracker<B>,
         cols: &[TrackerID],
         mult: Option<Mult>,
-        gamma: F,
-    ) -> SnarkResult<(TrackerID, F)> {
-        let (helper, sum, numerator) = match mult {
-            Some(Mult::Numerator(mult)) => {
-                let (helper, sum, numerator) = self.ratio_helper(tracker, cols[0], mult, gamma)?;
-                (helper, sum, Some(numerator))
-            }
-            Some(Mult::Factor(mult)) => {
-                let (helper, sum) = self.unit_helper(tracker, cols, Some(mult), gamma)?;
-                (helper, sum, None)
-            }
-            None => {
-                let (helper, sum) = self.unit_helper(tracker, cols, None, gamma)?;
-                (helper, sum, None)
-            }
+        gamma: B::F,
+    ) -> SnarkResult<(TrackerID, B::F)> {
+        let job = HelperJob {
+            cols: cols.to_vec(),
+            mult,
+            gamma,
         };
-        let nv = helper.num_vars();
-        let id = match tracker.track_and_commit_mat_mv_p(&helper, false)? {
+        if self.built.front().map(|(next, _)| next) != Some(&job) {
+            self.build_run(tracker, job);
+        }
+        let (_, built) = self.built.pop_front().expect("a run starts with its job");
+        let BuiltHelper {
+            committed,
+            nv,
+            sum,
+            numerator,
+            kept,
+        } = built?;
+        let id = match committed {
             // A constant is sent as its value and tracked by id alone. The
             // claims need a polynomial under that id.
-            Either::Right((id, constant)) => {
+            Either::Right(constant) => {
+                let id = tracker.track_and_commit_mv_constant(constant, nv)?;
                 let value = DenseMultilinearExtension::from_evaluations_vec(0, vec![constant]);
                 tracker.register_mat_mv_poly(id, MLE::new(value, (nv > 0).then_some(nv)));
                 id
             }
-            Either::Left(id) => {
-                // The committed table is not needed again as a table: the
-                // sumcheck can read the helper off the columns the tracker
-                // holds anyway and the numerator, at the price of an
-                // inversion per row every time. A sparse helper of few rows
-                // is cheaper to keep. A virtual column, or a numerator with
-                // no table smaller than the helper's, leaves the helper as
-                // it is.
-                let kept = match helper.storage() {
-                    MLEStorage::Field(_) => false,
-                    MLEStorage::Sparse { exceptions, .. } => 8 * exceptions.len() <= 1 << nv,
-                    _ => true,
-                };
-                drop(helper);
+            Either::Left((helper, commitment)) => {
+                let id = tracker.track_compressed_mat_mv_p_with_commitment(
+                    helper,
+                    commitment,
+                    CommitmentBinding::ProofEmitted,
+                    false,
+                )?;
+                // A virtual column, or a numerator with no table smaller than
+                // the helper's, leaves the helper as it is.
                 let sources: Option<Vec<_>> = cols
                     .iter()
                     .map(|col| tracker.mat_mv_poly(*col).cloned())
@@ -445,168 +776,19 @@ impl<F: PrimeField> ProvingParty<F> {
         Ok((id, sum))
     }
 
-    /// `sum_c 1/(c - gamma)` of `cols` on their hypercube, and its sum, or
-    /// that of `factor` times it over the larger of the two hypercubes.
-    fn unit_helper<B: SnarkBackend<F = F>>(
-        &mut self,
-        tracker: &mut ProverTracker<B>,
-        cols: &[TrackerID],
-        factor: Option<TrackerID>,
-        gamma: F,
-    ) -> SnarkResult<(MLE<F>, F)> {
-        let nv = tracker.poly_nv(cols[0]);
-        // Each column is inverted where it was read, and a second one is
-        // added into the first: with the inversion's running products, two
-        // tables at the peak for one column and three for a shared helper.
-        let mut helper: Vec<F> = Vec::new();
-        for col in cols {
-            let mut inverses = self.take(tracker, *col, nv)?;
-            // A row equal to `gamma` has no inverse. The inversion would
-            // leave a zero there, and the prover a helper that fails its
-            // zerocheck in a proof that says nothing of it.
-            let at_gamma: usize = cfg_iter_mut!(inverses)
-                .map(|value| {
-                    *value -= gamma;
-                    usize::from(value.is_zero())
-                })
-                .sum();
-            if at_gamma != 0 {
-                return Err(invalid_parameters(format!(
-                    "gamma is the value of {at_gamma} rows of polynomial {col}"
-                )));
-            }
-            batch_inversion(&mut inverses);
-            if helper.is_empty() {
-                helper = inverses;
-            } else {
-                cfg_iter_mut!(helper)
-                    .zip(inverses)
-                    .for_each(|(sum, inverse)| *sum += inverse);
-            }
-        }
-        let sum = match factor {
-            None => cfg_iter!(helper).sum(),
-            Some(factor) => {
-                let factor_nv = tracker.poly_nv(factor);
-                let factor = self.take(tracker, factor, factor_nv)?;
-                let (helper_mask, factor_mask) = (helper.len() - 1, factor.len() - 1);
-                cfg_into_iter!(0..helper.len().max(factor.len()))
-                    .map(|row| helper[row & helper_mask] * factor[row & factor_mask])
-                    .sum()
-            }
-        };
-        Ok((MLE::from_evaluations_vec(nv, helper), sum))
-    }
-
-    /// `mult/(col - gamma)` on the column's hypercube, its sum, and the
-    /// numerator a lazy helper would read: the tracker's table of `mult`,
-    /// or one built here if that is smaller than a field table. Only the
-    /// rows where `mult` is not zero are inverted, and a helper that is
-    /// zero on half its rows or more is stored sparse, which its commitment
-    /// pays for by its nonzero rows.
-    #[allow(clippy::type_complexity)]
-    fn ratio_helper<B: SnarkBackend<F = F>>(
-        &mut self,
-        tracker: &mut ProverTracker<B>,
-        col: TrackerID,
-        mult_id: TrackerID,
-        gamma: F,
-    ) -> SnarkResult<(MLE<F>, F, Option<Arc<MLE<F>>>)> {
-        let (nv, mult_nv) = (tracker.poly_nv(col), tracker.poly_nv(mult_id));
-        if mult_nv > nv {
-            return Err(invalid_parameters(format!(
-                "multiplicity {mult_id} has more variables than its column {col}"
-            )));
-        }
-        let column = self.take(tracker, col, nv)?;
-        let mult = self.take(tracker, mult_id, mult_nv)?;
-        let rows = 1usize << nv;
-        let mult_mask = mult.len() - 1;
-        let counted = |row: usize| !mult[row & mult_mask].is_zero();
-        // A row with a multiplicity has no helper if it is `gamma`. One
-        // without has the helper zero whatever its value.
-        let at_gamma = cfg_iter!(column)
-            .enumerate()
-            .filter(|(row, value)| counted(*row) && **value == gamma)
-            .count();
-        if at_gamma != 0 {
-            return Err(invalid_parameters(format!(
-                "gamma is the value of {at_gamma} rows of polynomial {col}"
-            )));
-        }
-        let nonzero = cfg_iter!(mult).filter(|m| !m.is_zero()).count() << (nv - mult_nv);
-        // Sparse rows are numbered by `u32`.
-        let rows_of: Option<Vec<u32>> = (2 * nonzero <= rows && nv <= 32).then(|| {
-            cfg_into_iter!(0..rows)
-                .filter(|row| counted(*row))
-                .map(|row| row as u32)
-                .collect()
-        });
-        // The rows without a multiplicity are zero here, which the
-        // inversion leaves as they are. A dense helper is written over the
-        // column, so that the column, the multiplicity and the helper are
-        // never three tables at once.
-        let mut helper: Vec<F> = match &rows_of {
-            Some(rows_of) => {
-                let helper = cfg_iter!(rows_of)
-                    .map(|row| column[*row as usize] - gamma)
-                    .collect();
-                drop(column);
-                helper
-            }
-            None => {
-                let mut helper = column;
-                cfg_iter_mut!(helper)
-                    .enumerate()
-                    .for_each(|(row, value)| match counted(row) {
-                        true => *value -= gamma,
-                        false => *value = F::zero(),
-                    });
-                helper
-            }
-        };
-        // Inverted a block at a time, which keeps the running products to
-        // a block rather than a table, and multiplied by the multiplicity.
-        const BLOCK: usize = 1 << 16;
-        let row_of = |at: usize| rows_of.as_ref().map_or(at, |rows_of| rows_of[at] as usize);
-        cfg_chunks_mut!(helper, BLOCK)
-            .enumerate()
-            .for_each(|(block, values)| {
-                batch_inversion(values);
-                for (at, value) in values.iter_mut().enumerate() {
-                    *value *= mult[row_of(block * BLOCK + at) & mult_mask];
-                }
-            });
-        let sum = cfg_iter!(helper).sum();
-        let helper = match rows_of {
-            Some(rows_of) => {
-                MLE::from_sparse(F::zero(), rows_of.into_iter().zip(helper).collect(), nv)
-                    .expect("the rows are ascending and on the hypercube")
-            }
-            None => MLE::from_evaluations_vec(nv, helper),
-        };
-        let numerator = match tracker.mat_mv_poly(mult_id) {
-            Some(numerator) => Some(numerator.clone()),
-            None => Some(MLE::from_evaluations_vec(mult_nv, mult).compressed())
-                .filter(|numerator| !numerator.storage().is_field())
-                .map(Arc::new),
-        };
-        Ok((helper, sum, numerator))
-    }
-
     /// The sum of `poly` over its hypercube, for the caller to send.
-    pub(super) fn sum_of<B: SnarkBackend<F = F>>(
+    pub(super) fn sum_of(
         &mut self,
         tracker: &mut ProverTracker<B>,
         poly: TrackerID,
-    ) -> SnarkResult<F> {
+    ) -> SnarkResult<B::F> {
         let nv = tracker.poly_nv(poly);
-        let evals = self.take(tracker, poly, nv)?;
+        let evals = self.source(tracker, poly, nv).read()?;
         Ok(cfg_iter!(evals).sum())
     }
 }
 
-impl<B: SnarkBackend> Party<ProverTracker<B>> for ProvingParty<B::F> {
+impl<B: SnarkBackend> Party<ProverTracker<B>> for ProvingParty<B> {
     fn helper(
         &mut self,
         tracker: &mut ProverTracker<B>,
@@ -623,6 +805,33 @@ impl<B: SnarkBackend> Party<ProverTracker<B>> for ProvingParty<B::F> {
         let sum = self.sum_of(tracker, poly)?;
         tracker.send_logup_sum(sum);
         Ok(sum)
+    }
+
+    fn start_relation(&mut self, sides: &RelationPlan<B::F>, gamma: B::F) {
+        self.ahead = sides
+            .iter()
+            .flatten()
+            .map(|term| match *term {
+                Term::Pair { cols, .. } => Some(HelperJob {
+                    cols: cols.to_vec(),
+                    mult: None,
+                    gamma,
+                }),
+                Term::Single {
+                    col: (Either::Left(col), nv),
+                    mult,
+                } => Some(HelperJob {
+                    cols: vec![col],
+                    mult: single_mult(mult, nv).0,
+                    gamma,
+                }),
+                Term::Single {
+                    col: (Either::Right(_), _),
+                    ..
+                } => None,
+            })
+            .collect();
+        self.built.clear();
     }
 
     fn reject(&self, reason: String) -> SnarkError {

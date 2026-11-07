@@ -760,7 +760,11 @@ pub(crate) fn prove_keyed_sums<B: SnarkBackend>(
             reduce_keyed_sums(&mut *tracker, &mut ProvingParty { evals }, relations)?;
         }
         LookupProtocol::LogUp => {
-            logup::reduce_keyed_sums(&mut *tracker, &mut logup::ProvingParty { evals }, relations)?;
+            logup::reduce_keyed_sums(
+                &mut *tracker,
+                &mut logup::ProvingParty::new(evals),
+                relations,
+            )?;
         }
     }
     Ok(())

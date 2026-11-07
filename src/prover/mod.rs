@@ -565,7 +565,7 @@ where
                 let included: Vec<&[B::F]> = sub_ids.iter().map(|id| &evals[id][..]).collect();
                 let super_evals = &evals[super_id];
                 let m_evals = lookup_check::inclusion_multiplicities(&included, super_evals);
-                let m_mle = Arc::new(MLE::from_evaluations_vec(
+                let m_mle = Arc::new(MLE::from_evaluations_vec_compressed(
                     super_evals.len().trailing_zeros() as usize,
                     m_evals.clone(),
                 ));
@@ -585,8 +585,8 @@ where
             let multiplicity = self
                 .tracker_rc
                 .borrow_mut()
-                .track_mat_mv_p_with_commitment(
-                    &m_mle,
+                .track_compressed_mat_mv_p_with_commitment(
+                    m_mle,
                     m_commitment,
                     CommitmentBinding::ProofEmitted,
                     false,

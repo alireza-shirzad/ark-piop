@@ -393,7 +393,7 @@ impl Session {
     /// in its transcript and in its claims.
     fn prove_shifting_sums(&mut self, shifts: &[F]) -> SnarkResult<()> {
         struct Shifting<'a> {
-            honest: logup::ProvingParty<F>,
+            honest: logup::ProvingParty<B>,
             shifts: &'a [F],
             sent: usize,
         }
@@ -427,9 +427,7 @@ impl Session {
             }
         }
         let mut party = Shifting {
-            honest: logup::ProvingParty {
-                evals: ColumnEvals::new(),
-            },
+            honest: logup::ProvingParty::new(ColumnEvals::new()),
             shifts,
             sent: 0,
         };
@@ -445,7 +443,7 @@ impl Session {
     /// a helper is the helper of the statement's column.
     fn prove_with_fake_helpers(&mut self, fakes: ColumnEvals<F>) -> SnarkResult<()> {
         struct FakeHelpers {
-            honest: logup::ProvingParty<F>,
+            honest: logup::ProvingParty<B>,
             fakes: ColumnEvals<F>,
         }
         impl logup::Party<ProverTracker<B>> for FakeHelpers {
@@ -501,9 +499,7 @@ impl Session {
             }
         }
         let mut party = FakeHelpers {
-            honest: logup::ProvingParty {
-                evals: ColumnEvals::new(),
-            },
+            honest: logup::ProvingParty::new(ColumnEvals::new()),
             fakes,
         };
         let tracker = self.prover.tracker();
@@ -3563,6 +3559,39 @@ fn logup_sums_are_in_the_transcript_from_where_they_are_read() {
     }
 }
 
+/// The LogUp prover builds and commits the helpers of a relation ahead and
+/// tracks them in the order of its terms. Its proof is that of a prover
+/// that builds each helper when its term comes, for every kind of term.
+#[test]
+fn logup_helpers_built_ahead_leave_the_proof_as_it_is() {
+    PROTOCOL.set(LookupProtocol::LogUp);
+    let budget = SharedArgConfig::default().logup_gkr_run_budget;
+    let sessions: [&dyn Fn() -> Session; 4] = [
+        &|| five_sum_session(3),
+        &|| five_sum_session(5),
+        &|| MixedColumns::new().honest((budget, budget)),
+        &|| {
+            let groups = TallGroups::new();
+            groups.session((budget, budget), &groups.counts())
+        },
+    ];
+    let proof = |mut session: Session, ahead: bool| {
+        match ahead {
+            true => session.prove_with(ColumnEvals::new()),
+            false => session.prove_shifting_sums(&[]),
+        }
+        .unwrap();
+        let proof = session.prover.build_proof().unwrap();
+        session.verify(&proof).unwrap();
+        let mut bytes = Vec::new();
+        proof.serialize_with_mode(&mut bytes, Compress::No).unwrap();
+        bytes
+    };
+    for session in sessions {
+        assert_eq!(proof(session(), true), proof(session(), false));
+    }
+}
+
 /// The terms `session` lays its relations out as under LogUp.
 fn logup_plan(session: &Session) -> Vec<logup::RelationPlan<F>> {
     logup::plan_relations(&*session.prover.tracker().borrow(), &session.relations).unwrap()
@@ -3714,9 +3743,7 @@ fn helper_of_the_other_columns_size(column: &[F], cheated: usize) -> Result<(), 
         let rest = tracker.add_scalar(rest, -F::one());
         tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
 
-        let mut party = logup::ProvingParty {
-            evals: ColumnEvals::new(),
-        };
+        let mut party = logup::ProvingParty::new(ColumnEvals::new());
         let other_side = logup::Term::Single {
             col: (Either::Left(ids[honest]), 3 + honest),
             mult: None,
@@ -3809,9 +3836,7 @@ fn logup_gamma_among_the_rows_of_a_column_is_a_prover_error() {
     ];
     let reduce = |term: &logup::Term<F>, gamma: F| {
         let mut tracker = session.prover.tracker().borrow().clone();
-        let mut party = logup::ProvingParty {
-            evals: ColumnEvals::new(),
-        };
+        let mut party = logup::ProvingParty::new(ColumnEvals::new());
         let before = TrackerCore::peek_next_id(&tracker);
         let reduced = logup::reduce_term(&mut tracker, &mut party, term, gamma);
         let untouched = TrackerCore::peek_next_id(&tracker) == before
@@ -3900,9 +3925,7 @@ fn logup_multiplicities_chosen_after_gamma_are_rejected() {
         {
             let tracker = prover.tracker();
             let mut tracker = tracker.borrow_mut();
-            let mut party = logup::ProvingParty {
-                evals: ColumnEvals::new(),
-            };
+            let mut party = logup::ProvingParty::new(ColumnEvals::new());
             let terms = [
                 logup::Term::Single {
                     col: (Either::Left(sub_id), 3),
@@ -3990,9 +4013,7 @@ fn logup_gammas_are_drawn_per_relation_in_turn_after_every_multiplicity() {
             let mut tracker = tracker.borrow_mut();
             let tracker = &mut *tracker;
             let plan = logup::plan_relations(tracker, &relations).unwrap();
-            let mut party = logup::ProvingParty {
-                evals: ColumnEvals::new(),
-            };
+            let mut party = logup::ProvingParty::new(ColumnEvals::new());
             for (relation, sides) in plan.iter().enumerate() {
                 let gamma = match ahead.get(relation) {
                     Some(gamma) => *gamma,
@@ -4277,9 +4298,7 @@ fn logup_helper_of_a_multiplicity_is_stored_by_its_density() {
     for (col, mult, mult_rows, kind) in cases {
         let mut tracker = session.prover.tracker().borrow().clone();
         let helper = TrackerCore::peek_next_id(&tracker);
-        let mut party = logup::ProvingParty {
-            evals: ColumnEvals::new(),
-        };
+        let mut party = logup::ProvingParty::new(ColumnEvals::new());
         let sum = logup::reduce_term(&mut tracker, &mut party, &term(col, mult), gamma).unwrap();
         let data = &columns[col];
         let term_sum: F = (0..data.len().max(mult_rows.len()))
@@ -4319,9 +4338,7 @@ fn logup_helper_of_a_multiplicity_is_stored_by_its_density() {
 
     let mut tracker = session.prover.tracker().borrow().clone();
     let helper = TrackerCore::peek_next_id(&tracker);
-    let mut party = logup::ProvingParty {
-        evals: ColumnEvals::new(),
-    };
+    let mut party = logup::ProvingParty::new(ColumnEvals::new());
     let zero_term = logup::Term::Single {
         col: (Either::Left(ids[0]), 8),
         mult: Some((Either::Left(zero_product), 3)),
@@ -4443,9 +4460,7 @@ fn logup_ratio_helper_of_another_size_than_its_column_is_refused() {
             let rest = tracker.sub_polys(rest, ids[1]);
             tracker.push_zerocheck_claim(TrackerZerocheckClaim::new(rest));
 
-            let mut party = logup::ProvingParty {
-                evals: ColumnEvals::new(),
-            };
+            let mut party = logup::ProvingParty::new(ColumnEvals::new());
             let output_term = logup::Term::Single {
                 col: (Either::Left(ids[2]), output.len().trailing_zeros() as usize),
                 mult: None,
@@ -4475,9 +4490,7 @@ fn logup_gamma_on_a_row_without_multiplicity_is_no_prover_error() {
     };
     for (row, refused) in [(1, true), (10, true), (4, false)] {
         let mut tracker = session.prover.tracker().borrow().clone();
-        let mut party = logup::ProvingParty {
-            evals: ColumnEvals::new(),
-        };
+        let mut party = logup::ProvingParty::new(ColumnEvals::new());
         let reduced = logup::reduce_term(&mut tracker, &mut party, &term, data[row]);
         match (reduced, refused) {
             (Err(SnarkError::PolyIOPErrors(PolyIOPErrors::InvalidParameters(reason))), true) => {
