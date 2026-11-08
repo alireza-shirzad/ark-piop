@@ -2,6 +2,7 @@ mod batch;
 pub(crate) mod small_scalar_msm;
 pub(crate) mod srs;
 pub mod structs;
+pub mod value_buckets;
 use crate::arithmetic::mat_poly::mle::MLEStorage;
 use crate::errors::SnarkError;
 use crate::errors::SnarkResult;
@@ -248,6 +249,47 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         })
     }
 
+    /// Through [`value_buckets`], when its guard expects that to cost less
+    /// than the MSM over the table.
+    fn commit_value_lookup(
+        prover_param: impl Borrow<Self::ProverParam>,
+        nv: usize,
+        cols: &[&[u32]],
+        table: &[E::ScalarField],
+    ) -> SnarkResult<Option<Self::Commitment>> {
+        let _span = tracing::debug_span!("pcs.commit_value_lookup").entered();
+        let prover_param = prover_param.borrow();
+        if prover_param.num_vars < nv {
+            return Err(PCSErrors(TooLargePolynomial(nv, prover_param.num_vars)));
+        }
+        let levels = &prover_param.powers_of_g[prover_param.num_vars - nv..];
+        let bases = &levels[0].evals;
+        assert!(
+            cols.iter().all(|col| col.len() == bases.len()),
+            "a column of {nv} variables has 2^{nv} entries"
+        );
+        let Some(histogram) = value_buckets::Histogram::of(cols, table.len()) else {
+            return Ok(None);
+        };
+        let rows = bases.len();
+        let bits = <E::ScalarField as ark_ff::PrimeField>::MODULUS_BIT_SIZE as usize;
+        if !value_buckets::bucketing_pays(
+            rows,
+            cols.len() * rows,
+            histogram.entries(),
+            histogram.distinct(),
+            bits,
+        ) {
+            return Ok(None);
+        }
+        let total = range_sum::<E>(levels, 0, rows);
+        let com = value_buckets::commit::<E::G1>(bases, total, cols, table, &histogram);
+        Ok(Some(PST13Commitment {
+            com: com.into_affine(),
+            nv: nv as u8,
+        }))
+    }
+
     /// Costs ~`2^{num_var+1}` G1 scalar muls over `num_var` rounds.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
@@ -466,6 +508,34 @@ mod tests {
         let value = Fr::rand(rng);
         assert!(!PST13::verify(&vk, &com, &point, &value, &proof)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn value_lookup_commits_as_the_table() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;
+        let (ck, _) = PST13::trim(&params, None, Some(10))?;
+        let table: Vec<Fr> = (0..16).map(|_| Fr::rand(&mut rng)).collect();
+        for (nv, cols) in [(10, 1), (10, 2), (7, 2)] {
+            let cols: Vec<Vec<u32>> = (0..cols)
+                .map(|_| (0..1 << nv).map(|_| rng.gen_range(0..16)).collect())
+                .collect();
+            let views: Vec<&[u32]> = cols.iter().map(Vec::as_slice).collect();
+            let evals = (0..1 << nv)
+                .map(|row| views.iter().map(|col| table[col[row] as usize]).sum())
+                .collect();
+            let dense = Arc::new(MLE::from_evaluations_vec(nv, evals));
+            let expected = PST13::commit(&ck, &dense)?;
+            let com = PST13::commit_value_lookup(&ck, nv, &views, &table)?;
+            assert_eq!(com, Some(expected));
+        }
+        let distinct: Vec<u32> = (0..1 << 10).collect();
+        let table: Vec<Fr> = (0..1 << 10).map(|_| Fr::rand(&mut rng)).collect();
+        assert_eq!(
+            PST13::commit_value_lookup(&ck, 10, &[&distinct, &distinct], &table)?,
+            None
+        );
         Ok(())
     }
 

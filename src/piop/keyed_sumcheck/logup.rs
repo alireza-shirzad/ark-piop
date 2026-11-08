@@ -63,7 +63,7 @@ use crate::{
     SnarkBackend,
     arithmetic::mat_poly::mle::{MLE, MLEStorage},
     errors::{SnarkError, SnarkResult},
-    pcs::PCS,
+    pcs::{PCS, pst13::value_buckets},
     prover::tracker::ProverTracker,
     tracker_core::TrackerCore,
     types::{CommitmentBinding, TrackerID},
@@ -427,14 +427,14 @@ fn build_helper<B: SnarkBackend>(
     gamma: B::F,
     param: &<B::MvPCS as PCS<B::F>>::ProverParam,
 ) -> SnarkResult<BuiltHelper<B>> {
-    let (helper, sum, numerator) = match inputs {
+    let (helper, sum, numerator, values) = match inputs {
         HelperInputs::Ratio { col, mult, table } => {
             let (helper, sum, numerator) = ratio_helper(col, mult, table, gamma)?;
-            (helper, sum, Some(numerator))
+            (helper, sum, Some(numerator), None)
         }
         HelperInputs::Unit { cols, factor } => {
-            let (helper, sum) = unit_helper(cols, factor, gamma)?;
-            (helper, sum, None)
+            let (helper, sum, values) = unit_helper(cols, factor, gamma)?;
+            (helper, sum, None, values)
         }
     };
     let nv = helper.num_vars();
@@ -451,7 +451,28 @@ fn build_helper<B: SnarkBackend>(
         Either::Right(helper.storage().lift(0))
     } else {
         let helper = Arc::new(helper.compressed());
-        let commitment = B::MvPCS::commit(param, &helper)?;
+        // A dense helper of small-integer columns takes one value per value
+        // of theirs, `1/(v - gamma)`, and the scheme may commit to it from
+        // the columns and that table. A compressed helper is already cheap.
+        let from_values = match (helper.storage(), values) {
+            (MLEStorage::Field(_), Some(values)) => {
+                let len = cfg_iter!(values)
+                    .filter_map(|col| cfg_iter!(col).max().copied())
+                    .max()
+                    .map_or(0, |max| max as usize + 1);
+                let mut table: Vec<B::F> = cfg_into_iter!(0..len)
+                    .map(|value| B::F::from(value as u64) - gamma)
+                    .collect();
+                batch_inversion(&mut table);
+                let cols: Vec<&[u32]> = values.iter().map(Vec::as_slice).collect();
+                B::MvPCS::commit_value_lookup(param, nv, &cols, &table)?
+            }
+            _ => None,
+        };
+        let commitment = match from_values {
+            Some(commitment) => commitment,
+            None => B::MvPCS::commit(param, &helper)?,
+        };
         Either::Left((helper, commitment))
     };
     Ok(BuiltHelper {
@@ -464,13 +485,18 @@ fn build_helper<B: SnarkBackend>(
 }
 
 /// `sum_c 1/(c - gamma)` of `cols` on their hypercube, and its sum, or
-/// that of `factor` times it over the larger of the two hypercubes.
+/// that of `factor` times it over the larger of the two hypercubes. Also
+/// the columns as integers, when all their values are integers below both
+/// [`value_buckets::MAX_VALUE_BOUND`] and twice the columns' entries.
+#[allow(clippy::type_complexity)]
 fn unit_helper<F: PrimeField>(
     cols: Vec<Source<F>>,
     factor: Option<Source<F>>,
     gamma: F,
-) -> SnarkResult<(MLE<F>, F)> {
+) -> SnarkResult<(MLE<F>, F, Option<Vec<Vec<u32>>>)> {
     let nv = cols[0].nv;
+    let bound = value_buckets::MAX_VALUE_BOUND.min(cols.len() << (nv + 1)) as u64;
+    let mut values = Some(Vec::with_capacity(cols.len()));
     // Each column is inverted where it was read, and a second one is added
     // into the first: with the inversion's running products, two tables at
     // the peak for one column and three for a shared helper.
@@ -478,6 +504,20 @@ fn unit_helper<F: PrimeField>(
     for col in cols {
         let id = col.id;
         let mut inverses = col.read()?;
+        if values.is_some() {
+            let col_values: Option<Vec<u32>> = cfg_iter!(inverses)
+                .map(|value| {
+                    let value = value.into_bigint();
+                    let limbs = value.as_ref();
+                    (limbs[1..].iter().all(|limb| *limb == 0) && limbs[0] < bound)
+                        .then_some(limbs[0] as u32)
+                })
+                .collect();
+            values = values.zip(col_values).map(|(mut values, col_values)| {
+                values.push(col_values);
+                values
+            });
+        }
         // A row equal to `gamma` has no inverse. The inversion would leave
         // a zero there, and the prover a helper that fails its zerocheck in
         // a proof that says nothing of it.
@@ -511,7 +551,7 @@ fn unit_helper<F: PrimeField>(
                 .sum()
         }
     };
-    Ok((MLE::from_evaluations_vec(nv, helper), sum))
+    Ok((MLE::from_evaluations_vec(nv, helper), sum, values))
 }
 
 /// `mult/(col - gamma)` on the column's hypercube, its sum, and the

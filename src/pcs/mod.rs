@@ -75,6 +75,19 @@ pub trait PCS<F: PrimeField>: Clone {
         poly: &Arc<Self::Poly>,
     ) -> SnarkResult<Self::Commitment>;
 
+    /// The commitment [`PCS::commit`] gives the table `x ↦ Σ_j
+    /// table[cols[j][x]]` of `nv` variables, each column holding `2^nv`
+    /// entries below `table.len()`, or `None` when this scheme has no way to
+    /// it cheaper than committing that table.
+    fn commit_value_lookup(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _nv: usize,
+        _cols: &[&[u32]],
+        _table: &[F],
+    ) -> SnarkResult<Option<Self::Commitment>> {
+        Ok(None)
+    }
+
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
