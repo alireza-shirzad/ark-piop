@@ -61,6 +61,10 @@ name = "calibrate_msm"
 required-features = ["test-utils"]
 
 [[example]]
+name = "calibrate_value_buckets"
+required-features = ["test-utils"]
+
+[[example]]
 name = "bench_lookup"
 required-features = ["test-utils"]
 
