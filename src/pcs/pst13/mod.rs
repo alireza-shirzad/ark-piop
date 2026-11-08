@@ -279,6 +279,7 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
             histogram.entries(),
             histogram.distinct(),
             bits,
+            value_buckets::threads(),
         ) {
             return Ok(None);
         }
@@ -514,10 +515,10 @@ mod tests {
     #[test]
     fn value_lookup_commits_as_the_table() -> SnarkResult<()> {
         let mut rng = test_rng();
-        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 10)?;
-        let (ck, _) = PST13::trim(&params, None, Some(10))?;
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 11)?;
+        let (ck, _) = PST13::trim(&params, None, Some(11))?;
         let table: Vec<Fr> = (0..16).map(|_| Fr::rand(&mut rng)).collect();
-        for (nv, cols) in [(10, 1), (10, 2), (7, 2)] {
+        for (nv, cols) in [(11, 1), (11, 2), (10, 2)] {
             let cols: Vec<Vec<u32>> = (0..cols)
                 .map(|_| (0..1 << nv).map(|_| rng.gen_range(0..16)).collect())
                 .collect();
@@ -530,10 +531,10 @@ mod tests {
             let com = PST13::commit_value_lookup(&ck, nv, &views, &table)?;
             assert_eq!(com, Some(expected));
         }
-        let distinct: Vec<u32> = (0..1 << 10).collect();
-        let table: Vec<Fr> = (0..1 << 10).map(|_| Fr::rand(&mut rng)).collect();
+        let distinct: Vec<u32> = (0..1 << 11).collect();
+        let table: Vec<Fr> = (0..1 << 11).map(|_| Fr::rand(&mut rng)).collect();
         assert_eq!(
-            PST13::commit_value_lookup(&ck, 10, &[&distinct, &distinct], &table)?,
+            PST13::commit_value_lookup(&ck, 11, &[&distinct, &distinct], &table)?,
             None
         );
         Ok(())

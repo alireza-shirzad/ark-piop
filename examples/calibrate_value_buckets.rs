@@ -1,13 +1,14 @@
 //! Times the bucketed commitment of `ark_piop::pcs::pst13::value_buckets`
 //! against the MSM over the table it commits, and prints what the guard
-//! decides for each case, to check `MARGIN` and `SCAN_COST` on this
+//! decides for each case, to check `MARGIN`, `SCAN_COST` and `THREAD_COST` on this
 //! machine.
 //!
 //!     cargo run --release --example calibrate_value_buckets --features test-utils -- 1,16
 //!
 //! The argument lists the thread counts. Prints one CSV row per case: rows,
 //! columns, how the values are drawn, the bound on them, threads, both
-//! times and the guard's choice. A row with `guard = bucket` and a speedup
+//! times, the guard's choice, and the entries and distinct values it saw
+//! besides the most frequent one. A row with `guard = bucket` and a speedup
 //! below 1 is a case the guard gets wrong.
 
 use ark_bn254::{Fr, G1Affine, G1Projective};
@@ -15,6 +16,7 @@ use ark_ec::{CurveGroup, VariableBaseMSM};
 use ark_ff::{PrimeField, UniformRand};
 use ark_piop::pcs::pst13::value_buckets::{Histogram, bucketing_pays, commit};
 use ark_std::rand::{Rng, seq::SliceRandom};
+use rayon::prelude::*;
 use std::time::Instant;
 
 fn best_of<T>(runs: usize, mut f: impl FnMut() -> T) -> f64 {
@@ -38,6 +40,14 @@ fn draw(shape: &str, n: usize, bound: usize, rng: &mut impl Rng) -> Vec<u32> {
                 .map(|_| if rng.gen_bool(share) { 0 } else { uniform(rng) })
                 .collect()
         }
+        // Two values with 45% of the entries each.
+        "heavy" => (0..n)
+            .map(|_| match rng.gen_range(0..20) {
+                0..9 => 0,
+                9..18 => 1,
+                _ => uniform(rng),
+            })
+            .collect(),
         // Small values far more often than large ones.
         "zipf" => (0..n)
             .map(|_| ((bound as f64) * rng.gen_range(0.0f64..1.0).powi(3)) as u32)
@@ -70,7 +80,7 @@ fn main() {
         .map(|arg| arg.split(',').map(|t| t.parse().unwrap()).collect())
         .unwrap_or(vec![1, 16]);
     let bits = Fr::MODULUS_BIT_SIZE as usize;
-    println!("rows_log,cols,shape,bound,threads,dense_s,bucketed_s,speedup,guard");
+    println!("rows_log,cols,shape,bound,threads,dense_s,bucketed_s,speedup,guard,entries,distinct");
     for &t in &threads {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(t)
@@ -86,7 +96,7 @@ fn main() {
                 let total: G1Projective =
                     G1Projective::msm_unchecked(bases, &vec![Fr::from(1u64); n]);
                 for cols in [1usize, 2] {
-                    for shape in ["uniform", "mode50", "mode90", "zipf", "distinct"] {
+                    for shape in ["uniform", "mode50", "mode90", "heavy", "zipf", "distinct"] {
                         // Values from 2^20 up are never bucketed.
                         let ratios: &[f64] = match shape {
                             "distinct" if n > 1 << 20 => &[],
@@ -111,29 +121,24 @@ fn main() {
                             let runs = if rows_log >= 20 { 1 } else { 3 };
                             let dense_s =
                                 best_of(runs, || G1Projective::msm_unchecked(bases, &dense));
-                            let mut decided = false;
+                            let (mut decided, mut entries, mut distinct) = (false, 0, 0);
                             let bucketed_s = best_of(runs, || {
                                 let small: Vec<Vec<u32>> = columns
                                     .iter()
                                     .map(|col| {
-                                        col.iter()
+                                        col.par_iter()
                                             .map(|value| value.into_bigint().as_ref()[0] as u32)
                                             .collect()
                                     })
                                     .collect();
                                 let views: Vec<&[u32]> = small.iter().map(Vec::as_slice).collect();
                                 let histogram = Histogram::of(&views, bound).unwrap();
-                                decided = bucketing_pays(
-                                    n,
-                                    cols * n,
-                                    histogram.entries(),
-                                    histogram.distinct(),
-                                    bits,
-                                );
+                                (entries, distinct) = (histogram.entries(), histogram.distinct());
+                                decided = bucketing_pays(n, cols * n, entries, distinct, bits, t);
                                 commit(bases, total, &views, &table, &histogram)
                             });
                             println!(
-                                "{rows_log},{cols},{shape},{bound},{t},{dense_s:.5},{bucketed_s:.5},{:.2},{}",
+                                "{rows_log},{cols},{shape},{bound},{t},{dense_s:.5},{bucketed_s:.5},{:.2},{},{entries},{distinct}",
                                 dense_s / bucketed_s,
                                 if decided { "bucket" } else { "msm" }
                             );
