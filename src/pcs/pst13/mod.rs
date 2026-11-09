@@ -291,6 +291,29 @@ impl<E: Pairing> PCS<E::ScalarField> for PST13<E> {
         }))
     }
 
+    /// The commitment is linear in the table, and a constant table commits
+    /// to the constant times the sum of the level's bases.
+    fn commit_linear_combination(
+        prover_param: impl Borrow<Self::ProverParam>,
+        nv: usize,
+        terms: &[(E::ScalarField, &Self::Commitment)],
+        constant: E::ScalarField,
+    ) -> SnarkResult<Option<Self::Commitment>> {
+        let prover_param = prover_param.borrow();
+        if prover_param.num_vars < nv || terms.iter().any(|(_, comm)| comm.nv as usize != nv) {
+            return Ok(None);
+        }
+        let levels = &prover_param.powers_of_g[prover_param.num_vars - nv..];
+        let points: Vec<E::G1Affine> = terms.iter().map(|(_, comm)| comm.com).collect();
+        let scalars: Vec<E::ScalarField> = terms.iter().map(|(c, _)| *c).collect();
+        let com = E::G1::msm_unchecked(&points, &scalars)
+            + range_sum::<E>(levels, 0, 1 << nv).mul(constant);
+        Ok(Some(PST13Commitment {
+            com: com.into_affine(),
+            nv: nv as u8,
+        }))
+    }
+
     /// Costs ~`2^{num_var+1}` G1 scalar muls over `num_var` rounds.
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
@@ -535,6 +558,39 @@ mod tests {
         let table: Vec<Fr> = (0..1 << 11).map(|_| Fr::rand(&mut rng)).collect();
         assert_eq!(
             PST13::commit_value_lookup(&ck, 11, &[&distinct, &distinct], &table)?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn linear_combination_commits_as_the_combination() -> SnarkResult<()> {
+        let mut rng = test_rng();
+        let params = PST13::<E>::gen_srs_for_testing(&mut rng, 8)?;
+        let (ck, _) = PST13::trim(&params, None, Some(8))?;
+        for nv in [8, 5] {
+            let polys: Vec<Vec<Fr>> = (0..3)
+                .map(|_| (0..1 << nv).map(|_| Fr::rand(&mut rng)).collect())
+                .collect();
+            let coeffs: Vec<Fr> = (0..3).map(|_| Fr::rand(&mut rng)).collect();
+            let constant = Fr::rand(&mut rng);
+            let comms = polys
+                .iter()
+                .map(|p| PST13::commit(&ck, &Arc::new(MLE::from_evaluations_vec(nv, p.clone()))))
+                .collect::<SnarkResult<Vec<_>>>()?;
+            let combined: Vec<Fr> = (0..1 << nv)
+                .map(|x| constant + (0..3).map(|j| coeffs[j] * polys[j][x]).sum::<Fr>())
+                .collect();
+            let expected = PST13::commit(&ck, &Arc::new(MLE::from_evaluations_vec(nv, combined)))?;
+            let terms: Vec<_> = coeffs.iter().copied().zip(comms.iter()).collect();
+            assert_eq!(
+                PST13::commit_linear_combination(&ck, nv, &terms, constant)?,
+                Some(expected)
+            );
+        }
+        let small = PST13::commit(&ck, &Arc::new(MLE::rand(5, &mut rng)))?;
+        assert_eq!(
+            PST13::commit_linear_combination(&ck, 8, &[(Fr::one(), &small)], Fr::zero())?,
             None
         );
         Ok(())

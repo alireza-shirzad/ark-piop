@@ -113,6 +113,58 @@ where
         ))
     }
 
+    /// Tracks and commits `polynomial`, the evaluations of the linear virtual
+    /// polynomial `id`, by combining the commitments of `id`'s terms instead
+    /// of an MSM over `polynomial`. The commitment is the one
+    /// [`Self::track_and_commit_mat_mv_p`] computes. `None` when a term is
+    /// not a constant or a polynomial committed at `polynomial`'s size, or
+    /// when the scheme cannot combine commitments.
+    pub(crate) fn track_and_commit_linear_mv_p(
+        &mut self,
+        id: TrackerID,
+        polynomial: &MLE<B::F>,
+    ) -> SnarkResult<Option<TrackerID>> {
+        let Some(vpoly) = self.virt_poly(id) else {
+            return Ok(None);
+        };
+        let pcs = &self.state.mv_pcs_substate;
+        let mut terms = Vec::with_capacity(vpoly.len());
+        let mut constant = B::F::zero();
+        for (coeff, factors) in vpoly.iter() {
+            match factors.as_slice() {
+                [] => constant += coeff,
+                [factor] => {
+                    if let Some(comm) = pcs.materialized_comms.get(factor) {
+                        terms.push((*coeff, comm));
+                    } else if let Some(value) = pcs.constants.get(factor) {
+                        constant += *coeff * value;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+        let polynomial = Arc::new(polynomial.to_compressed());
+        let nv = polynomial.storage().inner_num_vars();
+        let Some(commitment) = B::MvPCS::commit_linear_combination(
+            self.pk.mv_pcs_param.as_ref(),
+            nv,
+            &terms,
+            constant,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.track_compressed_mat_mv_p_with_commitment(
+            polynomial,
+            commitment,
+            CommitmentBinding::ProofEmitted,
+            false,
+        )
+        .map(Some)
+    }
+
     /// Tracks a constant polynomial: allocates an ID, stores the constant in
     /// the proof in place of a commitment and binds it to the transcript. No
     /// MLE is created: the constant propagates as `Either::Right(cnst)`

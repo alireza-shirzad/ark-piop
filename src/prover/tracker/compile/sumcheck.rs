@@ -562,15 +562,25 @@ where
                 chunk_prod_id
             } else {
                 let chunk_mle = MLE::from_evaluations_vec(max_nv, chunk_evals.clone());
-                let (chunk_comm_id, constant) =
-                    match self.track_and_commit_mat_mv_p(&chunk_mle, false)? {
+                // A linear claim over committed columns, `neq`'s for one, gets
+                // its copy's commitment from theirs.
+                let combined = match chunk {
+                    [claim] if !chunk_mle.is_constant() => {
+                        self.track_and_commit_linear_mv_p(claim.id(), &chunk_mle)?
+                    }
+                    _ => None,
+                };
+                let (chunk_comm_id, constant) = match combined {
+                    Some(id) => (id, false),
+                    None => match self.track_and_commit_mat_mv_p(&chunk_mle, false)? {
                         Either::Left(id) => (id, false),
                         Either::Right((id, _cnst)) => {
                             // Registered so that tracker arithmetic can find it.
                             self.register_mat_mv_poly(id, chunk_mle);
                             (id, true)
                         }
-                    };
+                    },
+                };
                 let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
                 self.add_mv_zerocheck_claim(diff_id)?;
                 if constant {
