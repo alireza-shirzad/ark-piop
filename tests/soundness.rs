@@ -5,7 +5,7 @@ use ark_ff::Zero;
 use ark_piop::{
     DefaultSnarkBackend, SnarkBackend,
     arithmetic::mat_poly::mle::MLE,
-    errors::SnarkError,
+    errors::{SnarkError, assert_soundness_error},
     prover::structs::proof::{PROOF_ENCODING_VERSION, SNARKProof},
     test_utils::test_prelude,
     types::artifact::Artifact,
@@ -230,4 +230,100 @@ fn proof_envelope_rejects_empty_buffer() {
         SnarkError::Artifact(_) => {}
         other => panic!("expected SnarkError::Artifact, got {other:?}"),
     }
+}
+
+/// A nozerocheck claim built the same way on both sides.
+#[derive(Clone, Copy)]
+enum NonZero {
+    Col(usize),
+    Diff(usize, usize),
+    Prod(usize, usize),
+}
+
+/// Commits `cols`, claims each of `claims` nonzero everywhere, and verifies.
+fn prove_nonzero(cols: &[Vec<F>], claims: &[NonZero]) -> Result<(), SnarkError> {
+    let (mut prover, mut verifier) = test_prelude::<B>()?;
+    let nv = cols[0].len().trailing_zeros() as usize;
+    let polys = cols
+        .iter()
+        .map(|col| prover.track_and_commit_mat_mv_poly(&MLE::from_evaluations_vec(nv, col.clone())))
+        .collect::<Result<Vec<_>, _>>()?;
+    for claim in claims {
+        let poly = match *claim {
+            NonZero::Col(i) => polys[i].clone(),
+            NonZero::Diff(i, j) => &polys[i] - &polys[j],
+            NonZero::Prod(i, j) => &polys[i] * &polys[j],
+        };
+        prover.add_mv_nozerocheck_claim(poly.id())?;
+    }
+    let proof = prover.build_proof()?;
+
+    verifier.set_proof(proof);
+    let oracles = polys
+        .iter()
+        .map(|poly| verifier.track_mv_com_by_id(poly.id()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for claim in claims {
+        let oracle = match *claim {
+            NonZero::Col(i) => oracles[i].clone(),
+            NonZero::Diff(i, j) => &oracles[i] - &oracles[j],
+            NonZero::Prod(i, j) => &oracles[i] * &oracles[j],
+        };
+        verifier.add_mv_nozerocheck_claim(oracle.id());
+    }
+    verifier.verify()
+}
+
+fn col(f: impl Fn(u64) -> u64) -> Vec<F> {
+    (0..16u64).map(|i| F::from(f(i))).collect()
+}
+
+/// Columns: `i+1`, `2i+3`, `1/(i+1)`, `i` (zero at 0), `i mod 2`,
+/// `1 - i mod 2`.
+fn nonzero_cols() -> Vec<Vec<F>> {
+    let mut inverse = col(|i| i + 1);
+    ark_ff::batch_inversion(&mut inverse);
+    vec![
+        col(|i| i + 1),
+        col(|i| 2 * i + 3),
+        inverse,
+        col(|i| i),
+        col(|i| i % 2),
+        col(|i| 1 - i % 2),
+    ]
+}
+
+/// Covers each way a claim enters the product: a committed column as it
+/// is, a difference and a product through committed copies, and a product
+/// that is the constant 1 through its public value.
+#[test]
+fn nonzero_claims_of_every_shape_verify() {
+    let claims = [
+        NonZero::Col(0),
+        NonZero::Diff(1, 0),
+        NonZero::Prod(0, 1),
+        NonZero::Prod(0, 2),
+    ];
+    prove_nonzero(&nonzero_cols(), &claims).unwrap();
+}
+
+#[test]
+fn nonzero_claim_on_a_column_with_a_zero_is_rejected() {
+    let claims = [NonZero::Col(0), NonZero::Col(3)];
+    assert_soundness_error(prove_nonzero(&nonzero_cols(), &claims).unwrap_err());
+}
+
+#[test]
+fn nonzero_claim_on_a_difference_with_a_zero_is_rejected() {
+    // (2i+3) - (i+1) is nonzero; (i+1) - (i+1) is zero everywhere.
+    let claims = [NonZero::Diff(1, 0), NonZero::Diff(0, 0)];
+    assert_soundness_error(prove_nonzero(&nonzero_cols(), &claims).unwrap_err());
+}
+
+/// `(i mod 2)·(1 - i mod 2)` is the constant zero, so its copy is sent as a
+/// public constant, which the verifier must check itself.
+#[test]
+fn nonzero_claim_on_a_product_that_is_constant_zero_is_rejected() {
+    let claims = [NonZero::Col(0), NonZero::Prod(4, 5)];
+    assert_soundness_error(prove_nonzero(&nonzero_cols(), &claims).unwrap_err());
 }

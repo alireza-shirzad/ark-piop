@@ -69,6 +69,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         Ok(())
     }
 
+    /// Mirrors the prover's nozerocheck batching, and checks each constant
+    /// copy nonzero itself.
     #[instrument(level = "debug", skip(self))]
     fn batch_nozero_check_claims(&mut self, _max_nv: usize) -> SnarkResult<()> {
         let nozero_chunk_size = self.config.nozero_chunk_size;
@@ -78,10 +80,18 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         }
 
         let num_claims = nozero_claims.len();
-        let mut chunk_comm_ids = Vec::new();
+        let mut num_factors = 0usize;
         let mut master_prod_id = None;
 
         for chunk in nozero_claims.chunks(nozero_chunk_size) {
+            let committed = match chunk {
+                [claim] => self
+                    .state
+                    .mv_pcs_substate
+                    .materialized_comms
+                    .contains_key(&claim.id()),
+                _ => false,
+            };
             let mut iter = chunk.iter();
             let first = iter
                 .next()
@@ -91,27 +101,50 @@ impl<B: SnarkBackend> VerifierTracker<B> {
                 chunk_prod_id = self.mul_polys(chunk_prod_id, claim.id());
             }
 
-            let chunk_comm_id = self.peek_next_id();
-            let _ = self.track_mv_com_by_id(chunk_comm_id)?;
-            let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
-            self.add_mv_zerocheck_claim(diff_id);
+            let factor_id = if committed {
+                chunk_prod_id
+            } else {
+                let chunk_comm_id = self.peek_next_id();
+                let _ = self.track_mv_com_by_id(chunk_comm_id)?;
+                let diff_id = self.sub_polys(chunk_comm_id, chunk_prod_id);
+                self.add_mv_zerocheck_claim(diff_id);
+                let constant = self
+                    .proof_or_err()?
+                    .mv_pcs_subproof
+                    .constants
+                    .get(&chunk_comm_id)
+                    .copied();
+                if let Some(cnst) = constant {
+                    if cnst.is_zero() {
+                        return Err(SnarkError::VerifierError(
+                            VerifierError::VerifierCheckFailed(
+                                "a nozerocheck claim is the constant zero".to_string(),
+                            ),
+                        ));
+                    }
+                    continue;
+                }
+                chunk_comm_id
+            };
 
+            num_factors += 1;
             master_prod_id = Some(match master_prod_id {
-                None => chunk_comm_id,
-                Some(acc) => self.mul_polys(acc, chunk_comm_id),
+                None => factor_id,
+                Some(acc) => self.mul_polys(acc, factor_id),
             });
-            chunk_comm_ids.push(chunk_comm_id);
         }
 
-        let master_prod_id = master_prod_id.expect("nozero_claims should be non-empty");
+        let Some(master_prod_id) = master_prod_id else {
+            return Ok(());
+        };
 
         let inverses_poly_id = self.peek_next_id();
         let _ = self.track_mv_com_by_id(inverses_poly_id)?;
 
         debug!(
-            "{} nozerocheck polynomials chunked into {}; final degree {}",
+            "{} nozerocheck polynomials, {} factors in the product; final degree {}",
             num_claims,
-            chunk_comm_ids.len(),
+            num_factors,
             self.virt_poly_degree(master_prod_id)
         );
 
