@@ -88,6 +88,19 @@ pub trait PCS<F: PrimeField>: Clone {
         Ok(None)
     }
 
+    /// The commitment [`PCS::commit`] gives `Σ_j c_j·p_j + constant` of `nv`
+    /// variables, from `terms = [(c_j, commitment of p_j)]` with every `p_j`
+    /// committed at `nv` variables, or `None` when this scheme cannot
+    /// combine commitments.
+    fn commit_linear_combination(
+        _prover_param: impl Borrow<Self::ProverParam>,
+        _nv: usize,
+        _terms: &[(F, &Self::Commitment)],
+        _constant: F,
+    ) -> SnarkResult<Option<Self::Commitment>> {
+        Ok(None)
+    }
+
     fn open_impl_inner(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Arc<Self::Poly>,
