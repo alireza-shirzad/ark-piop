@@ -1,5 +1,8 @@
 use crate::{
-    arithmetic::{mat_poly::mle::MLE, virt_poly::hp_interface::HPVirtualPolynomial},
+    arithmetic::{
+        mat_poly::{mle::MLE, utils::build_eq_x_r},
+        virt_poly::hp_interface::HPVirtualPolynomial,
+    },
     piop::errors::PolyIOPErrors,
 };
 use ark_ff::{PrimeField, batch_inversion};
@@ -14,6 +17,10 @@ use std::sync::{Arc, OnceLock};
 use tracing::{info, instrument};
 
 use crate::piop::structs::{MleSlot, SumcheckProverMessage, SumcheckProverState};
+
+/// A factor nonzero on fewer than `1/SPARSE_FRACTION` of a round's rows
+/// is walked by its nonzero rows.
+const SPARSE_FRACTION: usize = 4;
 
 /// User-configurable streaming policy, cached per-process; see [`stream_policy`].
 #[derive(Clone, Copy, Debug)]
@@ -335,6 +342,45 @@ impl<F: PrimeField> SumcheckProverState<F> {
         let products_list = self.poly.products.clone();
         let mut products_sum = vec![F::zero(); self.poly.aux_info.max_degree + 1];
 
+        // This round a factor `eq(x, r)` is `c·e(X)·table[b]`, `X` the
+        // variable being bound and `b` the ones after it: `c` folds the
+        // challenges so far and `e(X) = X·r_k + (1 - X)(1 - r_k)`. A term
+        // holding it sums its other factors weighted by `table`, one degree
+        // lower, and is multiplied by `c·e(X)` at the end: the same round
+        // polynomial for fewer multiplications. `(index, c·e(0..=max_degree),
+        // table)`.
+        let eq_rounds: Vec<(usize, Vec<F>, Vec<F>)> = if self.stream_k == 0 {
+            let k = self.round - 1;
+            self.poly
+                .eq_factors
+                .iter()
+                .map(|(index, r)| {
+                    let scale: F = r
+                        .iter()
+                        .zip(&self.challenges)
+                        .map(|(r_i, x_i)| *x_i * r_i + (F::one() - x_i) * (F::one() - r_i))
+                        .product();
+                    let r_k = r[k];
+                    let at_points = (0..=self.poly.aux_info.max_degree as u64)
+                        .map(|x| {
+                            let x = F::from(x);
+                            scale * (x * r_k + (F::one() - x) * (F::one() - r_k))
+                        })
+                        .collect();
+                    let table = if k + 1 < r.len() {
+                        build_eq_x_r(&r[k + 1..])
+                            .expect("a non-empty point")
+                            .into_evaluations()
+                    } else {
+                        vec![F::one()]
+                    };
+                    (*index, at_points, table)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
         // Streaming challenges applied so far (stays at `stream_k` after transition);
         // used only for the Streaming-slot read shift (`idx << stream_m`).
         let stream_m = stream_eq_table.len().trailing_zeros() as usize;
@@ -381,132 +427,284 @@ impl<F: PrimeField> SumcheckProverState<F> {
 
         let max_nv = slot_num_vars(&mle_slots[0]);
 
+        // Each materialized slot as its Field evaluations and the mask that
+        // reads them cyclically, which is what `mle[i]` does, resolved once
+        // here instead of on every read of the loop below.
+        let views: Vec<Option<(&[F], usize)>> = mle_slots
+            .iter()
+            .map(|slot| match slot {
+                MleSlot::Materialized(mle) => match mle.storage() {
+                    crate::arithmetic::mat_poly::mle::MLEStorage::Field(m) => {
+                        Some((m.evaluations.as_slice(), m.evaluations.len() - 1))
+                    }
+                    _ => unreachable!("materialized slots hold Field storage"),
+                },
+                MleSlot::Streaming(_) => None,
+            })
+            .collect();
+
         // Step 2: sum the partially evaluated polynomial f(r_1..r_m, x_{m+1}..x_n).
         // The inner fold must not capture the helper closures above (rayon needs
         // its body `Sync`), so it reads slots inline.
 
-        let zero = F::zero();
-        let sums = cfg_iter!(products_list)
-            .map(|(coefficient, products)| {
-                let mut coefficient = *coefficient;
+        let max_degree = self.poly.aux_info.max_degree;
 
-                // Domain size from ALL factors (including scalars) so the summation
-                // covers the correct hypercube; inner_num_vars keeps the arithmetic
-                // bit-identical to the eager path.
-                let term_nv = products
+        // A term to sum over the hypercube, after folding its scalar factors
+        // into `coefficient` and splitting off its `eq` factor.
+        struct Summed<'a, F> {
+            coefficient: F,
+            factors: Vec<usize>,
+            /// `eq`'s `table`, by which row `b` is weighted.
+            weights: Option<&'a [F]>,
+            /// `c·e(0..=max_degree)`, by which the round polynomial is
+            /// multiplied at the end.
+            eq_at_points: Option<&'a [F]>,
+            /// Rows `b` this term reads; below `2^(max_nv-1)` when every
+            /// factor is smaller, and then the sum is scaled up.
+            rows: usize,
+            scale: F,
+        }
+        let mut summed: Vec<Summed<F>> = Vec::with_capacity(products_list.len());
+        for (coefficient, products) in products_list.iter() {
+            let mut coefficient = *coefficient;
+            // Domain size from ALL factors (including scalars) so the summation
+            // covers the correct hypercube.
+            let term_nv = products
+                .iter()
+                .map(|i| slot_inner_num_vars(&mle_slots[*i]))
+                .max()
+                .unwrap();
+            // Scalar MLEs (inner num_vars == 0) are a constant factor at every
+            // position; removing them cannot change term_nv.
+            let mut factors: Vec<usize> = Vec::with_capacity(products.len());
+            for &f in products.iter() {
+                if slot_inner_num_vars(&mle_slots[f]) == 0 {
+                    coefficient *= read_slot(&mle_slots[f], 0);
+                } else {
+                    factors.push(f);
+                }
+            }
+            // Only a term with exactly one `eq` factor; `eq` spans every
+            // variable, so the term's domain stays `max_nv` without it.
+            let eq = {
+                let mut hits = factors
                     .iter()
-                    .map(|i| slot_inner_num_vars(&mle_slots[*i]))
-                    .max()
-                    .unwrap();
-
-                // Fold scalar MLEs (inner num_vars == 0) into the coefficient: they're
-                // a constant factor at every position, and removing them cannot change
-                // term_nv.
-                let mut non_scalar_products: Vec<usize> = Vec::with_capacity(products.len());
-                for &f in products.iter() {
-                    if slot_inner_num_vars(&mle_slots[f]) == 0 {
-                        coefficient *= read_slot(&mle_slots[f], 0);
-                    } else {
-                        non_scalar_products.push(f);
-                    }
+                    .filter_map(|f| eq_rounds.iter().find(|(index, _, _)| index == f));
+                match (hits.next(), hits.next()) {
+                    (Some(hit), None) => Some(hit),
+                    _ => None,
                 }
-
-                let term_size = non_scalar_products.len();
-
-                // All factors are scalar: the product is a constant.
-                if term_size == 0 {
-                    let scale = F::from(1u64 << (max_nv - term_nv.max(1)));
-                    // Half-hypercube sum of a constant round polynomial (step = 0).
-                    let summation_size = 1u64 << term_nv.saturating_sub(1);
-                    let val = coefficient * scale * F::from(summation_size);
-                    return vec![val; self.poly.aux_info.max_degree + 1];
+            };
+            let (weights, eq_at_points) = match eq {
+                Some((index, at_points, table)) => {
+                    let index = *index;
+                    factors.retain(|f| *f != index);
+                    (Some(table.as_slice()), Some(at_points.as_slice()))
                 }
+                None => (None, None),
+            };
 
-                let summation_size = 1 << (term_nv.saturating_sub(1));
-                let init = || (vec![(zero, zero); term_size], vec![zero; term_size + 1]);
-                let accumulate = |(mut buf, mut acc): (Vec<(F, F)>, Vec<F>), b: usize| {
-                    let mut any_eval_is_zero = false;
-                    let mut any_step_and_eval_simultaneously_zero = false;
-                    buf.iter_mut()
-                        .zip(non_scalar_products.iter())
-                        .for_each(|((eval, step), f)| {
-                            // `read_slot` at `2b` and `2b + 1`, inlined.
-                            let slot = &mle_slots[*f];
-                            let (v0, v1) = match slot {
-                                MleSlot::Materialized(mle) => (mle[b << 1], mle[(b << 1) + 1]),
-                                MleSlot::Streaming(arc) => {
-                                    let inner_nv = arc.storage().inner_num_vars();
-                                    let inner_mask = (1usize << inner_nv).wrapping_sub(1);
-                                    let base0 = (b << 1) << stream_m;
-                                    let base1 = ((b << 1) + 1) << stream_m;
-                                    let mut a0 = F::zero();
-                                    let mut a1 = F::zero();
-                                    for (i, eq_val) in stream_eq_table.iter().enumerate() {
-                                        let m0 = (i | base0) & inner_mask;
-                                        let m1 = (i | base1) & inner_mask;
-                                        a0 += *eq_val * arc.storage().lift(m0);
-                                        a1 += *eq_val * arc.storage().lift(m1);
-                                    }
-                                    (a0, a1)
-                                }
-                            };
-                            *eval = v0;
-                            let cur_eval_is_zero = eval.is_zero();
-                            any_eval_is_zero |= cur_eval_is_zero;
-                            *step = v1 - *eval;
-                            any_step_and_eval_simultaneously_zero |=
-                                cur_eval_is_zero & step.is_zero();
-                        });
-
-                    if !any_eval_is_zero {
-                        acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
+            if factors.is_empty() {
+                let evals: Vec<F> = match (weights, eq_at_points) {
+                    (Some(table), Some(at_points)) => {
+                        let sum = coefficient * table.iter().sum::<F>();
+                        at_points.iter().map(|e| *e * sum).collect()
                     }
-
-                    if !any_step_and_eval_simultaneously_zero {
-                        acc[1..].iter_mut().for_each(|acc| {
-                            buf.iter_mut().for_each(|(eval, step)| *eval += step);
-                            *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
-                        });
+                    _ => {
+                        let scale = F::from(1u64 << (max_nv - term_nv.max(1)));
+                        // Half-hypercube sum of a constant round polynomial.
+                        let rows = 1u64 << term_nv.saturating_sub(1);
+                        vec![coefficient * scale * F::from(rows); max_degree + 1]
                     }
-
-                    (buf, acc)
                 };
-                #[cfg(not(feature = "parallel"))]
-                let mut sum = (0..summation_size).fold(init(), accumulate).1;
-                #[cfg(feature = "parallel")]
-                let mut sum = (0..summation_size)
-                    .into_par_iter()
-                    .fold(init, accumulate)
-                    .map(|(_, partial)| partial)
-                    .reduce(
-                        || vec![F::zero(); term_size + 1],
-                        |mut sum, partial| {
-                            sum.iter_mut()
-                                .zip(partial)
-                                .for_each(|(sum, partial)| *sum += partial);
-                            sum
-                        },
-                    );
-                coefficient *= F::from(1 << (max_nv - term_nv.max(1)));
-                sum.iter_mut().for_each(|sum| *sum *= coefficient);
+                products_sum
+                    .iter_mut()
+                    .zip(evals)
+                    .for_each(|(acc, v)| *acc += v);
+                continue;
+            }
+            summed.push(Summed {
+                coefficient,
+                factors,
+                weights,
+                eq_at_points,
+                rows: 1 << term_nv.saturating_sub(1),
+                scale: F::from(1u64 << (max_nv - term_nv.max(1))),
+            });
+        }
 
-                let extrapolation = cfg_into_iter!(0..self.poly.aux_info.max_degree - term_size)
-                    .map(|i| {
-                        let (points, weights) = &self.extrapolation_aux[term_size - 1];
-                        let at = F::from((term_size + 1 + i) as u64);
-                        extrapolate(points, weights, &sum, &at)
-                    })
-                    .collect::<Vec<_>>();
-
-                [sum, extrapolation].concat()
+        // A row where some factor is zero at both points of its pair adds
+        // nothing to a term holding that factor. So a term with a mostly-zero
+        // factor walks only the rows that factor is nonzero on; the others
+        // run every term over one block of rows before the next, so that a
+        // factor's block is read from memory once for all its terms. Field
+        // addition is exact, so neither order changes a sum.
+        let half = 1usize << max_nv.saturating_sub(1);
+        let mut used = vec![false; mle_slots.len()];
+        summed
+            .iter()
+            .flat_map(|t| t.factors.iter())
+            .for_each(|f| used[*f] = true);
+        let supports: Vec<Option<Vec<u32>>> = cfg_into_iter!(0..mle_slots.len())
+            .map(|f| {
+                let (evals, mask) = match views[f] {
+                    Some(view) if used[f] => view,
+                    _ => return None,
+                };
+                let mut rows = Vec::new();
+                for b in 0..half {
+                    if !evals[(b << 1) & mask].is_zero() || !evals[((b << 1) + 1) & mask].is_zero()
+                    {
+                        rows.push(b as u32);
+                        if rows.len() * SPARSE_FRACTION > half {
+                            return None;
+                        }
+                    }
+                }
+                Some(rows)
             })
-            .collect::<Vec<_>>();
+            .collect();
+        let sparse: Vec<(usize, &[u32])> = summed
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| {
+                t.factors
+                    .iter()
+                    .filter_map(|f| supports[*f].as_deref())
+                    .min_by_key(|rows| rows.len())
+                    .map(|rows| (i, rows))
+            })
+            .collect();
+        let dense: Vec<usize> = (0..summed.len())
+            .filter(|i| !sparse.iter().any(|(j, _)| j == i))
+            .collect();
 
-        sums.iter().for_each(|v| {
-            v.iter()
-                .zip(products_sum.iter_mut())
-                .for_each(|(val, acc)| *acc += val)
-        });
+        let add_row = |term: &Summed<F>, acc: &mut [F], buf: &mut Vec<(F, F)>, b: usize| {
+            let mut any_eval_is_zero = false;
+            let mut any_step_and_eval_simultaneously_zero = false;
+            buf.clear();
+            for f in term.factors.iter() {
+                let (v0, v1) = match &mle_slots[*f] {
+                    MleSlot::Materialized(_) => {
+                        let (evals, mask) = views[*f].expect("a materialized slot");
+                        (evals[(b << 1) & mask], evals[((b << 1) + 1) & mask])
+                    }
+                    MleSlot::Streaming(arc) => {
+                        let inner_nv = arc.storage().inner_num_vars();
+                        let inner_mask = (1usize << inner_nv).wrapping_sub(1);
+                        let base0 = (b << 1) << stream_m;
+                        let base1 = ((b << 1) + 1) << stream_m;
+                        let mut a0 = F::zero();
+                        let mut a1 = F::zero();
+                        for (i, eq_val) in stream_eq_table.iter().enumerate() {
+                            let m0 = (i | base0) & inner_mask;
+                            let m1 = (i | base1) & inner_mask;
+                            a0 += *eq_val * arc.storage().lift(m0);
+                            a1 += *eq_val * arc.storage().lift(m1);
+                        }
+                        (a0, a1)
+                    }
+                };
+                let step = v1 - v0;
+                let eval_is_zero = v0.is_zero();
+                any_eval_is_zero |= eval_is_zero;
+                any_step_and_eval_simultaneously_zero |= eval_is_zero & step.is_zero();
+                buf.push((v0, step));
+            }
+            if let Some(table) = term.weights {
+                buf[0].0 *= table[b];
+                buf[0].1 *= table[b];
+            }
+            if !any_eval_is_zero {
+                acc[0] += buf.iter().map(|(eval, _)| eval).product::<F>();
+            }
+            if !any_step_and_eval_simultaneously_zero {
+                acc[1..].iter_mut().for_each(|acc| {
+                    buf.iter_mut().for_each(|(eval, step)| *eval += step);
+                    *acc += buf.iter().map(|(eval, _)| eval).product::<F>();
+                });
+            }
+        };
+
+        const BLOCK: usize = 1 << 8;
+        let zero = F::zero();
+        let mut sums: Vec<Vec<F>> = summed
+            .iter()
+            .map(|t| vec![zero; t.factors.len() + 1])
+            .collect();
+
+        let dense_rows = dense.iter().map(|i| summed[*i].rows).max().unwrap_or(0);
+        let new_dense = || -> Vec<Vec<F>> {
+            dense
+                .iter()
+                .map(|i| vec![zero; summed[*i].factors.len() + 1])
+                .collect()
+        };
+        let add_block = |mut partial: Vec<Vec<F>>, block: usize| -> Vec<Vec<F>> {
+            let mut buf = Vec::new();
+            for (i, acc) in dense.iter().zip(partial.iter_mut()) {
+                let term = &summed[*i];
+                for b in block * BLOCK..((block + 1) * BLOCK).min(term.rows) {
+                    add_row(term, acc, &mut buf, b);
+                }
+            }
+            partial
+        };
+        let blocks = dense_rows.div_ceil(BLOCK);
+        #[cfg(not(feature = "parallel"))]
+        let dense_sums = (0..blocks).fold(new_dense(), add_block);
+        #[cfg(feature = "parallel")]
+        let dense_sums = (0..blocks)
+            .into_par_iter()
+            .fold(new_dense, add_block)
+            .reduce(new_dense, |mut sums, partial| {
+                sums.iter_mut().zip(partial).for_each(|(sum, partial)| {
+                    sum.iter_mut().zip(partial).for_each(|(s, p)| *s += p)
+                });
+                sums
+            });
+        for (i, sum) in dense.iter().zip(dense_sums) {
+            sums[*i] = sum;
+        }
+
+        let sparse_sums: Vec<Vec<F>> = cfg_iter!(sparse)
+            .map(|(i, rows)| {
+                let term = &summed[*i];
+                let mut acc = vec![zero; term.factors.len() + 1];
+                let mut buf = Vec::new();
+                for &b in rows.iter().take_while(|b| (**b as usize) < term.rows) {
+                    add_row(term, &mut acc, &mut buf, b as usize);
+                }
+                acc
+            })
+            .collect();
+        for ((i, _), sum) in sparse.iter().zip(sparse_sums) {
+            sums[*i] = sum;
+        }
+
+        for (term, mut sum) in summed.iter().zip(sums) {
+            let term_size = term.factors.len();
+            let coefficient = term.coefficient * term.scale;
+            sum.iter_mut().for_each(|sum| *sum *= coefficient);
+            let extrapolation: Vec<F> = (0..max_degree - term_size)
+                .map(|i| {
+                    let (points, weights) = &self.extrapolation_aux[term_size - 1];
+                    let at = F::from((term_size + 1 + i) as u64);
+                    extrapolate(points, weights, &sum, &at)
+                })
+                .collect();
+            let evals = sum.iter().chain(extrapolation.iter());
+            match term.eq_at_points {
+                Some(at_points) => products_sum
+                    .iter_mut()
+                    .zip(evals.zip(at_points))
+                    .for_each(|(acc, (v, e))| *acc += *v * e),
+                None => products_sum
+                    .iter_mut()
+                    .zip(evals)
+                    .for_each(|(acc, v)| *acc += v),
+            }
+        }
 
         // `self.poly.flattened_ml_extensions` stays empty: nothing reads it after
         // the sumcheck loop, and re-wrapping would allocate an Arc per round.

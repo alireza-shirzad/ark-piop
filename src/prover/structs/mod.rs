@@ -80,6 +80,9 @@ where
     /// them and in this order.
     pub(crate) keyed_sum_claims: Vec<KeyedSumRelation<B::F>>,
     pub num_vars: BTreeMap<TrackerID, usize>,
+    /// The point `r` of each tracked `eq(x, r)`, which the sumcheck prover
+    /// factors out of the terms it multiplies.
+    pub(crate) eq_points: BTreeMap<TrackerID, Vec<B::F>>,
     pub bench_lookup_claims_pre_reduction: usize,
     /// Bench stat from `reduce_lookup_claims`: subset count per superset
     /// (len = distinct supersets, sum = lookup claims before reduction).

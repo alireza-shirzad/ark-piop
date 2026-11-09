@@ -150,6 +150,8 @@ impl<B: SnarkBackend> TrackerCore for ProverTracker<B> {
     }
 
     fn track_eq_x_r(&mut self, r: &[Self::F], _max_nv: usize) -> SnarkResult<TrackerID> {
-        Ok(self.track_mat_arc_mv_poly(build_eq_x_r(r)?))
+        let id = self.track_mat_arc_mv_poly(build_eq_x_r(r)?);
+        self.state.eq_points.insert(id, r.to_vec());
+        Ok(id)
     }
 }

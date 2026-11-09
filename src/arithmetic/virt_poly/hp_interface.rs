@@ -19,6 +19,9 @@ pub(crate) struct HPVirtualPolynomial<F: PrimeField> {
     pub aux_info: VPAuxInfo<F>,
     pub products: Vec<(F, Vec<usize>)>,
     pub flattened_ml_extensions: Vec<Arc<MLE<F>>>,
+    /// Factors known to be `eq(x, r)` over all the variables, by index into
+    /// `flattened_ml_extensions`, with their `r`.
+    pub eq_factors: Vec<(usize, Vec<F>)>,
     /// Maps each MLE pointer to its index in `flattened_ml_extensions`
     raw_pointers_lookup_table: HashMap<*const MLE<F>, usize>,
 }
@@ -61,6 +64,7 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
             },
             products: Vec::new(),
             flattened_ml_extensions: Vec::new(),
+            eq_factors: Vec::new(),
             raw_pointers_lookup_table: HashMap::new(),
         }
     }
@@ -78,7 +82,20 @@ impl<F: PrimeField> HPVirtualPolynomial<F> {
             },
             products: vec![(coefficient, vec![0])],
             flattened_ml_extensions: vec![mle.clone()],
+            eq_factors: Vec::new(),
             raw_pointers_lookup_table: hm,
+        }
+    }
+
+    /// Record that `mle`, a factor of some product, is `eq(x, r)`. Ignored
+    /// unless `mle` is a factor stored over all the variables.
+    pub(crate) fn mark_eq(&mut self, mle: &Arc<MLE<F>>, r: Vec<F>) {
+        let n = self.aux_info.num_variables;
+        if r.len() != n || mle.storage().inner_num_vars() != n {
+            return;
+        }
+        if let Some(&index) = self.raw_pointers_lookup_table.get(&Arc::as_ptr(mle)) {
+            self.eq_factors.push((index, r));
         }
     }
 

@@ -223,3 +223,94 @@ mod streaming_parity {
         assert_eq!(eager, full_stream);
     }
 }
+
+// Factoring `eq(x, r)` out of the terms that hold it must not change any
+// round message.
+#[cfg(test)]
+mod eq_factoring {
+    use crate::arithmetic::mat_poly::{mle::MLE, utils::build_eq_x_r};
+    use crate::arithmetic::virt_poly::hp_interface::HPVirtualPolynomial;
+    use crate::piop::structs::SumcheckProverState;
+    use ark_bn254::Fr;
+    use ark_ff::UniformRand;
+    use ark_std::rand::{Rng, SeedableRng, rngs::StdRng};
+    use std::sync::Arc;
+
+    fn messages(poly: &HPVirtualPolynomial<Fr>, challenges: &[Fr]) -> Vec<Vec<Fr>> {
+        let mut state = SumcheckProverState::prover_init_with_stream_k(poly, 0).unwrap();
+        let mut chal = None;
+        (0..poly.aux_info.num_variables)
+            .map(|round| {
+                let msg = state.prove_round_and_update_state(&chal).unwrap();
+                chal = Some(challenges[round]);
+                msg.evaluations
+            })
+            .collect()
+    }
+
+    /// Terms with `eq` alone, with full-size, smaller, bit, scalar and
+    /// mostly-zero factors, with `eq` twice, and without `eq`.
+    #[test]
+    fn eq_factored_terms_give_the_same_messages() {
+        let mut rng = StdRng::seed_from_u64(0xe9);
+        for nv in [1, 2, 5, 9] {
+            let r: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
+            let eq = Arc::new(build_eq_x_r(&r).unwrap());
+            let dense = |rng: &mut StdRng, inner: usize| {
+                let evals = (0..1 << inner).map(|_| Fr::rand(rng)).collect();
+                let mle = ark_poly::DenseMultilinearExtension::from_evaluations_vec(inner, evals);
+                Arc::new(MLE::new(mle, (inner < nv).then_some(nv)))
+            };
+            let a = dense(&mut rng, nv);
+            let b = dense(&mut rng, nv);
+            let small = dense(&mut rng, nv.saturating_sub(1));
+            let scalar = dense(&mut rng, 0);
+            let bits: Vec<bool> = (0..1 << nv).map(|_| rng.r#gen()).collect();
+            let bit = Arc::new(MLE::<Fr>::from_bits(bits, nv));
+            // Nonzero on about one row in sixteen, so terms holding it walk
+            // its nonzero rows.
+            let sparse = |rng: &mut StdRng, inner: usize| {
+                let evals = (0..1 << inner)
+                    .map(|_| {
+                        if rng.gen_ratio(1, 16) {
+                            Fr::rand(rng)
+                        } else {
+                            Fr::from(0u64)
+                        }
+                    })
+                    .collect();
+                let mle = ark_poly::DenseMultilinearExtension::from_evaluations_vec(inner, evals);
+                Arc::new(MLE::new(mle, (inner < nv).then_some(nv)))
+            };
+            let rare = sparse(&mut rng, nv);
+            let rare_small = sparse(&mut rng, nv.saturating_sub(1).max(1));
+            let terms: Vec<Vec<Arc<MLE<Fr>>>> = vec![
+                vec![eq.clone()],
+                vec![a.clone(), eq.clone()],
+                vec![eq.clone(), a.clone(), b.clone(), bit.clone()],
+                vec![small.clone(), eq.clone(), a.clone()],
+                vec![eq.clone(), scalar.clone()],
+                vec![eq.clone(), eq.clone(), a.clone()],
+                vec![a.clone(), b.clone()],
+                vec![bit.clone(), small.clone(), scalar],
+                vec![rare.clone(), a.clone(), eq.clone()],
+                vec![rare.clone(), rare_small.clone(), b.clone()],
+                vec![rare_small, small, bit],
+                vec![rare],
+            ];
+            let mut plain = HPVirtualPolynomial::<Fr>::new(nv);
+            for term in terms {
+                plain.add_mle_list(term, Fr::rand(&mut rng)).unwrap();
+            }
+            let mut marked = plain.clone();
+            marked.mark_eq(&eq, r.clone());
+            assert_eq!(marked.eq_factors.len(), 1);
+
+            let challenges: Vec<Fr> = (0..nv).map(|_| Fr::rand(&mut rng)).collect();
+            assert_eq!(
+                messages(&plain, &challenges),
+                messages(&marked, &challenges)
+            );
+        }
+    }
+}

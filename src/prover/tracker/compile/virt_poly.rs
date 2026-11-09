@@ -56,6 +56,12 @@ where
             arith_virt_poly.add_mle_list(mles, coef).unwrap();
         }
 
+        for (eq_id, r) in &self.state.eq_points {
+            if let Some(mle) = self.mat_mv_poly(*eq_id) {
+                arith_virt_poly.mark_eq(mle, r.clone());
+            }
+        }
+
         arith_virt_poly
     }
 
