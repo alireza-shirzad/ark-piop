@@ -1265,12 +1265,7 @@ impl<F: Field> MLEStorage<F> {
                 shift,
                 ..
             } => {
-                let src = source.storage();
-                let src_len = src.inner_len();
-                let mut v: Vec<F> = cfg_into_iter!(0..self.inner_len())
-                    .map(|i| src.lift(i % src_len) - *shift)
-                    .collect();
-                ark_ff::fields::batch_inversion(&mut v);
+                let mut v = inverses_shifted(source.storage(), *shift, self.inner_len());
                 if let Some(numerator) = numerator {
                     let numerator = numerator.storage();
                     let len = numerator.inner_len();
@@ -1297,16 +1292,18 @@ impl<F: Field> MLEStorage<F> {
             }
             Self::LazyInverseShiftedSum { s1, s2, shift, .. } => {
                 let (s1, s2) = (s1.storage(), s2.storage());
-                let (l1, l2) = (s1.inner_len(), s2.inner_len());
                 let n = self.inner_len();
-                let mut a: Vec<F> = cfg_into_iter!(0..n)
-                    .map(|i| s1.lift(i % l1) - *shift)
-                    .collect();
-                let mut b: Vec<F> = cfg_into_iter!(0..n)
-                    .map(|i| s2.lift(i % l2) - *shift)
-                    .collect();
-                ark_ff::fields::batch_inversion(&mut a);
-                ark_ff::fields::batch_inversion(&mut b);
+                // Two small-integer sources share one table.
+                if let Some((table, values)) = inverse_table(&[s1, s2], *shift, n) {
+                    // Inner lengths are powers of two.
+                    let (m1, m2) = (s1.inner_len() - 1, s2.inner_len() - 1);
+                    let (v1, v2) = (&values[0], &values[1]);
+                    return cfg_into_iter!(0..n)
+                        .map(|i| table[v1[i & m1] as usize] + table[v2[i & m2] as usize])
+                        .collect();
+                }
+                let mut a = inverses_shifted(s1, *shift, n);
+                let b = inverses_shifted(s2, *shift, n);
                 cfg_iter_mut!(a).zip(b).for_each(|(x, y)| *x += y);
                 a
             }
@@ -1351,6 +1348,63 @@ impl<F: Field> MLEStorage<F> {
                 .collect(),
         }
     }
+}
+
+/// `1/(source(i) - shift)` for `i < len`, the source read modulo its own
+/// length and `1/0` read as zero: one inversion for a constant, a table for
+/// small integers, a batch inversion otherwise.
+fn inverses_shifted<F: Field>(source: &MLEStorage<F>, shift: F, len: usize) -> Vec<F> {
+    let source_len = source.inner_len();
+    if source_len == 1 {
+        return vec![(source.lift(0) - shift).inverse().unwrap_or(F::zero()); len];
+    }
+    if let Some((table, values)) = inverse_table(&[source], shift, len) {
+        // Inner lengths are powers of two.
+        let mask = source_len - 1;
+        return cfg_into_iter!(0..len)
+            .map(|i| table[values[0][i & mask] as usize])
+            .collect();
+    }
+    let mut v: Vec<F> = cfg_into_iter!(0..len)
+        .map(|i| source.lift(i % source_len) - shift)
+        .collect();
+    ark_ff::fields::batch_inversion(&mut v);
+    v
+}
+
+/// `1/(v - shift)` for every `v` up to the largest value of `sources`, and
+/// those values, when every source is a small-integer backing whose
+/// largest value is below `2·len`: then the table costs fewer inversions
+/// than the `len` entries that read it. `None` otherwise. Zero inverts to
+/// zero, as in `batch_inversion`.
+#[allow(clippy::type_complexity)]
+fn inverse_table<'a, F: Field>(
+    sources: &[&'a MLEStorage<F>],
+    shift: F,
+    len: usize,
+) -> Option<(Vec<F>, Vec<Cow<'a, [u32]>>)> {
+    let values = sources
+        .iter()
+        .map(|source| match source {
+            MLEStorage::Bit { bits, .. } => Some(Cow::Owned(
+                (0..source.inner_len())
+                    .map(|i| ((bits[i >> 3] >> (i & 7)) & 1) as u32)
+                    .collect(),
+            )),
+            MLEStorage::U8 { bytes, .. } => {
+                Some(Cow::Owned(bytes.iter().map(|b| *b as u32).collect()))
+            }
+            MLEStorage::U32 { words, .. } => Some(Cow::Borrowed(words.as_slice())),
+            _ => None,
+        })
+        .collect::<Option<Vec<Cow<'a, [u32]>>>>()?;
+    let max = values.iter().flat_map(|v| v.iter()).copied().max()? as usize;
+    if max >= 2 * len {
+        return None;
+    }
+    let mut table: Vec<F> = (0..=max as u64).map(|v| F::from(v) - shift).collect();
+    ark_ff::fields::batch_inversion(&mut table);
+    Some((table, values))
 }
 
 /// The `len` values of a sparse table: `default` but at its exceptions.
@@ -3795,6 +3849,51 @@ mod tests {
         assert!(!sparse(vec![(1, fr(4))]).is_constant());
         assert!(sparse((0..4).map(|row| (row, fr(4))).collect()).is_constant());
         assert!(!sparse((0..4).map(|row| (row, fr(4 + row as u64))).collect()).is_constant());
+    }
+
+    /// Small-integer sources read through a table of inverses and constant
+    /// ones through one inversion; both must give the values inverting
+    /// entry by entry gives, `1/0` read as zero, and sources too large for a
+    /// table take the entry-by-entry path.
+    #[test]
+    fn lazy_helpers_of_small_integer_sources_read_as_entry_by_entry() {
+        let inverse = |v: Fr| v.inverse().unwrap_or(fr(0));
+        let shift = fr(5);
+        let sources = [
+            MLE::from_bits((0..16).map(|i| i % 3 == 0), 4),
+            MLE::from_u8s((0..16).map(|i| (i * 3) as u8).collect(), 4),
+            MLE::from_u32s((0..16).map(|i| i * 7 % 11).collect(), 4),
+            MLE::from_u32s((0..16).map(|i| 1000 + i).collect(), 4),
+            MLE::new(
+                DenseMultilinearExtension::from_evaluations_vec(0, vec![fr(9)]),
+                Some(4),
+            ),
+            MLE::new(
+                DenseMultilinearExtension::from_evaluations_vec(0, vec![fr(5)]),
+                Some(4),
+            ),
+        ];
+        for first in &sources {
+            for second in &sources {
+                let (a, b) = (first.evaluations(), second.evaluations());
+                let rows = a.len().max(b.len());
+                let expected: Vec<Fr> = (0..rows)
+                    .map(|r| inverse(a[r % a.len()] - shift) + inverse(b[r % b.len()] - shift))
+                    .collect();
+                let lazy = MLE::from_lazy_inverse_shifted_sum(
+                    Arc::new(first.clone()),
+                    Arc::new(second.clone()),
+                    shift,
+                );
+                assert_eq!(lazy.evaluations(), expected);
+                let lifted: Vec<Fr> = (0..rows).map(|r| lazy.storage().lift(r)).collect();
+                assert_eq!(lifted, expected);
+            }
+            let values = first.evaluations();
+            let lazy = MLE::from_lazy_inverse_shifted(Arc::new(first.clone()), shift);
+            let expected: Vec<Fr> = values.iter().map(|v| inverse(*v - shift)).collect();
+            assert_eq!(lazy.evaluations(), expected);
+        }
     }
 
     /// The table of a shared helper is as large as the larger of its
