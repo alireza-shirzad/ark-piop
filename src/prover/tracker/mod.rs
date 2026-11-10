@@ -469,12 +469,15 @@ where
         &mut self,
         range_tr_polys: BTreeMap<String, TrackedPoly<B>>,
     ) {
-        self.state.indexed_tracked_polys = range_tr_polys;
+        self.state.indexed_tracked_polys = range_tr_polys
+            .iter()
+            .map(|(label, poly)| (label.clone(), poly.detach()))
+            .collect();
     }
 
     pub fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedPoly<B>> {
         match self.state.indexed_tracked_polys.get(&label) {
-            Some(poly) => Ok(poly.clone()),
+            Some(handle) => Ok(TrackedPoly::attach(handle, self.self_handle()?)),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
         }
     }
@@ -484,7 +487,23 @@ where
         label: String,
         poly: TrackedPoly<B>,
     ) -> Option<TrackedPoly<B>> {
-        self.state.indexed_tracked_polys.insert(label, poly)
+        let previous = self
+            .state
+            .indexed_tracked_polys
+            .insert(label, poly.detach())?;
+        Some(TrackedPoly::attach(&previous, poly.tracker()))
+    }
+
+    /// A strong handle to this tracker, for the polynomials it hands out.
+    pub(super) fn self_handle(&self) -> SnarkResult<Rc<RefCell<ProverTracker<B>>>> {
+        self.self_rc
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                SnarkError::SetupError(NoRangePoly(
+                    "the tracker has no live handle to itself".to_string(),
+                ))
+            })
     }
 
     pub fn gen_id(&mut self) -> TrackerID {

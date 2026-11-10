@@ -16,6 +16,17 @@ use crate::{
     },
 };
 
+/// A tracked polynomial or oracle without its tracker handle, for a tracker
+/// to keep in its own state. A handle that points back at the tracker would
+/// be a reference cycle: the tracker, and every polynomial it holds, would
+/// never be freed.
+#[derive(Clone, Debug)]
+pub struct DetachedHandle<F> {
+    pub id_or_const: either::Either<TrackerID, F>,
+    pub constant_id: Option<TrackerID>,
+    pub log_size: usize,
+}
+
 pub trait TrackerCore {
     type F: ark_ff::PrimeField;
 

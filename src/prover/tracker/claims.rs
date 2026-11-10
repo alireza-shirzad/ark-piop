@@ -256,8 +256,8 @@ where
         s: usize,
     ) -> SnarkResult<TrackedPoly<B>> {
         let label = format!("contig_one_nv{}_skip{}_n{}", nv, s, n);
-        if let Some(poly) = self.state.indexed_tracked_polys.get(&label) {
-            return Ok(poly.clone());
+        if let Some(handle) = self.state.indexed_tracked_polys.get(&label) {
+            return Ok(TrackedPoly::attach(handle, self.self_handle()?));
         }
 
         let total = 1usize << nv;
@@ -286,26 +286,10 @@ where
             self.track_mat_mv_poly(mle)
         };
 
-        let tracker_rc = if let Some(poly) = self.state.indexed_tracked_polys.values().next() {
-            poly.tracker()
-        } else if let Some(self_rc) = &self.self_rc {
-            let tracker_rc: Rc<RefCell<ProverTracker<B>>> =
-                Weak::upgrade(self_rc).ok_or_else(|| {
-                    SnarkError::SetupError(NoRangePoly(
-                        "contig_one_poly requires a tracker handle; self_rc is dead".to_string(),
-                    ))
-                })?;
-            tracker_rc
-        } else {
-            return Err(SnarkError::SetupError(NoRangePoly(
-                "contig_one_poly requires a tracker handle; none available".to_string(),
-            )));
-        };
-
-        let tracked = TrackedPoly::new(Either::Left(poly_id), nv, tracker_rc);
+        let tracked = TrackedPoly::new(Either::Left(poly_id), nv, self.self_handle()?);
         self.state
             .indexed_tracked_polys
-            .insert(label, tracked.clone());
+            .insert(label, tracked.detach());
         Ok(tracked)
     }
 }
