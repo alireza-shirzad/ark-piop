@@ -2,6 +2,7 @@ use crate::{
     SnarkBackend,
     piop::{keyed_sumcheck::reduction::KeyedSumRelation, logup_gkr::LogupGkrProof},
     prover::structs::proof::PCSSubproof,
+    tracker_core::DetachedHandle,
     types::{PCSOpeningProof, claim::TrackerLookupClaim},
 };
 use ark_ff::PrimeField;
@@ -12,7 +13,7 @@ use std::{collections::BTreeMap, collections::BTreeSet, sync::Arc};
 
 use super::{
     VerifierEvalClaimMap,
-    oracle::{Oracle, OracleKind, TrackedOracle, VirtualOracle},
+    oracle::{Oracle, OracleKind, VirtualOracle},
 };
 use crate::{
     pcs::PCS,
@@ -41,7 +42,7 @@ where
     pub poly_is_material: IndexMap<TrackerID, bool>,
     pub poly_degrees: IndexMap<TrackerID, usize>,
     /// Mutable indexed tracked oracles for protocol-time updates.
-    pub indexed_tracked_polys: BTreeMap<String, TrackedOracle<B>>,
+    pub indexed_tracked_polys: BTreeMap<String, DetachedHandle<B::F>>,
     pub mv_pcs_substate: VerifierPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: VerifierPCSubstate<B::F, B::UvPCS>,
     /// How many of the proof's LogUp-GKR subproofs have been verified. They

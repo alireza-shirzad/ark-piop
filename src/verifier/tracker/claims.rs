@@ -148,7 +148,10 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         &mut self,
         range_tr_comms: BTreeMap<String, TrackedOracle<B>>,
     ) {
-        self.state.indexed_tracked_polys = range_tr_comms;
+        self.state.indexed_tracked_polys = range_tr_comms
+            .iter()
+            .map(|(label, oracle)| (label.clone(), oracle.detach()))
+            .collect();
     }
 
     pub fn add_indexed_tracked_poly(
@@ -156,14 +159,30 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         label: String,
         oracle: TrackedOracle<B>,
     ) -> Option<TrackedOracle<B>> {
-        self.state.indexed_tracked_polys.insert(label, oracle)
+        let previous = self
+            .state
+            .indexed_tracked_polys
+            .insert(label, oracle.detach())?;
+        Some(TrackedOracle::attach(&previous, oracle.tracker()))
     }
 
     pub(crate) fn indexed_tracked_poly(&self, label: String) -> SnarkResult<TrackedOracle<B>> {
         match self.state.indexed_tracked_polys.get(&label) {
-            Some(poly) => Ok(poly.clone()),
+            Some(handle) => Ok(TrackedOracle::attach(handle, self.self_handle()?)),
             _ => Err(SnarkError::SetupError(NoRangePoly(format!("{:?}", label)))),
         }
+    }
+
+    /// A strong handle to this tracker, for the oracles it hands out.
+    fn self_handle(&self) -> SnarkResult<Rc<RefCell<VerifierTracker<B>>>> {
+        self.self_rc
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| {
+                SnarkError::SetupError(NoRangePoly(
+                    "the tracker has no live handle to itself".to_string(),
+                ))
+            })
     }
 
     pub fn get_or_build_contig_one_poly(
@@ -187,8 +206,8 @@ impl<B: SnarkBackend> VerifierTracker<B> {
         B::F: PrimeField,
     {
         let label = format!("contig_one_nv{}_skip{}_n{}", nv, s, n);
-        if let Some(oracle) = self.state.indexed_tracked_polys.get(&label) {
-            return Ok(oracle.clone());
+        if let Some(handle) = self.state.indexed_tracked_polys.get(&label) {
+            return Ok(TrackedOracle::attach(handle, self.self_handle()?));
         }
 
         let total = 1usize << nv;
@@ -237,27 +256,12 @@ impl<B: SnarkBackend> VerifierTracker<B> {
             })
         };
 
-        let tracker_rc = if let Some(oracle) = self.state.indexed_tracked_polys.values().next() {
-            oracle.tracker()
-        } else if let Some(self_rc) = &self.self_rc {
-            let tracker_rc: Rc<RefCell<VerifierTracker<B>>> =
-                Weak::upgrade(self_rc).ok_or_else(|| {
-                    SnarkError::SetupError(NoRangePoly(
-                        "contig_one_oracle requires a tracker handle; self_rc is dead".to_string(),
-                    ))
-                })?;
-            tracker_rc
-        } else {
-            return Err(SnarkError::SetupError(NoRangePoly(
-                "contig_one_oracle requires a tracker handle; none available".to_string(),
-            )));
-        };
-
+        let tracker_rc = self.self_handle()?;
         let oracle_id = self.track_base_oracle(oracle);
         let tracked = TrackedOracle::new(Either::Left(oracle_id), tracker_rc, nv);
         self.state
             .indexed_tracked_polys
-            .insert(label, tracked.clone());
+            .insert(label, tracked.detach());
         Ok(tracked)
     }
 

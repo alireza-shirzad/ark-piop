@@ -3,6 +3,7 @@ use crate::{
     arithmetic::virt_poly::VirtualPoly,
     errors::SnarkResult,
     pcs::PCS,
+    tracker_core::DetachedHandle,
     types::TrackerID,
     verifier::{ArgVerifier, tracker::VerifierTracker},
 };
@@ -143,6 +144,26 @@ where
 
     pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
         self.tracker.clone()
+    }
+
+    pub(crate) fn detach(&self) -> DetachedHandle<B::F> {
+        DetachedHandle {
+            id_or_const: self.id_or_const,
+            constant_id: self.cached_constant_id.get(),
+            log_size: self.log_size,
+        }
+    }
+
+    pub(crate) fn attach(
+        handle: &DetachedHandle<B::F>,
+        tracker: Rc<RefCell<VerifierTracker<B>>>,
+    ) -> Self {
+        Self {
+            id_or_const: handle.id_or_const,
+            cached_constant_id: Cell::new(handle.constant_id),
+            tracker,
+            log_size: handle.log_size,
+        }
     }
 }
 

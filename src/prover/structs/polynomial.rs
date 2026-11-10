@@ -9,6 +9,7 @@ use crate::{
     arithmetic::mat_poly::mle::MLE,
     piop::DeepClone,
     prover::{ArgProver, tracker::ProverTracker},
+    tracker_core::DetachedHandle,
     types::TrackerID,
 };
 use ark_ff::PrimeField;
@@ -141,6 +142,26 @@ where
 
     pub fn tracker(&self) -> Rc<RefCell<ProverTracker<B>>> {
         self.tracker.clone()
+    }
+
+    pub(crate) fn detach(&self) -> DetachedHandle<B::F> {
+        DetachedHandle {
+            id_or_const: self.id_or_const,
+            constant_id: self.cached_constant_id.get(),
+            log_size: self.log_size,
+        }
+    }
+
+    pub(crate) fn attach(
+        handle: &DetachedHandle<B::F>,
+        tracker: Rc<RefCell<ProverTracker<B>>>,
+    ) -> Self {
+        Self {
+            id_or_const: handle.id_or_const,
+            cached_constant_id: Cell::new(handle.constant_id),
+            log_size: handle.log_size,
+            tracker,
+        }
     }
 
     /// Log size (number of variables for multivariate polynomials).

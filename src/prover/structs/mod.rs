@@ -9,8 +9,8 @@ use crate::{
     arithmetic::virt_poly::VirtualPoly,
     pcs::PCS,
     piop::{keyed_sumcheck::reduction::KeyedSumRelation, logup_gkr::LogupGkrProof},
-    prover::structs::polynomial::TrackedPoly,
     setup::structs::SNARKPk,
+    tracker_core::DetachedHandle,
     transcript::Tr,
     types::{
         TrackerID,
@@ -64,7 +64,7 @@ where
     pub virtual_polys: BTreeMap<TrackerID, VirtualPoly<B::F>>,
 
     /// Mutable indexed tracked polynomials for protocol-time updates.
-    pub indexed_tracked_polys: BTreeMap<String, TrackedPoly<B>>,
+    pub indexed_tracked_polys: BTreeMap<String, DetachedHandle<B::F>>,
 
     pub mv_pcs_substate: ProverPCSubstate<B::F, B::MvPCS>,
     pub uv_pcs_substate: ProverPCSubstate<B::F, B::UvPCS>,
