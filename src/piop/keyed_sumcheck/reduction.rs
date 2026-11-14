@@ -34,11 +34,14 @@
 //! commitment the caller has bound to the statement, and uncommitted leaves
 //! must be computable by the verifier.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use super::logup;
 
-use ark_ff::{Field, Zero};
+use ark_ff::{Field, Zero, batch_inversion};
 use ark_std::{cfg_into_iter, cfg_iter};
 use either::Either;
 use indexmap::IndexMap;
@@ -69,13 +72,38 @@ pub(crate) enum KeyedTerm<F> {
 }
 
 /// One keyed-sum relation; `mfxs[i]` and `mgxs[i]` are the multiplicities of
-/// `fxs[i]` and `gxs[i]`, `None` standing for all ones.
+/// `fxs[i]` and `gxs[i]`, `None` standing for all ones. `public[side]` adds
+/// `1/(key - gamma)` for every key of its lists to that side.
 #[derive(Clone, Debug)]
 pub(crate) struct KeyedSumRelation<F> {
     pub fxs: Vec<KeyedTerm<F>>,
     pub mfxs: Vec<Option<KeyedTerm<F>>>,
     pub gxs: Vec<KeyedTerm<F>>,
     pub mgxs: Vec<Option<KeyedTerm<F>>>,
+    pub public: [Vec<Arc<[F]>>; 2],
+}
+
+impl<F: Field> KeyedSumRelation<F> {
+    pub(super) fn is_empty(&self) -> bool {
+        self.fxs.is_empty() && self.gxs.is_empty() && self.public.iter().all(Vec::is_empty)
+    }
+
+    /// `sum 1/(key - gamma)` over the public keys of each side, or `None`
+    /// when `gamma` is one of them.
+    pub(super) fn public_sums(&self, gamma: F) -> Option<[F; 2]> {
+        let mut sums = [F::zero(); 2];
+        for (keys, sum) in self.public.iter().zip(&mut sums) {
+            for keys in keys {
+                let mut inverses: Vec<F> = cfg_iter!(keys).map(|key| *key - gamma).collect();
+                if inverses.iter().any(Zero::is_zero) {
+                    return None;
+                }
+                batch_inversion(&mut inverses);
+                *sum += cfg_iter!(inverses).copied().sum::<F>();
+            }
+        }
+        Some(sums)
+    }
 }
 
 /// Evaluations the caller already holds, by tracker id, so that the prover
@@ -188,10 +216,12 @@ pub(super) trait Party<T: TrackerCore> {
     fn reject(&self, reason: String) -> SnarkError;
 }
 
-/// A reduction's instances with the root fraction `(P, Q)` of each.
+/// A reduction's instances with the root fraction `(P, Q)` of each, and the
+/// `gamma` of every relation.
 pub(super) struct Reduction<F> {
     pub plan: Vec<InstancePlan<F>>,
     pub roots: Vec<[F; 2]>,
+    pub gammas: Vec<F>,
 }
 
 /// What a GKR run holds per input fraction of an instance, in the unit of
@@ -373,7 +403,7 @@ fn draw_gammas<T: TrackerCore>(
     relations
         .iter()
         .map(|relation| {
-            if relation.fxs.is_empty() && relation.gxs.is_empty() {
+            if relation.is_empty() {
                 Ok(T::F::zero())
             } else {
                 tracker.get_and_append_challenge(b"gamma")
@@ -568,6 +598,7 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
     Ok(Reduction {
         plan: batch.plan,
         roots,
+        gammas: batch.gammas,
     })
 }
 
@@ -592,8 +623,22 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
 /// Under one `gamma` for all relations the difference would be
 /// `(sum_r D_r)(gamma)`, which is zero whenever the errors of false
 /// relations cancel.
-pub(super) fn check_batch_sums<F: Field>(reduction: &Reduction<F>) -> Result<(), String> {
+///
+/// The public keys of `relations` are summed here, in the clear, under the
+/// `gamma` of their relation; they are terms of `D_r` like any other.
+pub(super) fn check_batch_sums<F: Field>(
+    reduction: &Reduction<F>,
+    relations: &[KeyedSumRelation<F>],
+) -> Result<(), String> {
     let mut sums = [(F::zero(), F::one()); 2];
+    for (relation, gamma) in relations.iter().zip(&reduction.gammas) {
+        let public = relation
+            .public_sums(*gamma)
+            .ok_or_else(|| "gamma is a public key of a keyed sum".to_string())?;
+        for ((num, den), public) in sums.iter_mut().zip(public) {
+            *num += public * *den;
+        }
+    }
     for (instance, [p, q]) in reduction.plan.iter().zip(&reduction.roots) {
         // A zero denominator would make both products below vanish.
         if q.is_zero() {
@@ -784,12 +829,15 @@ pub(crate) fn verify_keyed_sums<B: SnarkBackend>(
             .check_lookup_protocol()
             .and_then(|()| match tracker.config().lookup_protocol {
                 LookupProtocol::LogUpGkr => {
-                    reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations)
-                        .and_then(|reduction| check_batch_sums(&reduction).map_err(check_failed))
+                    reduce_keyed_sums(&mut *tracker, &mut VerifyingParty, relations).and_then(
+                        |reduction| check_batch_sums(&reduction, relations).map_err(check_failed),
+                    )
                 }
                 LookupProtocol::LogUp => {
                     logup::reduce_keyed_sums(&mut *tracker, &mut logup::VerifyingParty, relations)
-                        .and_then(|sums| logup::check_relation_sums(&sums).map_err(check_failed))
+                        .and_then(|sums| {
+                            logup::check_relation_sums(relations, &sums).map_err(check_failed)
+                        })
                 }
             });
     if checked.is_err() {

@@ -296,16 +296,10 @@ impl<F: PrimeField> SumcheckProverState<F> {
             // variable; the eager path (stream_k == 0) never touches it after init.
             let is_stream_round = self.round <= self.stream_k;
             if is_stream_round {
-                let old_len = self.stream_eq_table.len();
-                let mut new_table: Vec<F> = Vec::with_capacity(old_len * 2);
                 let one_minus_r = F::one() - r;
-                for i in 0..old_len {
-                    new_table.push(self.stream_eq_table[i] * one_minus_r);
-                }
-                for i in 0..old_len {
-                    new_table.push(self.stream_eq_table[i] * r);
-                }
-                self.stream_eq_table = new_table;
+                let low = self.stream_eq_table.iter().map(|eq| *eq * one_minus_r);
+                let high = self.stream_eq_table.iter().map(|eq| *eq * r);
+                self.stream_eq_table = low.chain(high).collect();
             }
             cfg_iter_mut!(self.mle_slots).for_each(|slot| {
                 if let MleSlot::Materialized(mle) = slot {

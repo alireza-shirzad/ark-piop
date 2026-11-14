@@ -44,6 +44,13 @@ impl<B: SnarkBackend> TrackerCore for VerifierTracker<B> {
             .map_err(crate::errors::SnarkError::from)
     }
 
+    fn append_statement(&mut self, label: &'static [u8], msg: &[u8]) -> SnarkResult<()> {
+        self.state
+            .transcript
+            .append_message(label, msg)
+            .map_err(crate::errors::SnarkError::from)
+    }
+
     fn track_empty_virtual_poly(&mut self) -> TrackerID {
         VerifierTracker::track_empty_virtual_poly(
             self,

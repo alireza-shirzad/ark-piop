@@ -19,7 +19,7 @@ use crate::{
     errors::SnarkResult,
     pcs::PolynomialCommitment,
     piop::keyed_sumcheck::{
-        KeyedSumcheckVerifierInput,
+        KeyedSumcheckVerifierInput, PublicKeys,
         reduction::{KeyedSumRelation, KeyedTerm, verify_keyed_sums},
     },
     prover::structs::proof::SNARKProof,
@@ -270,6 +270,16 @@ where
         self.tracker_rc.borrow_mut().set_proof_ref(proof);
     }
 
+    /// Append part of the statement that both sides hold, such as a digest
+    /// of a public input, so that every later challenge depends on it.
+    pub fn append_statement(&mut self, label: &'static [u8], msg: &[u8]) -> SnarkResult<()> {
+        crate::tracker_core::TrackerCore::append_statement(
+            &mut *self.tracker_rc.borrow_mut(),
+            label,
+            msg,
+        )
+    }
+
     #[instrument(level = "debug", skip(self))]
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
@@ -340,12 +350,25 @@ where
         &mut self,
         input: KeyedSumcheckVerifierInput<B>,
     ) -> SnarkResult<()> {
+        self.add_mv_keyed_sum_claim_with_public(input, PublicKeys::default())
+    }
+
+    /// The verifier's half of
+    /// [`ArgProver::add_mv_keyed_sum_claim_with_public`](crate::prover::ArgProver::add_mv_keyed_sum_claim_with_public).
+    /// The public keys are summed here, in the clear, when the claim is
+    /// checked.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim_with_public(
+        &mut self,
+        input: KeyedSumcheckVerifierInput<B>,
+        public: PublicKeys<B::F>,
+    ) -> SnarkResult<()> {
         input
-            .check_shape()
+            .check_shape(&public)
             .map_err(VerifierError::VerifierInputShapeError)?;
         self.tracker_rc
             .borrow_mut()
-            .add_mv_keyed_sum_claim(input.relation());
+            .add_mv_keyed_sum_claim(input.relation(public));
         Ok(())
     }
 
@@ -486,6 +509,7 @@ where
                 fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
                 gxs: vec![KeyedTerm::Poly(super_id)],
                 mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+                public: PublicKeys::default(),
             });
         }
 

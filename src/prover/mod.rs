@@ -18,7 +18,7 @@ use crate::{
     pcs::PCS,
     piop::{
         keyed_sumcheck::{
-            KeyedSumcheckProverInput,
+            KeyedSumcheckProverInput, PublicKeys,
             reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums},
         },
         lookup_check,
@@ -311,6 +311,16 @@ where
             .clone()
     }
 
+    /// Append part of the statement that both sides hold, such as a digest
+    /// of a public input, so that every later challenge depends on it.
+    pub fn append_statement(&mut self, label: &'static [u8], msg: &[u8]) -> SnarkResult<()> {
+        crate::tracker_core::TrackerCore::append_statement(
+            &mut *self.tracker_rc.borrow_mut(),
+            label,
+            msg,
+        )
+    }
+
     #[instrument(level = "trace", skip(self))]
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> SnarkResult<B::F> {
         let res = self.tracker_rc.borrow_mut().get_and_append_challenge(label);
@@ -435,14 +445,28 @@ where
         &mut self,
         input: KeyedSumcheckProverInput<B>,
     ) -> SnarkResult<()> {
+        self.add_mv_keyed_sum_claim_with_public(input, PublicKeys::default())
+    }
+
+    /// [`Self::add_mv_keyed_sum_claim`] with the keys of `public` added to
+    /// their sides. The caller binds them to the transcript before the proof
+    /// is built. A side with public keys may have no columns.
+    #[instrument(level = "debug", skip_all)]
+    pub fn add_mv_keyed_sum_claim_with_public(
+        &mut self,
+        input: KeyedSumcheckProverInput<B>,
+        public: PublicKeys<B::F>,
+    ) -> SnarkResult<()> {
         #[cfg(feature = "honest-prover")]
         {
             input
-                .check_shape()
+                .check_shape(&public)
                 .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
-            crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(&input)?;
+            crate::piop::keyed_sumcheck::KeyedSumcheck::<B>::honest_prover_check_helper(
+                &input, &public,
+            )?;
         }
-        self.add_mv_keyed_sum_claim_unchecked(input)
+        self.push_keyed_sum_claim(input, public)
     }
 
     /// [`Self::add_mv_keyed_sum_claim`] without the check that
@@ -454,12 +478,20 @@ where
         &mut self,
         input: KeyedSumcheckProverInput<B>,
     ) -> SnarkResult<()> {
+        self.push_keyed_sum_claim(input, PublicKeys::default())
+    }
+
+    fn push_keyed_sum_claim(
+        &mut self,
+        input: KeyedSumcheckProverInput<B>,
+        public: PublicKeys<B::F>,
+    ) -> SnarkResult<()> {
         input
-            .check_shape()
+            .check_shape(&public)
             .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
         self.tracker_rc
             .borrow_mut()
-            .add_mv_keyed_sum_claim(input.relation());
+            .add_mv_keyed_sum_claim(input.relation(public));
         Ok(())
     }
 
@@ -597,6 +629,7 @@ where
                 fxs: sub_ids.into_iter().map(KeyedTerm::Poly).collect(),
                 gxs: vec![KeyedTerm::Poly(super_id)],
                 mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+                public: PublicKeys::default(),
             });
         }
 

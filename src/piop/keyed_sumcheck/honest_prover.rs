@@ -2,6 +2,8 @@
 use super::KeyedSumcheck;
 use super::KeyedSumcheckProverInput;
 #[cfg(feature = "honest-prover")]
+use super::PublicKeys;
+#[cfg(feature = "honest-prover")]
 use crate::errors::SnarkResult;
 use crate::{SnarkBackend, piop::DeepClone, prover::ArgProver};
 #[cfg(feature = "honest-prover")]
@@ -42,10 +44,11 @@ where
     // TODO: parallelize
     pub(crate) fn honest_prover_check_helper(
         input: &KeyedSumcheckProverInput<B>,
+        public: &PublicKeys<B::F>,
     ) -> SnarkResult<()> {
         use crate::errors::InputShapeError::EmptyInput;
         use std::collections::BTreeMap;
-        if input.fxs.is_empty() {
+        if input.fxs.is_empty() && public[0].is_empty() {
             use crate::{
                 errors::SnarkError,
                 prover::errors::{HonestProverError, ProverError},
@@ -67,7 +70,7 @@ where
             )));
         }
 
-        if input.gxs.is_empty() {
+        if input.gxs.is_empty() && public[1].is_empty() {
             use crate::errors::InputShapeError::EmptyInput;
             use crate::{
                 errors::SnarkError,
@@ -108,6 +111,11 @@ where
                         .entry(col[row % col.len()])
                         .or_insert(B::F::zero()) += weight;
                 }
+            }
+        }
+        for (keys, sign) in public.iter().zip([B::F::one(), -B::F::one()]) {
+            for key in keys.iter().flat_map(|keys| keys.iter()) {
+                *bookkeeping_map.entry(*key).or_insert(B::F::zero()) += sign;
             }
         }
 

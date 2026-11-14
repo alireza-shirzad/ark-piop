@@ -38,8 +38,14 @@ use crate::{
 use derivative::Derivative;
 use either::Either;
 use reduction::{ColumnEvals, KeyedSumRelation, KeyedTerm, prove_keyed_sums, verify_keyed_sums};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, sync::Arc};
 pub struct KeyedSumcheck<B: SnarkBackend>(#[doc(hidden)] PhantomData<B>);
+
+/// Keys of the `f` side and of the `g` side whose fractions `1/(key - gamma)`
+/// both parties hold in the clear. The verifier sums them itself, so they
+/// need no helper and no GKR instance. Like every column, they have to be
+/// fixed before the first `gamma`: the caller binds them to the transcript.
+pub type PublicKeys<F> = [Vec<Arc<[F]>>; 2];
 
 #[derive(Derivative)]
 #[derivative(Debug(bound = ""))]
@@ -68,7 +74,7 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
 
     #[cfg(feature = "honest-prover")]
     fn honest_prover_check(input: Self::ProverInput) -> SnarkResult<Self::ProverOutput> {
-        Self::honest_prover_check_helper(&input)
+        Self::honest_prover_check_helper(&input, &PublicKeys::default())
     }
 
     fn prove_inner(
@@ -78,9 +84,13 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         // The verifier refuses these shapes before it reads the proof, and
         // so does the deferred claim: nothing is written for them here.
         input
-            .check_shape()
+            .check_shape(&PublicKeys::default())
             .map_err(|shape| ProverError::HonestProverError(WrongInputShape(shape)))?;
-        prove_keyed_sums(prover, &[input.relation()], ColumnEvals::new())
+        prove_keyed_sums(
+            prover,
+            &[input.relation(PublicKeys::default())],
+            ColumnEvals::new(),
+        )
     }
 
     fn verify_inner(
@@ -88,17 +98,21 @@ impl<B: SnarkBackend> PIOP<B> for KeyedSumcheck<B> {
         input: Self::VerifierInput,
     ) -> SnarkResult<Self::VerifierOutput> {
         input
-            .check_shape()
+            .check_shape(&PublicKeys::default())
             .map_err(|shape| SnarkError::VerifierError(VerifierInputShapeError(shape)))?;
-        verify_keyed_sums(verifier, &[input.relation()])
+        verify_keyed_sums(verifier, &[input.relation(PublicKeys::default())])
     }
 }
 
-/// Each side of a keyed sum needs a column, and a multiplicity slot per
-/// column. The lengths are those of `fxs`, `mfxs`, `gxs` and `mgxs`.
-fn check_shape([fxs, mfxs, gxs, mgxs]: [usize; 4]) -> Result<(), InputShapeError> {
-    for (cols, mults) in [(fxs, mfxs), (gxs, mgxs)] {
-        if cols == 0 {
+/// Each side of a keyed sum needs a column or a list of public keys, and a
+/// multiplicity slot per column. The lengths are those of `fxs`, `mfxs`,
+/// `gxs` and `mgxs`.
+fn check_shape<F>(
+    [fxs, mfxs, gxs, mgxs]: [usize; 4],
+    public: &PublicKeys<F>,
+) -> Result<(), InputShapeError> {
+    for ((cols, mults), public) in [(fxs, mfxs), (gxs, mgxs)].into_iter().zip(public) {
+        if cols == 0 && public.is_empty() {
             return Err(EmptyInput);
         }
         if cols != mults {
@@ -112,17 +126,20 @@ fn check_shape([fxs, mfxs, gxs, mgxs]: [usize; 4]) -> Result<(), InputShapeError
 }
 
 impl<B: SnarkBackend> KeyedSumcheckProverInput<B> {
-    pub(crate) fn check_shape(&self) -> Result<(), InputShapeError> {
-        check_shape([
-            self.fxs.len(),
-            self.mfxs.len(),
-            self.gxs.len(),
-            self.mgxs.len(),
-        ])
+    pub(crate) fn check_shape(&self, public: &PublicKeys<B::F>) -> Result<(), InputShapeError> {
+        check_shape(
+            [
+                self.fxs.len(),
+                self.mfxs.len(),
+                self.gxs.len(),
+                self.mgxs.len(),
+            ],
+            public,
+        )
     }
 
-    /// The relation the input states, by tracker id.
-    pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
+    /// The relation the input states with `public`, by tracker id.
+    pub(crate) fn relation(&self, public: PublicKeys<B::F>) -> KeyedSumRelation<B::F> {
         KeyedSumRelation {
             fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
             mfxs: self
@@ -136,22 +153,26 @@ impl<B: SnarkBackend> KeyedSumcheckProverInput<B> {
                 .iter()
                 .map(|m| m.as_ref().map(KeyedTerm::from))
                 .collect(),
+            public,
         }
     }
 }
 
 impl<B: SnarkBackend> KeyedSumcheckVerifierInput<B> {
-    pub(crate) fn check_shape(&self) -> Result<(), InputShapeError> {
-        check_shape([
-            self.fxs.len(),
-            self.mfxs.len(),
-            self.gxs.len(),
-            self.mgxs.len(),
-        ])
+    pub(crate) fn check_shape(&self, public: &PublicKeys<B::F>) -> Result<(), InputShapeError> {
+        check_shape(
+            [
+                self.fxs.len(),
+                self.mfxs.len(),
+                self.gxs.len(),
+                self.mgxs.len(),
+            ],
+            public,
+        )
     }
 
-    /// The relation the input states, by tracker id.
-    pub(crate) fn relation(&self) -> KeyedSumRelation<B::F> {
+    /// The relation the input states with `public`, by tracker id.
+    pub(crate) fn relation(&self, public: PublicKeys<B::F>) -> KeyedSumRelation<B::F> {
         KeyedSumRelation {
             fxs: self.fxs.iter().map(KeyedTerm::from).collect(),
             mfxs: self
@@ -165,6 +186,7 @@ impl<B: SnarkBackend> KeyedSumcheckVerifierInput<B> {
                 .iter()
                 .map(|m| m.as_ref().map(KeyedTerm::from))
                 .collect(),
+            public,
         }
     }
 }
