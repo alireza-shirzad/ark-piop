@@ -90,6 +90,10 @@ pub(super) enum Term<F> {
 /// The terms of the `f` side and of the `g` side of a relation.
 pub(super) type RelationPlan<F> = [Vec<Term<F>>; 2];
 
+/// The `gamma` of a relation, with the sums the prover sent for its `f` side
+/// and its `g` side.
+pub(super) type RelationSums<F> = (F, [F; 2]);
+
 /// Where the multiplicity `m` of a single column goes. Which one follows
 /// from the sizes alone, so both sides take the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,10 +312,10 @@ pub(super) fn reduce_term<T: TrackerCore, P: Party<T>>(
     }
 }
 
-/// Reduces `relations` to sumcheck and zerocheck claims. Returns the sum of
-/// the `f` side and of the `g` side of each; comparing them is left to the
-/// verifier, so that a prover on a false statement still produces a proof
-/// to reject.
+/// Reduces `relations` to sumcheck and zerocheck claims. Returns the
+/// `gamma` of each, with the sum of its `f` side and of its `g` side less
+/// their public keys; comparing them is left to the verifier, so that a
+/// prover on a false statement still produces a proof to reject.
 ///
 /// A relation draws its `gamma` when its turn comes, after the helpers and
 /// sums of the relations before it. That is as good as drawing all of them
@@ -323,13 +327,14 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
     tracker: &mut T,
     party: &mut P,
     relations: &[KeyedSumRelation<T::F>],
-) -> SnarkResult<Vec<[T::F; 2]>> {
+) -> SnarkResult<Vec<RelationSums<T::F>>> {
     let plan = plan_relations(tracker, relations).map_err(|reason| party.reject(reason))?;
     let mut sums = Vec::with_capacity(plan.len());
-    for sides in &plan {
+    for (sides, relation) in plan.iter().zip(relations) {
         let mut relation_sums = [T::F::zero(); 2];
-        if sides.iter().any(|side| !side.is_empty()) {
-            let gamma = tracker.get_and_append_challenge(b"gamma")?;
+        let mut gamma = T::F::zero();
+        if !relation.is_empty() {
+            gamma = tracker.get_and_append_challenge(b"gamma")?;
             party.start_relation(sides, gamma);
             for (side, sum) in sides.iter().zip(&mut relation_sums) {
                 for term in side {
@@ -337,21 +342,30 @@ pub(super) fn reduce_keyed_sums<T: TrackerCore, P: Party<T>>(
                 }
             }
         }
-        sums.push(relation_sums);
+        sums.push((gamma, relation_sums));
     }
     Ok(sums)
 }
 
-/// Checks that the two sides of every relation have the same sum. The sums
-/// are those the prover sent, which the sumchecks tie to the helpers and
-/// the zerochecks to the columns; here they only have to balance.
-pub(super) fn check_relation_sums<F: Field>(sums: &[[F; 2]]) -> Result<(), String> {
-    match sums.iter().position(|[f, g]| f != g) {
-        Some(relation) => Err(format!(
-            "the two sides of keyed sum {relation} have different sums"
-        )),
-        None => Ok(()),
+/// Checks that the two sides of every relation have the same sum, once its
+/// public keys are added to the sums the prover sent. Those the sumchecks tie
+/// to the helpers and the zerochecks to the columns; here they only have to
+/// balance.
+pub(super) fn check_relation_sums<F: Field>(
+    relations: &[KeyedSumRelation<F>],
+    sums: &[RelationSums<F>],
+) -> Result<(), String> {
+    for (index, (relation, (gamma, [f, g]))) in relations.iter().zip(sums).enumerate() {
+        let [public_f, public_g] = relation
+            .public_sums(*gamma)
+            .ok_or_else(|| format!("gamma is a public key of keyed sum {index}"))?;
+        if *f + public_f != *g + public_g {
+            return Err(format!(
+                "the two sides of keyed sum {index} have different sums"
+            ));
+        }
     }
+    Ok(())
 }
 
 /// Rows of the helpers built and committed at once: the tables and MSM

@@ -42,6 +42,9 @@ pub trait TrackerCore {
     /// both sides have it.
     fn append_field_element(&mut self, label: &'static [u8], element: &Self::F) -> SnarkResult<()>;
 
+    /// Append bytes of the statement that both sides hold.
+    fn append_statement(&mut self, label: &'static [u8], msg: &[u8]) -> SnarkResult<()>;
+
     /// An empty virtual polynomial (identity for addition).
     fn track_empty_virtual_poly(&mut self) -> TrackerID;
 

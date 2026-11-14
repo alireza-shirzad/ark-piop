@@ -60,6 +60,8 @@ pub enum OracleKind {
 pub struct Oracle<F: Field + 'static> {
     log_size: usize,
     inner: InnerOracle<F>,
+    /// The table of a public polynomial, for a verifier that reads it whole.
+    evaluations: Option<Arc<[F]>>,
 }
 
 impl<F: 'static + Field> Oracle<F> {
@@ -67,10 +69,21 @@ impl<F: 'static + Field> Oracle<F> {
         self.log_size
     }
 
+    /// Attaches the table the oracle evaluates, which the verifier holds.
+    pub fn with_evaluations(mut self, evaluations: Arc<[F]>) -> Self {
+        self.evaluations = Some(evaluations);
+        self
+    }
+
+    pub fn evaluations(&self) -> Option<&Arc<[F]>> {
+        self.evaluations.as_ref()
+    }
+
     pub fn new_univariate(log_size: usize, f: impl CloneableFn<F, F> + 'static) -> Self {
         Self {
             log_size,
             inner: InnerOracle::Univariate(Arc::new(f)),
+            evaluations: None,
         }
     }
 
@@ -78,6 +91,7 @@ impl<F: 'static + Field> Oracle<F> {
         Self {
             log_size,
             inner: InnerOracle::Multivariate(Arc::new(f)),
+            evaluations: None,
         }
     }
 
@@ -85,6 +99,7 @@ impl<F: 'static + Field> Oracle<F> {
         Self {
             log_size,
             inner: InnerOracle::Constant(c),
+            evaluations: None,
         }
     }
 
@@ -144,6 +159,21 @@ where
 
     pub fn tracker(&self) -> Rc<RefCell<VerifierTracker<B>>> {
         self.tracker.clone()
+    }
+
+    /// The table of a base oracle tracked
+    /// [`with_evaluations`](Oracle::with_evaluations).
+    pub fn evaluations(&self) -> Option<Arc<[B::F]>> {
+        let Either::Left(id) = self.id_or_const else {
+            return None;
+        };
+        self.tracker
+            .borrow()
+            .state
+            .base_oracles
+            .get(&id)?
+            .evaluations()
+            .cloned()
     }
 
     pub(crate) fn detach(&self) -> DetachedHandle<B::F> {

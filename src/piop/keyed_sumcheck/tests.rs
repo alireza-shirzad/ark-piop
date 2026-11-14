@@ -327,6 +327,7 @@ impl Session {
                 mfxs: mults(f),
                 gxs: terms(g),
                 mgxs: mults(g),
+                public: Default::default(),
             })
             .collect();
         Self {
@@ -999,8 +1000,9 @@ fn balances_under(session: &Session, plan: &[InstancePlan<F>], gammas: &[F]) -> 
     let reduction = Reduction {
         plan: batch.plan,
         roots: instances.iter().map(root).collect(),
+        gammas: batch.gammas,
     };
-    check_batch_sums(&reduction).is_ok()
+    check_batch_sums(&reduction, &session.relations).is_ok()
 }
 
 /// Two relations in one batch, each false, with errors that cancel: what
@@ -1288,13 +1290,17 @@ fn batch_sums_are_compared_as_fractions_and_refuse_a_zero_denominator() {
         mults: None,
     };
     let check = |roots: &[(Side, [u64; 2])]| {
-        check_batch_sums(&Reduction {
-            plan: roots.iter().map(|(side, _)| instance(*side)).collect(),
-            roots: roots
-                .iter()
-                .map(|(_, [p, q])| [F::from(*p), F::from(*q)])
-                .collect(),
-        })
+        check_batch_sums(
+            &Reduction {
+                plan: roots.iter().map(|(side, _)| instance(*side)).collect(),
+                roots: roots
+                    .iter()
+                    .map(|(_, [p, q])| [F::from(*p), F::from(*q)])
+                    .collect(),
+                gammas: Vec::new(),
+            },
+            &[],
+        )
     };
     use Side::{F as Left, G as Right};
     check(&[]).unwrap();
@@ -2429,6 +2435,7 @@ fn keyed_e2e(
         mfxs: mfxs.iter().map(|m| m.as_ref().map(Into::into)).collect(),
         gxs: gxs.iter().map(KeyedTerm::from).collect(),
         mgxs: mgxs.iter().map(|m| m.as_ref().map(Into::into)).collect(),
+        public: Default::default(),
     };
     let plan = plan_of(&prover.tracker().borrow(), &[relation]).unwrap();
     KeyedSumcheck::<B>::prove(
@@ -2613,6 +2620,7 @@ fn constant_operands_are_checked_against_the_gkr_claims() {
                 ],
                 gxs: vec![KeyedTerm::Poly(session.ids[0])],
                 mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+                public: Default::default(),
             }
         };
         let counts = tally(
@@ -2662,6 +2670,7 @@ fn constant_entry_has_the_gamma_of_its_relation() {
                 mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), None],
                 gxs: vec![KeyedTerm::Poly(session.ids[0])],
                 mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+                public: Default::default(),
             });
             session
         };
@@ -2832,7 +2841,8 @@ fn honest_check_agrees_with_protocol_on_mixed_col_mult_nv() {
                         mfxs,
                         mgxs,
                     };
-                    let checked = KeyedSumcheck::<B>::honest_prover_check_helper(&input);
+                    let checked =
+                        KeyedSumcheck::<B>::honest_prover_check_helper(&input, &Default::default());
                     assert_eq!(checked.is_ok(), holds, "{col_rows} x {weight_rows}");
                 }
                 let proved = keyed_e2e(&fs, gs);
@@ -3248,6 +3258,7 @@ fn reduce_lookup_claims_the_slow_way(prover: &mut ArgProver<B>) {
             fxs: subs.into_iter().map(KeyedTerm::Poly).collect(),
             gxs: vec![KeyedTerm::Poly(table)],
             mgxs: vec![Some(KeyedTerm::Poly(multiplicity))],
+            public: Default::default(),
         });
     }
     prove_keyed_sums(prover, &relations, evals).unwrap();
@@ -4006,6 +4017,7 @@ fn logup_gammas_are_drawn_per_relation_in_turn_after_every_multiplicity() {
                 mfxs: vec![None; 2],
                 gxs: vec![KeyedTerm::Poly(tables[r])],
                 mgxs: vec![Some(KeyedTerm::Poly(counts[r]))],
+                public: Default::default(),
             })
             .collect();
         {
@@ -4847,6 +4859,7 @@ fn gkr_on_fake_leaves_beside_a_constant_operand_is_rejected() {
                 mfxs: vec![Some(KeyedTerm::Poly(session.ids[3])), Some(constant(4))],
                 gxs: vec![KeyedTerm::Poly(session.ids[0])],
                 mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+                public: Default::default(),
             }];
             session
         };
@@ -4944,6 +4957,7 @@ fn multiplicities_chosen_after_gamma_are_rejected() {
             mfxs: vec![None],
             gxs: vec![KeyedTerm::Poly(table_id)],
             mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
+            public: Default::default(),
         };
         {
             let tracker = prover.tracker();
@@ -5029,6 +5043,7 @@ fn gammas_are_drawn_per_relation_in_order_after_every_multiplicity() {
                 mfxs: vec![None; 2],
                 gxs: vec![KeyedTerm::Poly(tables[r])],
                 mgxs: vec![Some(KeyedTerm::Poly(counts[r]))],
+                public: Default::default(),
             })
             .collect();
         {
@@ -5077,6 +5092,7 @@ fn relation_without_entries_draws_no_gamma() {
             mfxs: Vec::new(),
             gxs: Vec::new(),
             mgxs: Vec::new(),
+            public: Default::default(),
         };
         let columns = [fv(0..8), fv((0..8).rev())];
         let next_challenge = |session: &Session| {
@@ -5219,6 +5235,7 @@ fn constant_one_multiplicity_wider_than_its_column_is_a_values_instance() {
             })],
             gxs: vec![KeyedTerm::Poly(session.ids[0])],
             mgxs: vec![Some(KeyedTerm::Poly(session.ids[1]))],
+            public: Default::default(),
         }];
         let plan = session.plan();
         assert_eq!((plan[0].claim_nv, plan[0].stack_log), (3, 0));
@@ -5240,6 +5257,7 @@ fn keyed_sum_naming_an_untracked_polynomial_is_refused() {
             mfxs: vec![None],
             gxs: vec![KeyedTerm::Poly(session.ids[1])],
             mgxs: vec![None],
+            public: Default::default(),
         };
         assert!(plan_of(&session.prover.tracker().borrow(), &[relation]).is_err());
     });
@@ -5389,6 +5407,7 @@ fn rejected_lookup_stays_rejected_on_a_second_verify() {
             mfxs: vec![None],
             gxs: vec![KeyedTerm::Poly(table_id)],
             mgxs: vec![Some(KeyedTerm::Poly(counts_id))],
+            public: Default::default(),
         };
         prove_keyed_sums(&mut prover, &[relation], ColumnEvals::new()).unwrap();
         let proof = prover.build_proof().unwrap();
@@ -5448,4 +5467,66 @@ fn lookup_that_could_not_be_reduced_fails_every_later_verify() {
         assert_verifier_error(verifier.verify().unwrap_err());
         assert_verifier_error(verifier.verify().unwrap_err());
     });
+}
+
+/// A committed column against keys both sides hold, which the verifier sums
+/// itself: the keys must be the column's multiset, and the verifier sums its
+/// own keys, not the prover's.
+#[test]
+fn public_keys_balance_a_committed_column() {
+    under_each_protocol(|_| {
+        let col = fv([3, 1, 4, 1, 5, 9, 2, 6]);
+        let public = |keys: &[F]| [Vec::new(), vec![Arc::<[F]>::from(keys)]];
+        let run = |prover_keys: &[F], verifier_keys: &[F]| -> SnarkResult<()> {
+            let (mut prover, mut verifier) = setup();
+            let handle = commit(&mut prover, &col);
+            prover.add_mv_keyed_sum_claim_with_public(
+                KeyedSumcheckProverInput {
+                    fxs: vec![handle.clone()],
+                    gxs: Vec::new(),
+                    mfxs: vec![None],
+                    mgxs: Vec::new(),
+                },
+                public(prover_keys),
+            )?;
+            let proof = prover.build_proof()?;
+            verifier.set_proof_ref(&proof);
+            let oracle = verifier.track_mv_com_by_id(handle.id())?;
+            verifier.add_mv_keyed_sum_claim_with_public(
+                KeyedSumcheckVerifierInput {
+                    fxs: vec![oracle],
+                    gxs: Vec::new(),
+                    mfxs: vec![None],
+                    mgxs: Vec::new(),
+                },
+                public(verifier_keys),
+            )?;
+            verifier.verify()
+        };
+        let keys = fv([1, 1, 2, 3, 4, 5, 6, 9]);
+        run(&keys, &keys).unwrap();
+        for wrong in [fv([1, 2, 3, 4, 5, 6, 9, 9]), fv([1, 1, 2, 3, 4, 5, 6])] {
+            assert_false_statement_rejected(run(&wrong, &wrong));
+            assert_verifier_error(run(&keys, &wrong).unwrap_err());
+        }
+    });
+}
+
+/// Neither side of a keyed sum may be empty: a side needs a column or keys.
+#[test]
+fn side_without_columns_or_keys_is_refused() {
+    let (mut prover, _) = setup();
+    let handle = commit(&mut prover, &fv([1, 2]));
+    let input = || KeyedSumcheckProverInput {
+        fxs: vec![handle.clone()],
+        gxs: Vec::new(),
+        mfxs: vec![None],
+        mgxs: Vec::new(),
+    };
+    assert!(
+        prover
+            .add_mv_keyed_sum_claim_with_public(input(), Default::default())
+            .is_err()
+    );
+    assert!(prover.add_mv_keyed_sum_claim(input()).is_err());
 }
